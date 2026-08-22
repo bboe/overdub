@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/bboe/overdub/internal/alexa"
 	"github.com/bboe/overdub/internal/evdev"
 )
 
@@ -18,6 +20,8 @@ const (
 	actionKey  = 138
 	uinputName = "mtk-kpd"
 )
+
+var chiming int32
 
 func main() {
 	if err := intercept(); err != nil {
@@ -29,6 +33,16 @@ func main() {
 func intercept() error {
 	if err := waitForNode(inputNode, 60*time.Second); err != nil {
 		return err
+	}
+
+	chimeURL, chimeStopped, err := alexa.ServeChime()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; presses will be silent\n", err)
+	} else {
+		go func() {
+			fmt.Fprintf(os.Stderr, "overdub: chime server stopped: %v\n", <-chimeStopped)
+			os.Exit(1)
+		}()
 	}
 
 	file, err := os.Open(inputNode)
@@ -71,6 +85,14 @@ func intercept() error {
 	return route(file, uinput.Emit, actionKey, func(held time.Duration) {
 		fmt.Printf("%s intercepted %d (held %v)\n", time.Now().Format("15:04:05.000"),
 			actionKey, held.Round(time.Millisecond))
+		if chimeURL != "" && atomic.CompareAndSwapInt32(&chiming, 0, 1) {
+			go func() {
+				defer atomic.StoreInt32(&chiming, 0)
+				if err := alexa.Speak(chimeURL); err != nil {
+					fmt.Fprintf(os.Stderr, "chime: %v\n", err)
+				}
+			}()
+		}
 	})
 }
 

@@ -31,5 +31,8 @@ automations. Prefer targeted tests.
 adb shell 'su -c "sendevent /dev/input/event1 1 138 1; sendevent /dev/input/event1 0 0 0;
                   sendevent /dev/input/event1 1 138 0; sendevent /dev/input/event1 0 0 0"'
 
+# Alexa's own verdict on a playback attempt
+adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'
+
 adb shell 'su -c "cat /data/local/tmp/overdub.log"'    # daemon log, truncated per boot
 ```

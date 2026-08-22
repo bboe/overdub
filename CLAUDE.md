@@ -19,15 +19,18 @@ GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
-Tests cover what is hand-rolled and checkable in isolation: the event layout,
-the key bitmap, the ioctl numbers. They run as 32-bit ARM under qemu, because
-the tree compiles for nothing else. Anything touching the hardware or Amazon's
-stack is verified on the device instead.
+Tests cover what is hand-rolled and checkable in isolation: the wire formats,
+the event layout, the parsers, and the one encoding Alexa's demuxer accepts.
+They run as 32-bit ARM under qemu, because the tree compiles for nothing else.
+Anything touching the hardware or Amazon's stack is verified on the device
+instead.
 
 ## Layout
 
 ```
 main.go          the constants, and the interception loop
+internal/alexa   speech through Alexa: the intent, the clip, and the server
+                 that serves it to her
 internal/evdev   evdev and uinput primitives
 ```
 

@@ -1,7 +1,8 @@
 # overdub
 
 Take over the **action button** on a rooted Echo Dot (2nd Generation), while
-stock Alexa keeps running. A press is logged and goes no further.
+stock Alexa keeps running. A press plays a chime through Alexa's own player, so
+she ducks and mixes it the way she does her own speech.
 
 ## Scope
 
@@ -39,7 +40,7 @@ only thing taken, and if the daemon dies it goes straight back to her.
 
 For a local voice satellite with Amazon out of the picture, use one of those. To
 keep the Echo you have -- her voice, her music, her timers, the mute button --
-and gain a button of your own, use this one.
+and gain a button of your own that can also talk back, use this one.
 
 ## Requirements
 
@@ -129,15 +130,10 @@ because `/data/local/bin` is on nobody's `PATH`:
 adb shell 'su -c "/data/local/bin/overdub"'
 ```
 
-It takes no arguments. A press of the action button is logged and nothing else;
-mute and volume keep working. Everything it needs is fixed in the binary,
-because none of it has a second sensible value on this hardware: `event1` and
-keycode 138 for the action button, and `mtk-kpd` for the passthrough clone,
-which Android needs in order to apply the same keylayout so mute keeps working.
-
-Run by hand it prints to the adb console. The log is the boot script's doing,
-so `adb shell su -c 'cat /data/local/tmp/overdub.log'` shows the supervised
-daemon rather than this one.
+There are no flags. Everything is fixed in the binary, because none of it has a
+second sensible value on this hardware: `event1` and keycode 138 for the action
+button, and `mtk-kpd` for the passthrough clone, which Android needs in order to
+apply the same keylayout so mute keeps working.
 
 ## Uninstall
 
@@ -159,13 +155,15 @@ Amazon's stack is untouched, because installing never touched it.
 ## Troubleshooting
 
 ```sh
-adb shell 'su -c "cat /data/local/tmp/overdub.log"'   # truncated per boot
+adb shell 'su -c "cat /data/local/tmp/overdub.log"'      # truncated per boot
+adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
 ```
 
 | Symptom | Look at |
 |---|---|
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |
+| nothing is spoken | the daemon log. `Error: Not found; no service started.` means the Alexa stack is still suppressed: run `deploy/restore-amazon.sh` and reboot |
 
 ## How it works
 
@@ -183,6 +181,18 @@ each decision is defending against.
 ## Licence
 
 BSD 2-Clause; [LICENSE.txt](LICENSE.txt) carries the terms.
+
+`internal/alexa/chime.mp3` is original to this repository: two sine tones,
+concatenated and faded, so the licence covers it as it covers the code. It is
+synthesised rather than sampled, and this is what made it, byte for byte:
+
+```sh
+ffmpeg -y -loglevel error \
+  -f lavfi -i "sine=frequency=880:duration=0.18,volume=0.5" \
+  -f lavfi -i "sine=frequency=1320:duration=0.22,volume=0.5" \
+  -filter_complex "[0][1]concat=n=2:v=0:a=1,afade=t=out:st=0.30:d=0.10,aresample=24000" \
+  -c:a libmp3lame -b:a 48k -ar 24000 -ac 1 -write_xing 0 -id3v2_version 0 chime.mp3
+```
 
 This licence covers the code in this repository and nothing else. This
 repository contains no Amazon code. The Amazon names it does carry identify

@@ -37,10 +37,11 @@ to Magisk's `service.d` (inside `magisk.img` on Magisk 17.3, hence the `/sbin`
 path). That script is deliberately thin: Android has no user-level supervisor,
 and `init` would need an `.rc` entry in a ramdisk this Magisk cannot patch, so
 `service.d` is the hook and a shell loop is the restart. It supplies nothing:
-the daemon finds its own input node, and waits up to 60 seconds for it, because
-`service.d` runs before the input drivers are certainly up. Without the wait a
-cold boot spends its first restarts failing to open a node that is about to
-exist.
+the daemon carries its own audio and finds its own input node.
+
+The daemon waits up to 60 seconds for its input node, because `service.d` runs
+before the input drivers are certainly up. Without the wait a cold boot spends
+its first restarts failing to open a node that is about to exist.
 
 The loop counts its own restarts and truncates the log every twentieth, because
 a daemon that exits immediately would otherwise append a failure every five
