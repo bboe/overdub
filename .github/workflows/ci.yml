@@ -1,0 +1,46 @@
+name: CI
+
+on: [push, pull_request]
+
+# Nothing here writes to the repository, and this runs on pull requests from
+# anyone, so the token should not be able to either.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to commits rather than tags, for the same reason.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      # Both are expected to be silent.
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      # Vet for the target, not the runner: internal/evdev asserts a 32-bit
+      # timeval and does not compile anywhere else.
+      - run: GOOS=linux GOARCH=arm GOARM=7 go vet ./...
+
+      # Tests run as 32-bit ARM under qemu rather than natively: internal/evdev
+      # asserts a 32-bit timeval, so this tree does not compile for the runner
+      # at all. Running them at the target word size is the point, because
+      # struct input_event is 16 bytes there and 24 here.
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - run: GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...
+
+      - run: ./build.sh
+
+      # The shell is half of this repository, so it is linted like the Go.
+      - run: sudo apt-get install -y shellcheck
+      - run: bash -n build.sh deploy/*.sh
+      - run: shellcheck -S style build.sh deploy/*.sh
+      # A mode is invisible to every other check here: lint, vet, the tests and
+      # shellcheck all read these files rather than exec them. A script that
+      # lost its bit fails for the first person to run the command README.md
+      # gives, and nowhere before that.
+      - name: Shell scripts are executable
+        run: |
+          bad=$(git ls-files -s -- '*.sh' | awk '$1 != "100755" { print $4 }')
+          [ -z "$bad" ] || { echo "not executable:"; echo "$bad"; exit 1; }
