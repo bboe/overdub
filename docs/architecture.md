@@ -412,7 +412,10 @@ stopped reading parks every state and every other client behind it for the ten-
 second write deadline, and a second stalled client costs another ten. A client
 that cannot keep up overruns its queue and is dropped instead, which is what
 ESPHome itself does. Connections are capped for the same reason: one frame in
-flight each, and the product has to fit a 256 MB device.
+flight each, and the product has to fit a device with 512 MiB of RAM, of which
+`/proc/meminfo` reports 472 MiB usable. Every memory figure here is binary, and
+so is the file they come from: the kernel writes `kB` and means KiB, which is
+why a reading of it is divided by 1024 rather than by 1000.
 
 ## Discovery
 

@@ -1433,7 +1433,7 @@ func TestTheVolumePollSleepsUntilSomebodySubscribes(t *testing.T) {
 // The wake is what lets the poll sleep, so asking for it has to cost nothing
 // after the first time. The volume read forks a process, and a peer holding the
 // key can send SubscribeStatesRequest as fast as it likes: repeating the wake
-// would hand it a fork per request, on a device with 256MB of memory.
+// would hand it a fork per request, on a device with 512 MiB of memory.
 func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()

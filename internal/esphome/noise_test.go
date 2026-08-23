@@ -175,7 +175,7 @@ func TestReadNoiseFrameAcceptsTheLimitItself(t *testing.T) {
 // The handshake runs before a peer has proved anything, so what it can make the
 // daemon reserve is the number that matters. ESPHome allows 128 bytes there and
 // 32768 after; the product of the data bound and the connection cap has to fit
-// a 256 MB device besides.
+// a 512 MiB device besides.
 func TestTheFrameBoundsAreESPHomesAndFitTheDevice(t *testing.T) {
 	if maxHandshakeFrame != 128 || maxDataFrame != 32768 {
 		t.Errorf("bounds are %d and %d, want ESPHome's 128 and 32768", maxHandshakeFrame, maxDataFrame)
