@@ -28,9 +28,10 @@ instead.
 ## Layout
 
 ```
-main.go          the constants, and the interception loop
+main.go          the constants, and what a press does
 internal/alexa   speech through Alexa: the intent, the clip, and the server
                  that serves it to her
+internal/button  the exclusive grab, the clone, and the read loop
 internal/evdev   evdev and uinput primitives
 ```
 

@@ -17,6 +17,10 @@ const (
 
 	synReport = 0x00
 
+	// EV_KEY values. 2 is autorepeat, which the read loop ignores.
+	KeyRelease = 0
+	KeyPress   = 1
+
 	// _IOW('E', 0x90, int)
 	eviocgrab = 0x40044590
 

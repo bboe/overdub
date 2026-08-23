@@ -2,13 +2,18 @@
 
 ## Button interception
 
-`internal/evdev`, `intercept` in `main.go`. `event1` carries the action button
+`internal/button` over `internal/evdev`. `event1` carries the action button
 *and* mute, so an exclusive `EVIOCGRAB` takes both. The fix is a `uinput` clone
 advertising exactly the real key bitmap, named `mtk-kpd` so Android applies the
 same keylayout; 138 is consumed and the rest re-emitted. `EventHub` picks the
 clone up by inotify. Read the bitmap with `EVIOCGBIT`, never from sysfs: that
 file's word size differs from `/proc/bus/input/devices` here, and guessing wrong
 silently breaks mute.
+
+`main.go` is left holding the constants, the decision about what a press means,
+how long to wait for the node, and the signal handler. That is the seam every
+later feature arrives through: the package opens the node and reads it, and the
+decisions stay with the caller.
 
 A failed grab is fatal. Without the grab the real node still delivers to
 `EventHub`, so a clone that echoed anyway would land every key twice and mute
