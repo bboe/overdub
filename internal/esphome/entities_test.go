@@ -48,6 +48,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	}{
 		"uptime":      {s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing},
 		"wifi_signal": {s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement},
+		"volume":      {s.keyVolume, "Volume", "%", "", stateClassMeasurement},
 	}
 
 	seen := map[string]bool{}

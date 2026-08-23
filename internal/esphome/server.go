@@ -32,9 +32,13 @@ const (
 	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
 	clientKeepalive = 20 * time.Second
 
-	// MinSensorTick is the floor under PollSensors' ticker. It bounds that
-	// ticker rather than the push rate, which a subscriber's wake can exceed,
-	// and rather than the connection's life, which the ping now keeps.
+	// The shortest gap between two volume reads a wake can ask for, and the
+	// floor under a tick that is not positive.
+	minVolumeReadGap = time.Second
+
+	// MinSensorTick is the floor under PollSensors' ticker; PollVolume has none.
+	// It bounds that ticker rather than the push rate, which a subscriber's wake
+	// can exceed, and rather than the connection's life, which the ping keeps.
 	// docs/architecture.md has the measurement it came from.
 	MinSensorTick = 30 * time.Second
 
@@ -104,15 +108,18 @@ type Server struct {
 
 	keyUptime uint32
 	keyWifi   uint32
+	keyVolume uint32
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
 	uptime func() (float32, bool)
 	wifi   func() (float32, bool)
+	volume func() (float32, bool)
 
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
 	pingWait      time.Duration
+	volumeGap     time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -126,6 +133,7 @@ type Server struct {
 	// answered with is corrected by a read rather than by the next tick.
 	// Buffered by one and never blocked on: a wake already waiting is a read
 	// already coming.
+	volumeWake chan struct{}
 	sensorWake chan struct{}
 
 	logMu        sync.Mutex
@@ -143,12 +151,16 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		psk:           psk,
 		keyUptime:     entityKey("uptime"),
 		keyWifi:       entityKey("wifi_signal"),
+		keyVolume:     entityKey("volume"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
+		volume:        device.MusicVolumePercent,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
+		volumeGap:     minVolumeReadGap,
 		conns:         map[*conn]struct{}{},
 		published:     map[uint32]reading{},
+		volumeWake:    make(chan struct{}, 1),
 		sensorWake:    make(chan struct{}, 1),
 	}
 }
@@ -415,15 +427,17 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		// the device, as fast as it can send the request.
 		first := !conn.states
 		conn.states = true
-		// The snapshot first, then the poll is woken: a value not read for a
+		// The snapshot first, then the polls are woken: a value not read for a
 		// while is corrected a read later rather than withheld.
 		if err := s.sendSensorsAt(conn, s.snapshot()); err != nil {
 			return err
 		}
-		if first {
-			select {
-			case s.sensorWake <- struct{}{}:
-			default:
+		if first && !s.stateSubscriberBesides(conn) {
+			for _, wake := range []chan struct{}{s.volumeWake, s.sensorWake} {
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
 			}
 		}
 		return nil

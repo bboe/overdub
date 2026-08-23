@@ -1,6 +1,11 @@
 package device
 
-import "testing"
+import (
+	"context"
+	"os/exec"
+	"testing"
+	"time"
+)
 
 func TestParseUptimeTakesTheFirstField(t *testing.T) {
 	// /proc/uptime is uptime and idle time, and the idle time is larger on a
@@ -88,5 +93,212 @@ func TestParseWifiLevel(t *testing.T) {
 		if ok != tt.ok || got != tt.want {
 			t.Errorf("%s: parseWifiLevel = %v, %v; want %v, %v", tt.name, got, ok, tt.want, tt.ok)
 		}
+	}
+}
+
+// dumpsys audio as the Dot prints it, trimmed to three streams and to the
+// output devices that matter. Every stream carries a Max, and STREAM_ALARM's is
+// the same 30 here, so a parser that took the first one it found would look
+// correct on this device and be wrong on one where they differ. The Current
+// line is the real shape: hex device masks, a name in brackets, and a level
+// each, with the speaker somewhere in the middle rather than first.
+const audioDump = `- STREAM_MUSIC:
+   Mute count: 0
+   Max: 30
+   Current: 40000000 (default): 21, 2000000 (proxy): 21, 400 (hdmi): 30, 2 (speaker): 12, 4 (headset): 21, 200000 (aux_line): 30
+- STREAM_ALARM:
+   Mute count: 0
+   Max: 30
+   Current: 40000000 (default): 21, 2 (speaker): 21
+- STREAM_NOTIFICATION:
+   Mute count: 0
+   Max: 15
+   Current: 40000000 (default): 9, 2 (speaker): 9
+`
+
+func TestParseMusicVolume(t *testing.T) {
+	tests := []struct {
+		name string
+		dump string
+		want float32
+		ok   bool
+	}{
+		{"the Dot as it stands", audioDump, 40, true},
+		// STREAM_MUSIC is not first on every build, and every stream below it
+		// has a Current line of its own that would answer just as readily.
+		{"music is not the first stream",
+			"- STREAM_ALARM:\n   Max: 7\n   Current: 2 (speaker): 7\n" +
+				"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n", 50, true},
+		// Leaving the block has to stop the search, or the next stream answers.
+		{"music has no Current of its own",
+			"- STREAM_MUSIC:\n   Max: 30\n- STREAM_ALARM:\n   Current: 2 (speaker): 7\n", 0, false},
+		{"no music stream", "- STREAM_ALARM:\n   Max: 7\n   Current: 2 (speaker): 7\n", 0, false},
+		{"nothing at all", "", 0, false},
+		// The speaker is matched by name. A line that lists other devices and
+		// not the speaker is not one this Dot can answer from.
+		{"no speaker on the line",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 4 (headset): 21, 8 (headphone): 21\n", 0, false},
+		{"a level that is not a number",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): none\n", 0, false},
+		// No denominator, no reading. Assuming the Dot's usual 30 would report a
+		// percentage on a build whose scale is not 30, and a wrong percentage
+		// looks like a measurement where a missing one does not.
+		{"no maximum", "- STREAM_MUSIC:\n   Current: 2 (speaker): 15\n", 0, false},
+		{"a maximum of zero would divide by it",
+			"- STREAM_MUSIC:\n   Max: 0\n   Current: 2 (speaker): 15\n", 0, false},
+		{"a maximum that is not a number",
+			"- STREAM_MUSIC:\n   Max: 15 (of 150)\n   Current: 2 (speaker): 15\n", 0, false},
+		// Two maxima in one block is malformed, but it has to resolve the same way
+		// every time: the first is the stream's own, printed before its levels.
+		{"a second maximum inside the block does not replace the first",
+			"- STREAM_MUSIC:\n   Max: 30\n   Max: 15\n   Current: 2 (speaker): 15\n", 50, true},
+		{"a maximum printed after the level it scales",
+			"- STREAM_MUSIC:\n   Current: 2 (speaker): 15\n   Max: 30\n", 0, false},
+		{"silent", "- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 0\n", 0, true},
+		// A muted stream keeps the level it had, so the number beside the
+		// speaker is what it will return to rather than what is coming out.
+		{"muted",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n   Current: 2 (speaker): 15\n", 0, true},
+		{"muted more than once",
+			"- STREAM_MUSIC:\n   Mute count: 3\n   Max: 30\n   Current: 2 (speaker): 15\n", 0, true},
+		{"a mute count that will not parse is not a mute",
+			"- STREAM_MUSIC:\n   Mute count: no\n   Max: 30\n   Current: 2 (speaker): 15\n", 50, true},
+		// The reset on a stream header, which only a dump with two blocks for
+		// the same stream can show: the mute in the first must not answer for
+		// the second.
+		{"a mute in an earlier block of the same stream",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n" +
+				"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n", 50, true},
+		// Ordering inside the block is not ours to rely on: AOSP prints the
+		// count first, and the answer has to be the same if it does not.
+		{"a mute printed after the level",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n   Mute count: 1\n", 0, true},
+		{"a mute printed after the level, in a dump that goes on",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n   Mute count: 1\n" +
+				"- STREAM_ALARM:\n   Max: 30\n   Current: 2 (speaker): 7\n", 0, true},
+		// First wins, as it does for Max, rather than whichever came last.
+		{"two mute counts",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Mute count: 0\n   Max: 30\n" +
+				"   Current: 2 (speaker): 15\n", 0, true},
+		// The known-wrong shape, and the reason README and docs both say so: a
+		// cable in the line out is the level somebody hears, and this is not it.
+		{"a level on the aux jack is not the speaker's",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 200000 (aux_line): 30, 2 (speaker): 12\n", 40, true},
+		{"a mute on another stream",
+			"- STREAM_ALARM:\n   Mute count: 1\n   Max: 30\n" +
+				"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n", 50, true},
+		// The speaker first on the line, which this Dot never prints and another
+		// build might: the label has to be stripped before the fields are read.
+		{"the speaker listed first",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15, 4 (headset): 21\n", 50, true},
+		{"full", "- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 30\n", 100, true},
+		// The two numbers come from one call now, so they cannot disagree by
+		// timing -- but a level above the scale is still not a percentage.
+		{"above the maximum", "- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 44\n", 100, true},
+		{"below zero", "- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): -1\n", 0, true},
+		// The block ends at the left margin, not at the end of the dump. Without
+		// that, a section printed after the last stream answers for the stream,
+		// and it answers with a number that looks like a volume.
+		{"a later section carries Max and Current of its own",
+			"- STREAM_MUSIC:\n   Mute count: 0\n   Max: 30\n\n" +
+				"Ringer mode:\n   Max: 7\n   Current: 2 (speaker): 7\n", 0, false},
+		{"music is the last stream and reads normally",
+			"- STREAM_ALARM:\n   Max: 7\n   Current: 2 (speaker): 7\n" +
+				"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n\n" +
+				"Ringer mode:\n   Max: 7\n", 50, true},
+		// speaker_safe is an output device of its own with a level of its own, so
+		// the name has to match whole rather than be contained.
+		{"a near-miss device name listed before the speaker",
+			"- STREAM_MUSIC:\n   Max: 30\n" +
+				"   Current: 40000000 (default): 21, 1000000 (speaker_safe): 3, 2 (speaker): 12\n", 40, true},
+		{"only a near-miss device name",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 1000000 (speaker_safe): 3\n", 0, false},
+		// Real dumps carry more than the two lines this parser wants, and print
+		// a header before the streams.
+		{"the lines a real dump prints around the ones we read",
+			"Stream volumes (device: index)\n- STREAM_MUSIC:\n   Mute count: 0\n   Min: 0\n" +
+				"   Max: 30\n   streamVolume:12\n   Current: 2 (speaker): 12\n   Devices: speaker\n", 40, true},
+	}
+	for _, tt := range tests {
+		got, ok := parseMusicVolume(tt.dump)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("%s: parseMusicVolume = %v, %v; want %v, %v", tt.name, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+// The volume read forks a process and talks to binder, and binder can wedge. A
+// read that never answers has to cost one reading rather than every reading
+// after it, because nothing else would ever notice the poll had stopped.
+func TestTheVolumeReadGivesUpRatherThanHanging(t *testing.T) {
+	wasCmd, wasWait := volumeCommand, volumeReadTimeout
+	defer func() { volumeCommand, volumeReadTimeout = wasCmd, wasWait }()
+
+	volumeReadTimeout = 100 * time.Millisecond
+	started := make(chan struct{})
+	volumeCommand = func(ctx context.Context) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	done := make(chan struct{})
+	var got float32
+	var ok bool
+	go func() { got, ok = MusicVolumePercent(); close(done) }()
+
+	<-started
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read never gave up, so a wedged binder stops the volume for the rest of the boot")
+	}
+	if ok {
+		t.Errorf("a read that never answered reported %v as a measurement", got)
+	}
+}
+
+// The bound is two numbers and this is the one no stub can show. Killing the
+// child does not end the call: Output waits for the pipe to reach EOF, and a
+// child that forked one of its own leaves that pipe open behind it. The shell
+// below is exactly that shape, so a run without WaitDelay waits out the
+// grandchild rather than the deadline, and one that defines the budget as the
+// deadline alone runs over the number main_test.go holds against the tick.
+func TestOneReadCannotOutlastItsBudget(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no shell to fork with: %v", err)
+	}
+	wasArgv, wasTimeout, wasDelay := volumeArgv, volumeReadTimeout, volumeWaitDelay
+	defer func() {
+		volumeArgv, volumeReadTimeout, volumeWaitDelay = wasArgv, wasTimeout, wasDelay
+	}()
+
+	// Scaled down so the test costs half a second rather than two, and weighted
+	// towards the wait: a budget that left it out would be a quarter of this
+	// one, which the assertion below can tell from the whole.
+	volumeReadTimeout, volumeWaitDelay = 100*time.Millisecond, 400*time.Millisecond
+	// The grandchild outlives the kill and holds the inherited stdout open.
+	volumeArgv = []string{"sh", "-c", "sleep 30 & sleep 30"}
+
+	start := time.Now()
+	got, ok := MusicVolumePercent()
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Errorf("a read that never answered reported %v", got)
+	}
+	// A lower bound as well as an upper one. Without it the test passes when the
+	// command never ran at all -- a wrong argv fails instantly on any machine
+	// with no /system/bin, and an instant failure satisfies every assertion
+	// below about a call that finishes inside its budget.
+	if elapsed < volumeReadTimeout {
+		t.Fatalf("the read failed in %v, before the deadline it was supposed to hit; the command never ran", elapsed)
+	}
+	// Slack enough for a loaded machine and not enough to hide the deadline
+	// standing in for the whole budget: a correct read lands on the budget, and
+	// one measured against the deadline alone is four times over it.
+	if limit := VolumeReadBudget() + 100*time.Millisecond; elapsed > limit {
+		t.Errorf("one read took %v against a budget of %v; the budget has to bound the whole call",
+			elapsed, VolumeReadBudget())
 	}
 }

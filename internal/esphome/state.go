@@ -100,6 +100,12 @@ func (s *Server) publish(what string, readings []reading) []reading {
 	return changed
 }
 
+// Starts a poll for every sensor listEntities names.
+func (s *Server) Poll(sensorTick, volumeTick time.Duration) {
+	go s.PollSensors(sensorTick)
+	go s.PollVolume(volumeTick)
+}
+
 // Published once before the wait, so a subscriber arriving in the first minute
 // is not told nothing at all: time.Tick fires after the interval, not at it.
 func (s *Server) PollSensors(every time.Duration) {
@@ -116,4 +122,46 @@ func (s *Server) PollSensors(every time.Duration) {
 		case <-s.sensorWake:
 		}
 	}
+}
+
+func (s *Server) PollVolume(every time.Duration) {
+	// time.NewTicker panics rather than returning an error, and this poll has no
+	// floor of its own for a caller to have been stopped by.
+	if every <= 0 {
+		log.Printf("esphome api: volume tick of %v raised to %v", every, minVolumeReadGap)
+		every = minVolumeReadGap
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	var last time.Time
+	woken := false
+	for {
+		if s.anyStateSubscriber() && (!woken || time.Since(last) >= s.volumeGap) {
+			last = time.Now()
+			volume, ok := s.volume()
+			s.publish("volume", []reading{{s.keyVolume, volume, ok}})
+		}
+		select {
+		case <-tick.C:
+			woken = false
+		case <-s.volumeWake:
+			woken = true
+		}
+	}
+}
+
+func (s *Server) anyStateSubscriber() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stateSubscriberBesides(nil)
+}
+
+// Whether anybody but this connection is subscribed. Caller holds mu.
+func (s *Server) stateSubscriberBesides(except *conn) bool {
+	for conn := range s.conns {
+		if conn != except && conn.states {
+			return true
+		}
+	}
+	return false
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
 )
 
@@ -108,6 +109,26 @@ func TestTheReadmeNamesTheKeyPathTheDaemonReads(t *testing.T) {
 func TestTheSensorTickRespectsTheFloor(t *testing.T) {
 	if sensorTick < esphome.MinSensorTick {
 		t.Errorf("sensorTick is %v, under the %v floor PollSensors would raise it to", sensorTick, esphome.MinSensorTick)
+	}
+}
+
+// PollVolume has no floor of its own, and time.NewTicker panics on a tick that
+// is not positive. A volume tick at or above the sensor tick would also be the
+// backstop it exists to beat.
+func TestTheVolumeTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
+	if volumeTick <= 0 {
+		t.Errorf("volumeTick is %v, and time.NewTicker panics on that", volumeTick)
+	}
+	// The read has to finish inside the tick that made it: the poll is serial,
+	// so a read outlasting its tick delays every reading behind it. The budget
+	// rather than the deadline, because a killed child is waited on after it.
+	if volumeTick <= device.VolumeReadBudget() {
+		t.Errorf("volumeTick is %v and a read may take %v, so a slow read delays the next tick",
+			volumeTick, device.VolumeReadBudget())
+	}
+	if volumeTick >= sensorTick {
+		t.Errorf("volumeTick is %v against a sensor tick of %v, so a poll of its own buys nothing",
+			volumeTick, sensorTick)
 	}
 }
 

@@ -3,8 +3,10 @@
 package device
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +57,129 @@ func parseWifiLevel(table, iface string) (float32, bool) {
 			return 0, false
 		}
 		return float32(level), true
+	}
+	return 0, false
+}
+
+var (
+	volumeReadTimeout = 1500 * time.Millisecond
+	volumeWaitDelay   = 500 * time.Millisecond
+
+	// argv rather than a whole command, so a test drives the real one against a
+	// child of its own choosing: what has to be bounded is exec's behaviour, and
+	// a stub replacing this function cannot show that.
+	volumeArgv = []string{"/system/bin/dumpsys", "audio"}
+
+	volumeCommand = func(ctx context.Context) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, volumeArgv[0], volumeArgv[1:]...)
+		cmd.WaitDelay = volumeWaitDelay
+		return cmd.Output()
+	}
+)
+
+// The whole of one read: the deadline the child is killed at, plus the wait
+// Output spends after that on a pipe the child may have left open. Exported as
+// the sum, because the sum is what has to fit inside the caller's tick and the
+// deadline alone is not it. A function rather than a value so a test that
+// scales the two below is bounded by what it set them to.
+func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
+
+func MusicVolumePercent() (float32, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), volumeReadTimeout)
+	defer cancel()
+	out, err := volumeCommand(ctx)
+	if err != nil {
+		return 0, false
+	}
+	return parseMusicVolume(string(out))
+}
+
+func parseMusicVolume(dump string) (float32, bool) {
+	inMusic := false
+	max := 0
+	muted, sawMute := false, false
+	percent, havePercent := float32(0), false
+	// The answer is settled at the end of the block rather than at the Current
+	// line, because a Mute count printed after it still belongs to it.
+	done := func() (float32, bool) {
+		if !havePercent {
+			return 0, false
+		}
+		if muted {
+			return 0, true
+		}
+		return percent, true
+	}
+	for _, line := range strings.Split(dump, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- STREAM_") {
+			if inMusic && havePercent {
+				return done()
+			}
+			inMusic = trimmed == "- STREAM_MUSIC:"
+			max = 0
+			muted, sawMute = false, false
+			continue
+		}
+		if trimmed != "" && line == strings.TrimLeft(line, " \t") {
+			if inMusic && havePercent {
+				return done()
+			}
+			inMusic = false
+			continue
+		}
+		if !inMusic {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Mute count:") {
+			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "Mute count:"))); err == nil && !sawMute {
+				muted, sawMute = n > 0, true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Max:") {
+			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "Max:"))); err == nil && n > 0 && max == 0 {
+				max = n
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Current:") {
+			level, ok := speakerLevel(trimmed)
+			if !ok {
+				return 0, false
+			}
+			if max <= 0 {
+				return 0, false
+			}
+			if level < 0 {
+				level = 0
+			}
+			if level > max {
+				level = max
+			}
+			percent, havePercent = float32(level)*100/float32(max), true
+			continue
+		}
+	}
+	if !inMusic {
+		return 0, false
+	}
+	return done()
+}
+
+// A Current field is "<hex mask> (<name>): <level>".
+func speakerLevel(current string) (int, bool) {
+	for _, field := range strings.Split(current, ",") {
+		field = strings.TrimSpace(field)
+		mark := strings.LastIndex(field, ":")
+		if mark < 0 || !strings.HasSuffix(strings.TrimSpace(field[:mark]), "(speaker)") {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(field[mark+1:]))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
 	}
 	return 0, false
 }

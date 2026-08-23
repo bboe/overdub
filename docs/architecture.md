@@ -157,10 +157,10 @@ still a lot of traffic for readings that change slowly, but it is no longer what
 keeps the connection alive.
 
 The sensors are read once per tick, and once more whenever a connection
-subscribes for the first time. Zero is a plausible value for both of them --
-zero dBm is a signal level and zero seconds an uptime -- so a reading that could
-not be taken cannot be published as one, which the paragraph on `missing_state`
-below picks up.
+subscribes for the first time. Zero is a plausible value for all three -- zero
+dBm is a signal level, zero seconds an uptime, zero percent a volume -- so a
+reading that could not be taken cannot be published as one, which the paragraph
+on `missing_state` below picks up.
 
 The signal is the fourth field of the `wlan0` line in `/proc/net/wireless`, and
 that file is the reason the reading needs two guards rather than none. Measured
@@ -209,49 +209,157 @@ So the zero row is real and the guard is not dead code, but it is not what
 catches a radio that drops. Both paths arrive at the same place, which is the
 point: no reading.
 
-Both readings share one published state, and that is the point rather than a
-convenience. It is what every subscriber has been told and the only thing any of
-them is ever told: the poll reads the device, and a reading that differs from
-what is published replaces it and goes to every subscriber. A reading equal to
-the published one sends nothing at all, so a signal that has not moved costs the
-read and no traffic. A client that has just arrived is answered from that state
-rather than from a reading of its own.
+The volume comes out of `dumpsys audio`, which carries both the numbers it
+takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
+each output device appears as `<hex mask> (<name>): <level>`. The speaker is the
+route a Dot plays through unless something is in the jack or paired over
+bluetooth, so a volume turned while a headset is connected is not the one this
+reads. Only the ratio means anything. Measured here, 12 of 30.
+
+`settings get system volume_music_speaker` gives the same number and was the
+first attempt. It is a shell script that starts a VM, and it puts the two
+numbers in different commands where nothing makes them agree. One call answers
+both, and costs far less: measured on the Dot, three hundred `dumpsys audio`
+calls took four seconds, about thirteen milliseconds each, against 546ms for one
+`settings get`.
+
+The maximum is read out of `- STREAM_MUSIC:` specifically, because every stream
+in that dump carries one and this Dot's `STREAM_ALARM` carries the same 30 -- a
+reader that wandered into the next stream would look right here and be wrong
+where they differ. A stream's block ends at the left margin as well as at the
+next `- STREAM_`, so that nothing printed after the last stream can answer for
+it. What follows the streams was not captured -- the fixture stops at the third
+-- so the guard is cheap insurance rather than a response to a measured line. When
+there is no usable maximum there is no reading: the maximum is the denominator,
+and a guessed one reports a percentage that is wrong rather than absent, which
+is the worse of the two. A level outside the scale is treated the other way and
+clamped, because there the answer is bounded either way -- a level above the
+maximum is full volume and a negative one is silence -- while a missing
+denominator leaves the whole ratio unknown. The speaker is found by name rather than by position,
+and the whole parenthesised name has to match, brackets included: `speaker_safe`
+is a device of its own with a level of its own, and it is the closing bracket
+that keeps it out. The last colon in the field is the level's, because the
+first field on that line still carries the `Current:` label and so has two.
+
+A muted stream reads as zero rather than as the level it is holding. `Mute
+count:` sits in the same block as `Max:` and `Current:`, and Android's
+`VolumeStreamState` counts outstanding mute requests there, so anything above
+zero is muted while the `Current:` line goes on naming the level the stream will
+return to. Reporting that level would be reporting a volume nobody can hear.
+
+Where the count sits in the block does not matter: the reading is settled when
+the block ends rather than at the `Current:` line, so a count printed after the
+level still applies to it. Two counts in one block resolve first-wins, the way
+two maximums do. A count that will not parse is not treated as a mute, because
+the alternative is reporting silence on a line we did not understand.
+
+Nothing on this Dot produces a non-zero count, and that was measured rather than
+assumed. "Alexa, mute" sets the speaker's level to 0 and leaves every stream's
+count at 0; `input keyevent 164` does nothing; stepping below zero clamps. So a
+muted Echo is reported by the ordinary level path, reading 0%, and this branch
+is not what covers the case it was written for.
+
+It is kept because the dump's `mute affected streams = 0x2e` includes
+`STREAM_MUSIC`, so the state exists and an app calling `setStreamMute` would
+produce it, and because what it costs is four lines that can only turn a wrong
+number into a correct zero. What a non-zero count means is still Android's
+semantics rather than this device's, and docs/hardware.md carries the commands
+behind the rest.
+
+Volume is the one reading somebody changes and then goes looking for, so it is
+read every two and a half seconds rather than every sixty. A two and a half
+second tick spends about half a percent of one core's wall time on that read,
+and reaches a change twenty-four times sooner than the minute tick would. What
+is read is not what is sent: only a value that differs from the published one
+goes out, so a volume nobody touches costs the read and no traffic at all.
+That is also why `PollVolume` has no `MinSensorTick` of its own. The floor there
+bounds traffic, and a tick that publishes nothing produces none.
+
+Both polls are started by one call, `Poll`, rather than by a `go` statement each
+in `serveAPI`. What goes wrong there is a sensor that is listed with nothing to
+read it, which Home Assistant shows as an entity that never has a value, and
+inside the package that is a test: every key `listEntities` sends has to arrive
+as a state once `Poll` is running. Two `go` statements in `main` are reachable
+by no test at all.
+
+All three readings share one published state, and that is the point rather than
+a convenience. It is what every subscriber has been told and the only thing any
+of them is ever told: the pollers read the device, and a reading that differs
+from what is published replaces it and goes to every subscriber. A client that
+has just arrived is answered from it rather than from a reading of its own.
 
 A second reader is what makes that necessary. If the snapshot answering
 `SubscribeStatesRequest` took its own reading, it could tell one client a value
-the poll never saw, and the poll would then find the device back at the value it
-remembered and stay quiet -- leaving that client on a number nothing would ever
-correct. It needs no failure of any kind: a reading that moves and moves back
-inside one tick, with a client subscribing in between, is enough. A tick that
-carried every reading whether or not it had changed would heal that within the
-minute, which is what these two had while every tick was a full push. One reader
-instead of two is what makes the tick free to carry only what changed.
+the poller never saw, and the poller would then find the device back at the
+value it remembered and stay quiet -- leaving that client on a number nothing
+would ever correct. It needs no failure of any kind: a volume changed and
+changed back inside one tick, with a client subscribing in between, is enough,
+and it was reproduced on the Dot before this was written. A tick that carried
+every reading whether or not it had changed would heal it within the minute,
+which is what the uptime and the signal had while they were the only two
+sensors. One reader instead of two is what makes the tick free to carry only
+what changed.
+
+`PollVolume` raises a tick that is not positive to a second, the same number the
+wake gap uses. `time.NewTicker` panics on one rather than returning an error,
+and this poll has no `MinSensorTick` for a caller to have been stopped by, so
+the panic would reach the supervisor and be repeated five seconds later.
+
+`dumpsys` talks to binder and binder can wedge, so the read carries a deadline
+of its own. The poll is serial, so a read that outlasted its tick would delay
+every reading behind it, and a wedged binder would cost every reading rather
+than one.
+
+The bound is two numbers rather than one, and the deadline alone is not it.
+`exec.CommandContext` kills the child when the deadline passes, but `Output`
+then waits for the pipe to reach EOF, which a killed child does not close if it
+left one of its own behind. `cmd.WaitDelay` bounds that second wait. So the
+whole of one read is 1.5 seconds plus 0.5, and `VolumeReadBudget` is exported as
+the sum: a hundred and thirteen times what the call measures at, and inside the
+two and a half second tick that made it. `main_test.go` holds those two
+together, and it has to hold the sum, because a test against the deadline alone
+passes while the real worst case runs over.
+
+The budget and the command beside it are variables rather than constants so a
+test can shrink the wait and put a command there that never answers.
+
+The volume poll sits still while nothing is subscribed. The read forks a
+process, which is a poor thing to do every two and a half seconds on a Dot that
+Home Assistant may never have connected to, so the cost above is what it spends
+while somebody is listening and nothing at all otherwise.
+
+Coming back from that is the only thing a subscriber can ask a reading for.
+Subscribing wakes the polls rather than taking a reading of its own -- the same
+rule as the snapshot -- and only on the first request of a connection, since a
+peer holding the key can send them as fast as it likes. And only when nobody
+else is subscribed: with another
+connection already there the polls have been running, and the published state
+the new one was just answered from is a tick old at worst. So the ordinary case,
+a second client arriving while Home Assistant is connected, reads nothing at
+all. What is left is a peer that keeps making itself the idle case by
+connecting, subscribing and leaving, which is bounded by a second between reads
+a *wake* can cause. The tick is not bounded by it, because that is a cadence
+somebody chose rather than a read a peer asked for, so the ceiling is a wake per
+second alongside the tick's own read rather than one read per second overall.
 
 So the snapshot is sent from `handle`, under the lock that orders it against a
 concurrent push, and it reads nothing. That is also why `publish` collects what
 it could not send and logs after the lock is dropped rather than under it.
 
-Subscribing wakes the poll instead. The value the snapshot just answered with is
-up to a whole tick old, which is a minute here, so a subscriber that took no
-reading and got no wake would sit on it for that long. Only the first
-`SubscribeStatesRequest` on a connection wakes anything, because a peer holding
-the key can send them as fast as it likes and each one after the first would
-otherwise be a reading of the device it asked for and got.
+A wake is sent with the server lock held, so it is a send that may be dropped
+rather than one that may block. A bare send would deadlock the server outright:
+`handle` holds the lock for its whole body, and the poll that would empty the
+channel takes that same lock to publish.
 
-That wake is sent with the server lock held, so it is a send that may be
-dropped rather than one that may block. A bare send would deadlock the server
-outright: `handle` holds the lock for its whole body, and the poll that would
-empty the channel takes that same lock to publish.
+`MinSensorTick` bounds `PollSensors`' ticker rather than the push rate, which a
+wake exceeds by a read per connection that subscribes.
 
-`MinSensorTick` bounds the ticker rather than the push rate, which the wake
-exceeds by a read per connection that subscribes.
+The pollers are the only things that read the device, which is the cost of there
+being one reader rather than two: a poll that wedged would leave every
+subscriber on the last published values, including ones that connect afterwards,
+where before this each new subscriber at least took a reading of its own. That
+is why the volume read carries a deadline and the two procfs reads do not.
 
-The poll is now the only thing that reads these two, which is the cost of there
-being one reader rather than two. A poll that wedged would leave every
-subscriber on the last published values, including ones that connect
-afterwards, where before this each new subscriber at least took a reading of its
-own. Both readings come from procfs, which is why that is a trade worth making
-here and not one to repeat for a reading that forks a process.
 
 A reading that fails is still sent, with `missing_state` set. Leaving it out was
 the first attempt and it is only right before the first one: afterwards Home
