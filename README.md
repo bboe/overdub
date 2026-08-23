@@ -6,7 +6,7 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports five diagnostic sensors over that connection, and a press still plays
+reports seven diagnostic entities over that connection, and a press still plays
 its chime on the device itself.
 
 ## Scope
@@ -217,19 +217,36 @@ Dot's own firewall.
 | `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
 | `sensor.<name>_cpu_temperature` | diagnostic | °C, from the SoC's own thermal zone |
 | `sensor.<name>_memory_available` | diagnostic | MiB the kernel says an allocation could get, which is not the same as free |
+| `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
+| `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 
 Uptime and signal are read once a minute, and again when Home Assistant
-subscribes. Volume, temperature and memory are read every two and a half
-seconds, and only while something is subscribed. Everything is sent only when
-it changes, so the uptime arrives every minute, the others when they move, and
-a quiet short tick costs the reads and no traffic at all.
+subscribes. Both volumes, the jack, the temperature and the memory are read
+every two and a half seconds, and only while something is subscribed.
+Everything is sent only when it changes, so the uptime arrives every minute,
+the others when they move, and a quiet short tick costs the reads and no
+traffic at all.
 
 That is why a volume you have just turned appears within a few seconds, whether
-you turned it with the buttons, from an app, or by asking Alexa. It is the
-speaker's own level: with a headset in the jack or a bluetooth speaker paired,
-Android tracks that route separately and this reading does not follow it.
+you turned it with the buttons, from an app, or by asking Alexa.
 
-All five are read-only, and they are the connection proved end to end. The
+`volume` is the speaker's own level and `jack_volume` is the socket's. Android
+keeps a level per route and switches between them when you plug something in,
+so between those two, the one you are hearing is whichever `audio_jack` says.
+Both are reported whatever is plugged in, because both are real levels the
+device would return to. Mute is not per route, so muting reads as zero on both
+at once.
+
+A bluetooth speaker is a third route and is not reported at all. Pair one and
+Android tracks its level separately again, so neither of these readings is what
+you are hearing and `audio_jack` does not say so.
+
+`audio_jack` is on whenever the socket is occupied and nothing more. The
+detection is electrical and stops at the contacts: a bare cable with nothing on
+the far end reads the same as headphones, and unplugging the far end of a
+connected cable is invisible to it.
+
+All seven are read-only, and they are the connection proved end to end. The
 button still chimes on the device, and Home Assistant is not told about it.
 
 ### Encryption

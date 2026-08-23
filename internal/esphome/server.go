@@ -69,9 +69,11 @@ const (
 	msgDeviceInfoRequest = 9
 	msgDeviceInfoResp    = 10
 	msgListEntitiesReq   = 11
+	msgListBinarySensor  = 12
 	msgListSensor        = 16
 	msgListEntitiesDone  = 19
 	msgSubscribeStates   = 20
+	msgBinarySensorState = 21
 	msgSensorState       = 25
 	msgSubscribeLogs     = 28
 	msgSubscribeHAStates = 38
@@ -111,14 +113,17 @@ type Server struct {
 	keyVolume uint32
 	keyCPU    uint32
 	keyMemory uint32
+	keyJack   uint32
+	keyJackOn uint32
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
-	uptime func() (float32, bool)
-	wifi   func() (float32, bool)
-	volume func() (float32, bool)
-	cpu    func() (float32, bool)
-	memory func() (float32, bool)
+	uptime  func() (float32, bool)
+	wifi    func() (float32, bool)
+	volumes func() device.MusicVolume
+	jack    func() (bool, bool)
+	cpu     func() (float32, bool)
+	memory  func() (float32, bool)
 
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
@@ -158,9 +163,12 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyVolume:     entityKey("volume"),
 		keyCPU:        entityKey("cpu_temperature"),
 		keyMemory:     entityKey("memory_available"),
+		keyJack:       entityKey("jack_volume"),
+		keyJackOn:     entityKey("audio_jack"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
-		volume:        device.MusicVolumePercent,
+		volumes:       device.MusicVolumes,
+		jack:          device.JackOccupied,
 		cpu:           device.CPUTemperature,
 		memory:        device.AvailableMemory,
 		handshakeWait: 10 * time.Second,

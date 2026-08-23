@@ -51,12 +51,19 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		"volume":           {s.keyVolume, "Volume", "%", "", stateClassMeasurement},
 		"cpu_temperature":  {s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement},
 		"memory_available": {s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement},
+		"jack_volume":      {s.keyJack, "Jack volume", "%", "", stateClassMeasurement},
 	}
 
 	seen := map[string]bool{}
 	for _, entity := range listed(t, s) {
+		// Binary sensors are listed under their own message type and checked by
+		// TestTheJackIsListedAsABinarySensor: their fields are not these ones,
+		// and reading them with this table would compare the wrong numbers.
+		if entity[0].num == uint64(msgListBinarySensor) {
+			continue
+		}
 		if entity[0].num != uint64(msgListSensor) {
-			t.Errorf("an entity of type %d is listed; this commit has only sensors", entity[0].num)
+			t.Errorf("an entity of type %d is listed, and it is neither sensor nor binary sensor", entity[0].num)
 			continue
 		}
 		objectID := string(entity[1].data)
@@ -120,8 +127,10 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		want int
 	}{
 		{"ListEntitiesSensorResponse", msgListSensor, 16},
+		{"ListEntitiesBinarySensorResponse", msgListBinarySensor, 12},
 		{"ListEntitiesDoneResponse", msgListEntitiesDone, 19},
 		{"SensorStateResponse", msgSensorState, 25},
+		{"BinarySensorStateResponse", msgBinarySensorState, 21},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
 		{"ENTITY_CATEGORY_DIAGNOSTIC", entityCategoryDiagnostic, 2},
 		{"STATE_CLASS_MEASUREMENT", stateClassMeasurement, 1},
@@ -131,5 +140,64 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		if tt.got != tt.want {
 			t.Errorf("%s is %d, want %d", tt.what, tt.got, tt.want)
 		}
+	}
+}
+
+// A binary sensor is a different message with different field numbers, not a
+// sensor with a bool in it. Home Assistant reads the fields by number, so one
+// borrowed from ListEntitiesSensor lands in the wrong place silently.
+func TestTheJackIsListedAsABinarySensor(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+
+	found := 0
+	for _, entity := range listed(t, s) {
+		if entity[0].num != uint64(msgListBinarySensor) {
+			continue
+		}
+		found++
+		if got := string(entity[1].data); got != "audio_jack" {
+			t.Errorf("binary sensor object_id is %q, want audio_jack", got)
+		}
+		if uint32(entity[2].num) != s.keyJackOn {
+			t.Errorf("audio_jack has key %d, want %d", entity[2].num, s.keyJackOn)
+		}
+		// A key sent as a varint decodes to the same number here and to nothing
+		// in Home Assistant, which files every entity under key zero.
+		if entity[2].wire != wireFixed32 {
+			t.Errorf("audio_jack sent its key as wire type %d, want fixed32 (%d)", entity[2].wire, wireFixed32)
+		}
+		if got := string(entity[3].data); got != "Audio jack" {
+			t.Errorf("audio_jack is named %q, want \"Audio jack\"", got)
+		}
+		// Field 5 on this message, where a sensor's device_class is field 9.
+		if got := string(entity[5].data); got != "plug" {
+			t.Errorf("audio_jack has device_class %q, want plug", got)
+		}
+		if entity[6].num != 0 {
+			t.Error("audio_jack is a status binary sensor, which reports the connection rather than the jack")
+		}
+		if entity[7].num != 0 {
+			t.Error("audio_jack is disabled_by_default; it would not appear until somebody enabled it")
+		}
+		if entity[9].num != entityCategoryDiagnostic {
+			t.Error("audio_jack is not diagnostic; it would sit among the device's controls")
+		}
+		// The two messages disagree about what these numbers mean, so a field
+		// copied from the sensor listing lands somewhere real and wrong. 6 is
+		// unit_of_measurement on a sensor and is_status_binary_sensor here, so
+		// the wire type separates them; 13 is the sensor's entity_category and
+		// nothing at all here.
+		if entity[6].wire != wireVarint {
+			t.Errorf("audio_jack sent field 6 as wire type %d, want varint (%d): a unit "+
+				"borrowed from the sensor message would arrive here as a string",
+				entity[6].wire, wireVarint)
+		}
+		if _, ok := entity[13]; ok {
+			t.Error("audio_jack sets field 13, which is a sensor's entity_category and " +
+				"unassigned on a binary sensor")
+		}
+	}
+	if found != 1 {
+		t.Errorf("%d binary sensors were listed, want 1", found)
 	}
 }

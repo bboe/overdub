@@ -40,6 +40,7 @@ func (s *Server) listEntities(conn *conn) error {
 		{"volume", s.keyVolume, "Volume", "%", "", stateClassMeasurement},
 		{"cpu_temperature", s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement},
 		{"memory_available", s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement},
+		{"jack_volume", s.keyJack, "Jack volume", "%", "", stateClassMeasurement},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)
@@ -53,6 +54,30 @@ func (s *Server) listEntities(conn *conn) error {
 		entity.boolean(12, false)
 		entity.u32(13, entityCategoryDiagnostic)
 		if err := s.send(conn, msgListSensor, entity.b); err != nil {
+			return err
+		}
+	}
+
+	for _, sensor := range []struct {
+		objectID    string
+		key         uint32
+		name        string
+		deviceClass string
+	}{
+		// plug is Home Assistant's own class for this: on is plugged in, off is
+		// unplugged. The field numbers are ESPHome's ListEntitiesBinarySensor,
+		// which is not the sensor message with a different name.
+		{"audio_jack", s.keyJackOn, "Audio jack", "plug"},
+	} {
+		var entity pb
+		entity.str(1, sensor.objectID)
+		entity.fixed32(2, sensor.key)
+		entity.str(3, sensor.name)
+		entity.str(5, sensor.deviceClass)
+		entity.boolean(6, false)
+		entity.boolean(7, false)
+		entity.u32(9, entityCategoryDiagnostic)
+		if err := s.send(conn, msgListBinarySensor, entity.b); err != nil {
 			return err
 		}
 	}

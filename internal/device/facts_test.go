@@ -222,10 +222,96 @@ func TestParseMusicVolume(t *testing.T) {
 				"   Max: 30\n   streamVolume:12\n   Current: 2 (speaker): 12\n   Devices: speaker\n", 40, true},
 	}
 	for _, tt := range tests {
-		got, ok := parseMusicVolume(tt.dump)
-		if got != tt.want || ok != tt.ok {
-			t.Errorf("%s: parseMusicVolume = %v, %v; want %v, %v", tt.name, got, ok, tt.want, tt.ok)
+		v := parseMusicVolumes(tt.dump)
+		if v.Speaker != tt.want || v.SpeakerOK != tt.ok {
+			t.Errorf("%s: speaker = %v, %v; want %v, %v", tt.name, v.Speaker, v.SpeakerOK, tt.want, tt.ok)
 		}
+	}
+}
+
+// The jack's level comes off the same line and the same maximum. headset is
+// the only route this Dot has ever used, whatever is plugged in, and headphone
+// is what another build might route to instead.
+func TestParseJackVolume(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		dump string
+		want float32
+		ok   bool
+	}{
+		{"the Dot as it stands", audioDump, 70, true},
+		{"headphone when there is no headset",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12, 8 (headphone): 15\n", 50, true},
+		{"headset wins when both are listed",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 4 (headset): 9, 8 (headphone): 30\n", 30, true},
+		{"neither is listed",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12\n", 0, false},
+		// A muted stream is not audible on either route, and the speaker case
+		// already covers the reading being kept rather than dropped.
+		{"muted",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n   Current: 4 (headset): 9\n", 0, true},
+		{"no maximum, no reading",
+			"- STREAM_MUSIC:\n   Current: 4 (headset): 9\n", 0, false},
+		// The other half of the speaker_safe case above: that one is kept out by
+		// the closing bracket, this one by the opening bracket. usb_headset is a
+		// real device on an Android newer than this Dot's, which is exactly how
+		// this line would arrive.
+		{"a longer name ending in ours is not ours",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12, 4000000 (usb_headset): 30\n", 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			v := parseMusicVolumes(tt.dump)
+			if v.Jack != tt.want || v.JackOK != tt.ok {
+				t.Errorf("jack = %v, %v; want %v, %v", v.Jack, v.JackOK, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestParseJackSwitch(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		state    string
+		occupied bool
+		ok       bool
+	}{
+		{"nothing in the jack", "0\n", false, true},
+		// 1 is what this Dot answers for everything: a three-pole cable with no
+		// microphone pole, a cable to a computer, and real headphones.
+		{"something in the jack", "1\n", true, true},
+		// Never seen here, and it still means occupied wherever it appears.
+		{"a plug it thinks has no microphone", "2\n", true, true},
+		{"no newline", "1", true, true},
+		{"a state we do not know", "3\n", false, false},
+		{"not a number", "yes\n", false, false},
+		{"empty", "", false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "state")
+			if err := os.WriteFile(path, []byte(tt.state), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			was := jackSwitchPath
+			defer func() { jackSwitchPath = was }()
+			jackSwitchPath = path
+
+			occupied, ok := JackOccupied()
+			if occupied != tt.occupied || ok != tt.ok {
+				t.Errorf("JackOccupied() = %v, %v; want %v, %v", occupied, ok, tt.occupied, tt.ok)
+			}
+		})
+	}
+}
+
+// Nothing to read at all, which is every machine this suite runs on.
+func TestJackOccupiedWithNoSwitch(t *testing.T) {
+	was := jackSwitchPath
+	defer func() { jackSwitchPath = was }()
+	jackSwitchPath = filepath.Join(t.TempDir(), "absent")
+
+	if _, ok := JackOccupied(); ok {
+		t.Error("JackOccupied() reported a state with no switch to read")
 	}
 }
 
@@ -245,9 +331,8 @@ func TestTheVolumeReadGivesUpRatherThanHanging(t *testing.T) {
 	}
 
 	done := make(chan struct{})
-	var got float32
-	var ok bool
-	go func() { got, ok = MusicVolumePercent(); close(done) }()
+	var got MusicVolume
+	go func() { got = MusicVolumes(); close(done) }()
 
 	<-started
 	select {
@@ -255,8 +340,8 @@ func TestTheVolumeReadGivesUpRatherThanHanging(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the read never gave up, so a wedged binder stops the volume for the rest of the boot")
 	}
-	if ok {
-		t.Errorf("a read that never answered reported %v as a measurement", got)
+	if got.SpeakerOK || got.JackOK {
+		t.Errorf("a read that never answered reported %+v as a measurement", got)
 	}
 }
 
@@ -283,11 +368,11 @@ func TestOneReadCannotOutlastItsBudget(t *testing.T) {
 	volumeArgv = []string{"sh", "-c", "sleep 30 & sleep 30"}
 
 	start := time.Now()
-	got, ok := MusicVolumePercent()
+	got := MusicVolumes()
 	elapsed := time.Since(start)
 
-	if ok {
-		t.Errorf("a read that never answered reported %v", got)
+	if got.SpeakerOK || got.JackOK {
+		t.Errorf("a read that never answered reported %+v", got)
 	}
 	// A lower bound as well as an upper one. Without it the test passes when the
 	// command never ran at all -- a wrong argv fails instantly on any machine

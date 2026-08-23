@@ -10,6 +10,10 @@ type reading struct {
 	key   uint32
 	value float32
 	ok    bool
+	// Sent as a binary sensor state rather than a sensor state. A field here
+	// rather than a second published map, because one published state is what
+	// makes a subscriber and the polls agree.
+	binary bool
 }
 
 // The minute's readings: an uptime that changes on every read whatever the
@@ -18,23 +22,34 @@ func (s *Server) readTicked() []reading {
 	up, upOK := s.uptime()
 	signal, signalOK := s.wifi()
 	return []reading{
-		{s.keyUptime, up, upOK},
-		{s.keyWifi, signal, signalOK},
+		{key: s.keyUptime, value: up, ok: upOK},
+		{key: s.keyWifi, value: signal, ok: signalOK},
 	}
 }
 
 // The short tick's readings, taken together because they are published
 // together. Measured on the Dot: 118us for the temperature, 111us for the
-// memory, and 11.7ms for the volume, which is the one that forks.
+// memory, 113us for the jack, and 11.7ms for the volume, which is the one that
+// forks and so is the whole of the tick's cost.
 func (s *Server) readLive() []reading {
 	cpu, cpuOK := s.cpu()
 	memory, memoryOK := s.memory()
-	volume, volumeOK := s.volume()
+	volumes := s.volumes()
+	occupied, jackOK := s.jack()
 	return []reading{
-		{s.keyCPU, cpu, cpuOK},
-		{s.keyMemory, memory, memoryOK},
-		{s.keyVolume, volume, volumeOK},
+		{key: s.keyCPU, value: cpu, ok: cpuOK},
+		{key: s.keyMemory, value: memory, ok: memoryOK},
+		{key: s.keyVolume, value: volumes.Speaker, ok: volumes.SpeakerOK},
+		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
+		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, binary: true},
 	}
+}
+
+func boolValue(b bool) float32 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // What a subscriber is told when it arrives: the published state as it stands,
@@ -49,11 +64,23 @@ func (s *Server) snapshot() []reading {
 
 func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 	for _, r := range readings {
-		if err := s.send(conn, msgSensorState, floatState(r.key, r.value, !r.ok)); err != nil {
+		msgType, payload := msgSensorState, floatState(r.key, r.value, !r.ok)
+		if r.binary {
+			msgType, payload = msgBinarySensorState, binaryState(r.key, r.value != 0, !r.ok)
+		}
+		if err := s.send(conn, msgType, payload); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func binaryState(key uint32, on, missing bool) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(2, on)
+	p.boolean(3, missing)
+	return p.b
 }
 
 func floatState(key uint32, v float32, missing bool) []byte {

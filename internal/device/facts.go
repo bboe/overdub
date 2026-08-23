@@ -192,36 +192,49 @@ var (
 // scales the two below is bounded by what it set them to.
 func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
 
-func MusicVolumePercent() (float32, bool) {
+// Both levels come out of one dump, because the dump costs a fork and the two
+// numbers have to describe the same moment.
+type MusicVolume struct {
+	Speaker   float32
+	SpeakerOK bool
+	Jack      float32
+	JackOK    bool
+}
+
+func MusicVolumes() MusicVolume {
 	ctx, cancel := context.WithTimeout(context.Background(), volumeReadTimeout)
 	defer cancel()
 	out, err := volumeCommand(ctx)
 	if err != nil {
-		return 0, false
+		return MusicVolume{}
 	}
-	return parseMusicVolume(string(out))
+	return parseMusicVolumes(string(out))
 }
 
-func parseMusicVolume(dump string) (float32, bool) {
+func parseMusicVolumes(dump string) MusicVolume {
 	inMusic := false
 	max := 0
 	muted, sawMute := false, false
-	percent, havePercent := float32(0), false
+	var found MusicVolume
 	// The answer is settled at the end of the block rather than at the Current
 	// line, because a Mute count printed after it still belongs to it.
-	done := func() (float32, bool) {
-		if !havePercent {
-			return 0, false
-		}
+	done := func() MusicVolume {
 		if muted {
-			return 0, true
+			// The stream is muted, so neither route is audible. The levels are
+			// still what each would return to.
+			if found.SpeakerOK {
+				found.Speaker = 0
+			}
+			if found.JackOK {
+				found.Jack = 0
+			}
 		}
-		return percent, true
+		return found
 	}
 	for _, line := range strings.Split(dump, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- STREAM_") {
-			if inMusic && havePercent {
+			if inMusic && (found.SpeakerOK || found.JackOK) {
 				return done()
 			}
 			inMusic = trimmed == "- STREAM_MUSIC:"
@@ -230,7 +243,7 @@ func parseMusicVolume(dump string) (float32, bool) {
 			continue
 		}
 		if trimmed != "" && line == strings.TrimLeft(line, " \t") {
-			if inMusic && havePercent {
+			if inMusic && (found.SpeakerOK || found.JackOK) {
 				return done()
 			}
 			inMusic = false
@@ -252,35 +265,67 @@ func parseMusicVolume(dump string) (float32, bool) {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Current:") {
-			level, ok := speakerLevel(trimmed)
-			if !ok {
-				return 0, false
-			}
+			// No denominator, no readings: a guessed one reports a percentage
+			// that is wrong rather than absent.
 			if max <= 0 {
-				return 0, false
+				return MusicVolume{}
 			}
-			if level < 0 {
-				level = 0
+			found.Speaker, found.SpeakerOK = devicePercent(trimmed, max, "speaker")
+			// headset is the only one this Dot has ever used, whatever is
+			// plugged in. headphone is what another build might route to.
+			found.Jack, found.JackOK = devicePercent(trimmed, max, "headset")
+			if !found.JackOK {
+				found.Jack, found.JackOK = devicePercent(trimmed, max, "headphone")
 			}
-			if level > max {
-				level = max
-			}
-			percent, havePercent = float32(level)*100/float32(max), true
 			continue
 		}
 	}
 	if !inMusic {
-		return 0, false
+		return MusicVolume{}
 	}
 	return done()
 }
 
+func devicePercent(current string, max int, name string) (float32, bool) {
+	level, ok := deviceLevel(current, name)
+	if !ok {
+		return 0, false
+	}
+	if level < 0 {
+		level = 0
+	}
+	if level > max {
+		level = max
+	}
+	return float32(level) * 100 / float32(max), true
+}
+
+// 0 is nothing in the jack and 1 is something. This driver reports every plug
+// as a headset whatever it is, so the value is a plug and not a device: a
+// three-pole cable with no microphone pole at all reads 1, and 2, which would
+// mean a plug it thinks has no microphone, has never been seen.
+var jackSwitchPath = "/sys/class/switch/h2w/state"
+
+func JackOccupied() (bool, bool) {
+	state, err := os.ReadFile(jackSwitchPath)
+	if err != nil {
+		return false, false
+	}
+	switch strings.TrimSpace(string(state)) {
+	case "0":
+		return false, true
+	case "1", "2":
+		return true, true
+	}
+	return false, false
+}
+
 // A Current field is "<hex mask> (<name>): <level>".
-func speakerLevel(current string) (int, bool) {
+func deviceLevel(current, name string) (int, bool) {
 	for _, field := range strings.Split(current, ",") {
 		field = strings.TrimSpace(field)
 		mark := strings.LastIndex(field, ":")
-		if mark < 0 || !strings.HasSuffix(strings.TrimSpace(field[:mark]), "(speaker)") {
+		if mark < 0 || !strings.HasSuffix(strings.TrimSpace(field[:mark]), "("+name+")") {
 			continue
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(field[mark+1:]))

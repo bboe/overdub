@@ -270,12 +270,46 @@ them and passed through: it is not a plausible reading either, but it is not the
 kernel's marker for anything, and a guess about which zero is which would be
 the `p2p0` row all over again with no second signal to lean on.
 
+The jack is `/sys/class/switch/h2w/state`, a plug and not a device. This Dot's
+driver is `accdet_amzn` and every transition it logs is `Headset_plug_in`,
+whatever is in the socket: measured here, a three-pole cable with no microphone
+pole at all, the same cable with a computer on the far end, and real headphones
+with inline controls all read 1, and 2 -- which would mean a plug it thinks has
+no microphone -- has never been seen. So the reading is whether the socket is
+occupied, and the entity says that and nothing more. A state the file does not
+use is no reading rather than a guess.
+
+Unplugging the far end of a connected cable produces no transition at all,
+which is the same fact from the other side: the detection is the two contacts
+in the socket.
+
+It is a binary sensor, which is a different ESPHome message from a sensor
+rather than a sensor carrying 1 -- `ListEntitiesBinarySensorResponse` and
+`BinarySensorStateResponse`, with their own field numbers, and Home Assistant
+reads fields by number. It goes through the same published state as everything
+else, so a plug or an unplug is one state change and a poll that finds no
+change sends nothing.
+
 The volume comes out of `dumpsys audio`, which carries both the numbers it
 takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
-each output device appears as `<hex mask> (<name>): <level>`. The speaker is the
-route a Dot plays through unless something is in the jack or paired over
-bluetooth, so a volume turned while a headset is connected is not the one this
-reads. Only the ratio means anything. Measured here, 12 of 30.
+each output device appears as `<hex mask> (<name>): <level>`. Only the ratio
+means anything. Measured here, 12 of 30.
+
+The volume is two readings rather than one, because Android keeps a level per
+route and moves between them: with something in the socket the level that
+matters is `4 (headset)`, and the speaker's own sits unchanged at whatever it
+was. Reporting only the speaker made the sensor freeze the moment anything was
+plugged in -- measured, three volume changes on a pair of headphones while the
+sensor held 40% throughout, which reads as a broken integration rather than as
+a routing question. `8 (headphone)` is read when `4` is absent, though nothing
+on this device has ever produced it, and `line` and `aux_line` have never moved
+at all. A route paired over bluetooth is a third level again and is not read at
+all, so a Dot playing to one is reporting neither of these.
+
+Either reading can be absent while the other is not, which is why a `Current:`
+line that names no speaker no longer ends the search: before there were two
+routes it could only mean a line we could not use, and now it is the ordinary
+shape of a dump whose jack is the half we can answer for.
 
 `settings get system volume_music_speaker` gives the same number and was the
 first attempt. It is a shell script that starts a VM, and it puts the two
@@ -296,11 +330,14 @@ and a guessed one reports a percentage that is wrong rather than absent, which
 is the worse of the two. A level outside the scale is treated the other way and
 clamped, because there the answer is bounded either way -- a level above the
 maximum is full volume and a negative one is silence -- while a missing
-denominator leaves the whole ratio unknown. The speaker is found by name rather than by position,
-and the whole parenthesised name has to match, brackets included: `speaker_safe`
-is a device of its own with a level of its own, and it is the closing bracket
-that keeps it out. The last colon in the field is the level's, because the
-first field on that line still carries the `Current:` label and so has two.
+denominator leaves the whole ratio unknown. Each device is found by name rather than by position,
+and the whole parenthesised name has to match, brackets included. Both brackets
+earn their place, and against different names: `speaker_safe` is a device of its
+own with a level of its own and is kept out by the closing bracket, while
+`usb_headset` -- a real device on an Android newer than this one -- would
+otherwise answer for `headset` and is kept out by the opening one. The last
+colon in the field is the level's, because the first field on that line still
+carries the `Current:` label and so has two.
 
 A muted stream reads as zero rather than as the level it is holding. `Mute
 count:` sits in the same block as `Max:` and `Current:`, and Android's

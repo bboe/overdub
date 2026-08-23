@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bboe/overdub/internal/device"
 )
 
 func TestSendDropsRatherThanBlockingOnAStalledClient(t *testing.T) {
@@ -359,12 +361,33 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 			return v, true
 		}
 	}
-	s.uptime, s.wifi, s.volume = watch(1), watch(-48), watch(40)
+	s.uptime, s.wifi = watch(1), watch(-48)
+	s.volumes, s.cpu, s.memory = speakerReads(watch(40)), watch(41.3), watch(126.5)
+	s.jack = func() (bool, bool) {
+		occupied, _ := watch(1)()
+		return occupied != 0, true
+	}
 
 	// Ticks far enough away that every read below is either the sensor poll's
 	// startup publish or one a subscriber woke.
 	go s.Poll(MinSensorTick, time.Hour)
-	<-read
+
+	// Waited for the publish rather than for a read. The stub signals on every
+	// reader call, so taking the count at the first one samples the startup
+	// publish half done: measured, that failed one run in thirteen with the
+	// ceiling below derived from half a poll.
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		s.mu.Lock()
+		published := len(s.published)
+		s.mu.Unlock()
+		if published > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sensor poll never published, so this test would measure nothing")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	mu.Lock()
 	polled := reads
@@ -394,16 +417,17 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	// goroutine, which is what the lock check above would catch and what the
 	// count below bounds. polled is one sensor poll's worth, since only the
 	// startup publish had run when it was taken, so the ceiling is that again
-	// plus the one volume read the wake buys. Calling readTicked here instead
-	// would deadlock: the stubs take this same lock.
+	// plus one cycle of the live poll. Written out rather than asked of the
+	// server, because the stubs take this same lock and would deadlock.
+	const liveReaders = 4 // cpu, memory, volumes, jack
 	mu.Lock()
 	defer mu.Unlock()
 	if underLock {
 		t.Error("the device was read with the server lock held")
 	}
-	if reads > 2*polled+1 {
+	if ceiling := 2*polled + liveReaders; reads > ceiling {
 		t.Errorf("answering a subscriber took %d readings beyond the wake's own; the snapshot has to replay what was published, or the two readers can disagree",
-			reads-2*polled-1)
+			reads-ceiling)
 	}
 }
 
@@ -594,10 +618,11 @@ func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	t.Errorf("a 1ms tick was accepted; the log says %q", out.String())
 }
 
-// Every sensor reading is a key and a float, and the key is what tells Home
-// Assistant which entity it belongs to. Two readings go out per tick, so a
-// wrong key does not lose the value: it files it under the other sensor.
-func sensorReading(t *testing.T, payload []byte) (uint32, float32, bool) {
+// Every state is a key and a value, and the key is what tells Home Assistant
+// which entity it belongs to. Sensors and binary sensors are different messages
+// with different encodings for that value: fixed32 against a varint bool. A
+// helper that assumed one would read the other's bytes as whatever it expected.
+func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, bool) {
 	t.Helper()
 	var key uint32
 	var value float32
@@ -609,23 +634,42 @@ func sensorReading(t *testing.T, payload []byte) (uint32, float32, bool) {
 		case 1:
 			key = uint32(f.num)
 		case 2:
-			value = math.Float32frombits(uint32(f.num))
+			if msgType == msgBinarySensorState {
+				if f.num != 0 {
+					value = 1
+				}
+			} else {
+				value = math.Float32frombits(uint32(f.num))
+			}
 		case 3:
 			missing = f.num != 0
 		}
 	}); err != nil {
-		t.Fatalf("sensor state did not parse: %v", err)
+		t.Fatalf("state did not parse: %v", err)
 	}
-	// The key and the value are fixed32 on the wire. Sent as varints they decode
-	// to the same number here and to nothing at all in Home Assistant, which
-	// skips the field it cannot read and files every reading under key zero.
+	// The key is fixed32 on both messages. Sent as a varint it decodes to the
+	// same number here and to nothing at all in Home Assistant, which skips the
+	// field it cannot read and files every reading under key zero.
 	if seen[1] != wireFixed32 {
 		t.Errorf("the key went out as wire type %d, want fixed32 (%d)", seen[1], wireFixed32)
 	}
-	if seen[2] != wireFixed32 {
-		t.Errorf("the value went out as wire type %d, want fixed32 (%d)", seen[2], wireFixed32)
+	want := wireFixed32
+	if msgType == msgBinarySensorState {
+		want = wireVarint
+	}
+	if seen[2] != want {
+		t.Errorf("the value went out as wire type %d, want %d for message %d", seen[2], want, msgType)
 	}
 	return key, value, missing
+}
+
+// The volumes reader, from a speaker-level function. The jack is held still, so
+// a test that moves the speaker sees one push rather than two.
+func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
+	return func() device.MusicVolume {
+		v, ok := read()
+		return device.MusicVolume{Speaker: v, SpeakerOK: ok, Jack: 70, JackOK: true}
+	}
 }
 
 // Every sensor the server pushes, stubbed to a value nothing else would
@@ -634,11 +678,15 @@ func sensorReading(t *testing.T, payload []byte) (uint32, float32, bool) {
 func stubSensors(s *Server) map[uint32]float32 {
 	s.uptime = func() (float32, bool) { return 1234, true }
 	s.wifi = func() (float32, bool) { return -48, true }
-	s.volume = func() (float32, bool) { return 40, true }
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	s.memory = func() (float32, bool) { return 126.5, true }
+	s.volumes = func() device.MusicVolume {
+		return device.MusicVolume{Speaker: 40, SpeakerOK: true, Jack: 70, JackOK: true}
+	}
+	s.jack = func() (bool, bool) { return true, true }
 	return map[uint32]float32{
-		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40, s.keyCPU: 41.3, s.keyMemory: 126.5,
+		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
+		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
 	}
 }
 
@@ -647,7 +695,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 // the readers, so anything that asks the server how many sensors it has would
 // be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
 // honest.
-const sensorCount = 5
+const sensorCount = 7
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -681,10 +729,11 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a reading did not arrive: %v", err)
 		}
-		if msgType != msgSensorState {
-			t.Fatalf("got message type %d, want %d", msgType, msgSensorState)
+		if msgType != msgSensorState && msgType != msgBinarySensorState {
+			t.Fatalf("got message type %d, want a sensor (%d) or binary sensor (%d) state",
+				msgType, msgSensorState, msgBinarySensorState)
 		}
-		key, value, missing := sensorReading(t, payload)
+		key, value, missing := sensorReading(t, msgType, payload)
 		expected, known := want[key]
 		if !known {
 			t.Fatalf("a reading arrived under key %d, which is no sensor of ours", key)
@@ -703,12 +752,15 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 }
 
 // A reading that could not be taken is sent and flagged, not sent as zero and
-// not left out. Zero is a plausible value for all three, and Home Assistant
-// would draw it as a measurement; leaving it out is no better once a value has
-// been published, because the old one stays on screen as though it were current.
-// missing_state is the field the protocol has for exactly this.
+// not left out. Zero is a plausible value for every one of them, and Home
+// Assistant would draw it as a measurement; the jack is the worst of the seven,
+// because false there is "nothing is plugged in" rather than an obvious absence.
+// Leaving it out is no better once a value has been published, because the old
+// one stays on screen as though it were current. missing_state is the field the
+// protocol has for exactly this.
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
-	for _, failing := range []string{"uptime", "wifi_signal", "volume", "cpu_temperature", "memory_available"} {
+	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
+		"cpu_temperature", "memory_available", "audio_jack"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -726,8 +778,14 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				fail(&s.wifi)
 				failedKey = s.keyWifi
 			case "volume":
-				fail(&s.volume)
+				s.volumes = func() device.MusicVolume { return device.MusicVolume{Jack: 70, JackOK: true} }
 				failedKey = s.keyVolume
+			case "jack_volume":
+				s.volumes = func() device.MusicVolume { return device.MusicVolume{Speaker: 40, SpeakerOK: true} }
+				failedKey = s.keyJack
+			case "audio_jack":
+				s.jack = func() (bool, bool) { return false, false }
+				failedKey = s.keyJackOn
 			case "cpu_temperature":
 				fail(&s.cpu)
 				failedKey = s.keyCPU
@@ -748,11 +806,11 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 
 			seen := false
 			for n := 0; n < len(want); n++ {
-				_, payload, err := c.recv()
+				msgType, payload, err := c.recv()
 				if err != nil {
 					t.Fatalf("only %d of the %d readings arrived: %v", n, len(want), err)
 				}
-				key, value, missing := sensorReading(t, payload)
+				key, value, missing := sensorReading(t, msgType, payload)
 				if key != failedKey {
 					if missing {
 						t.Errorf("key %d was marked missing, and it was read successfully", key)
@@ -803,7 +861,7 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	// does not carry is visibly absent.
 	s.uptime = func() (float32, bool) { return 5678, true }
 	s.wifi = func() (float32, bool) { return -70, true }
-	s.volume = func() (float32, bool) { return 90, true }
+	s.volumes = speakerReads(func() (float32, bool) { return 90, true })
 	s.cpu = func() (float32, bool) { return 55.5, true }
 	s.memory = func() (float32, bool) { return 64.5, true }
 	s.publish("sensors", s.readTicked())
@@ -827,7 +885,7 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 		if msgType == msgPingResponse {
 			break
 		}
-		key, value, _ := sensorReading(t, payload)
+		key, value, _ := sensorReading(t, msgType, payload)
 		if name, isLive := live[key]; isLive {
 			t.Fatalf("the minute tick repeated the %s, which the short tick already sends when it changes", name)
 		}
@@ -1184,7 +1242,7 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 
 	// The others are held still, so every push below is the signal's.
 	s.uptime = func() (float32, bool) { return 1234, true }
-	s.volume = func() (float32, bool) { return 40, true }
+	s.volumes = speakerReads(func() (float32, bool) { return 40, true })
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	reads := func(v float32, ok bool) { s.wifi = func() (float32, bool) { return v, ok } }
 	signal := func() []reading { return pollAll(s) }
@@ -1202,11 +1260,11 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 	signal()
 
 	for _, expect := range []float32{-55, -60} {
-		_, payload, err := c.recv()
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("the push carrying %v did not arrive: %v", expect, err)
 		}
-		key, value, missing := sensorReading(t, payload)
+		key, value, missing := sensorReading(t, msgType, payload)
 		if key != s.keyWifi || value != expect || missing {
 			t.Errorf("a push carried key %d value %v missing %v, want the signal (%d) at %v",
 				key, value, missing, s.keyWifi, expect)
@@ -1223,11 +1281,11 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 	}
 	reads(0, false)
 	signal()
-	_, payload, err := c.recv()
+	msgType, payload, err := c.recv()
 	if err != nil {
 		t.Fatalf("the missing reading did not arrive: %v", err)
 	}
-	if _, _, missing := sensorReading(t, payload); !missing {
+	if _, _, missing := sensorReading(t, msgType, payload); !missing {
 		t.Error("a reading that could not be taken went out as a measurement")
 	}
 }
@@ -1240,10 +1298,10 @@ func TestAnUnreadableFirstReadingIsStillPublished(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	if got := s.publish("volume", []reading{{s.keyVolume, 0, false}}); len(got) != 1 {
+	if got := s.publish("volume", []reading{{key: s.keyVolume, value: 0, ok: false}}); len(got) != 1 {
 		t.Error("the first reading was not published, so a volume that cannot be read is never reported")
 	}
-	if got := s.publish("volume", []reading{{s.keyVolume, 0, false}}); len(got) != 0 {
+	if got := s.publish("volume", []reading{{key: s.keyVolume, value: 0, ok: false}}); len(got) != 0 {
 		t.Error("the same unreadable volume was published twice")
 	}
 }
@@ -1266,7 +1324,7 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 	pollAll(s)
 
 	// Turned to 50 between ticks, and a subscriber arrives inside that window.
-	s.volume = func() (float32, bool) { return 50, true }
+	s.volumes = speakerReads(func() (float32, bool) { return 50, true })
 	c, err := dial(t, s, psk)
 	if err != nil {
 		t.Fatal(err)
@@ -1276,17 +1334,17 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 	}
 	var told float32
 	for n := 0; n < sensorCount; n++ {
-		_, payload, err := c.recv()
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("the snapshot did not arrive: %v", err)
 		}
-		if key, v, _ := sensorReading(t, payload); key == s.keyVolume {
+		if key, v, _ := sensorReading(t, msgType, payload); key == s.keyVolume {
 			told = v
 		}
 	}
 
 	// Turned back before the next tick, so the poll sees no change at all.
-	s.volume = func() (float32, bool) { return 40, true }
+	s.volumes = speakerReads(func() (float32, bool) { return 40, true })
 	if got := pollAll(s); len(got) != 0 {
 		t.Fatal("the poll published; this test no longer covers the case it was written for")
 	}
@@ -1336,7 +1394,7 @@ func TestPublishLogsWhatItCouldNotSendAfterDroppingTheLock(t *testing.T) {
 	s.conns[stalled] = struct{}{}
 	s.mu.Unlock()
 
-	s.publish("volume", []reading{{s.keyVolume, 40, true}})
+	s.publish("volume", []reading{{key: s.keyVolume, value: 40, ok: true}})
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1365,9 +1423,9 @@ func TestAFailedSendDropsTheConnectionRatherThanContinuing(t *testing.T) {
 	s.mu.Unlock()
 
 	s.publish("sensors", []reading{
-		{s.keyUptime, 1, true},
-		{s.keyWifi, -48, true},
-		{s.keyVolume, 40, true},
+		{key: s.keyUptime, value: 1, ok: true},
+		{key: s.keyWifi, value: -48, ok: true},
+		{key: s.keyVolume, value: 40, ok: true},
 	})
 
 	s.mu.Lock()
@@ -1398,12 +1456,12 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
-	s.volume = func() (float32, bool) {
+	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
 		reads++
 		mu.Unlock()
 		return 40, true
-	}
+	})
 
 	// Connected before the poll starts, and saying nothing: the poll's first
 	// look has a connection to see, and a poll that reads for one that has not
@@ -1429,11 +1487,11 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 	// woke the poll: the next tick is thirty seconds away.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		_, payload, err := c.recv()
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("waiting for the volume: %v", err)
 		}
-		if key, v, _ := sensorReading(t, payload); key == s.keyVolume {
+		if key, v, _ := sensorReading(t, msgType, payload); key == s.keyVolume {
 			if v != 40 {
 				t.Errorf("the woken poll published %v, want 40", v)
 			}
@@ -1461,7 +1519,8 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	count := func(v float32) func() (float32, bool) {
 		return func() (float32, bool) { mu.Lock(); reads++; mu.Unlock(); return v, true }
 	}
-	s.volume, s.uptime, s.wifi = count(40), count(1234), count(-48)
+	s.uptime, s.wifi = count(1234), count(-48)
+	s.volumes = speakerReads(count(40))
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -1563,11 +1622,11 @@ func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	for {
-		_, payload, err := c.recv()
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("subscribing left the uptime at its published value with no read to correct it before the next tick: %v", err)
 		}
-		if key, v, _ := sensorReading(t, payload); key == s.keyUptime && v == 9999 {
+		if key, v, _ := sensorReading(t, msgType, payload); key == s.keyUptime && v == 9999 {
 			return
 		}
 	}
@@ -1586,12 +1645,12 @@ func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
-	s.volume = func() (float32, bool) {
+	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
 		reads++
 		mu.Unlock()
 		return 40, true
-	}
+	})
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -1670,8 +1729,8 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 
 	// One of the two moves; the other is exactly what was published.
 	s.publish("sensors", []reading{
-		{s.keyUptime, 4321, true},
-		{s.keyWifi, stubSensors(s)[s.keyWifi], true},
+		{key: s.keyUptime, value: 4321, ok: true},
+		{key: s.keyWifi, value: stubSensors(s)[s.keyWifi], ok: true},
 	})
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
@@ -1687,7 +1746,7 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 		if msgType == msgPingResponse {
 			return
 		}
-		key, value, _ := sensorReading(t, payload)
+		key, value, _ := sensorReading(t, msgType, payload)
 		if key != s.keyUptime {
 			t.Errorf("a reading equal to the published one was sent again: key %d carried %v", key, value)
 		}
@@ -1709,12 +1768,12 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
-	s.volume = func() (float32, bool) {
+	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
 		reads++
 		mu.Unlock()
 		return 40, true
-	}
+	})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return reads }
 
 	// A tick far away, so a read here is one a connection asked for; and a gap
@@ -1774,12 +1833,12 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
-	s.volume = func() (float32, bool) {
+	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
 		reads++
 		mu.Unlock()
 		return 40, true
-	}
+	})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return reads }
 
 	s.liveGap = 2 * time.Second
@@ -1858,11 +1917,11 @@ func TestEveryListedSensorHasAPollThatPublishesIt(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for len(want) > 0 && time.Now().Before(deadline) {
-		_, payload, err := c.recv()
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("waiting on the polls: %v", err)
 		}
-		key, _, _ := sensorReading(t, payload)
+		key, _, _ := sensorReading(t, msgType, payload)
 		delete(want, key)
 	}
 	for key := range want {
@@ -1958,4 +2017,94 @@ func TestTheSensorCountMatchesTheListing(t *testing.T) {
 	if got := len(listed(t, s)); got != sensorCount {
 		t.Errorf("the server lists %d sensors and sensorCount is %d", got, sensorCount)
 	}
+}
+
+// The jack is published the same way every other reading is: once, when it
+// changes. That is the state change an automation triggers on, and it has to
+// arrive as a binary sensor state rather than as a sensor state carrying 1.
+func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	want := stubSensors(s)
+
+	occupied := true
+	s.jack = func() (bool, bool) { return occupied, true }
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	pollAll(s)
+	for n := 0; n < len(want); n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the first readings did not arrive: %v", err)
+		}
+	}
+
+	// Unplugged, then polled twice: the change goes out once.
+	occupied = false
+	if got := pollAll(s); len(got) != 1 {
+		t.Fatalf("unplugging published %d readings, want 1", len(got))
+	}
+	if got := pollAll(s); len(got) != 0 {
+		t.Error("a jack state equal to the published one was sent again")
+	}
+
+	msgType, payload, err := c.recv()
+	if err != nil {
+		t.Fatalf("the unplug did not arrive: %v", err)
+	}
+	if msgType != msgBinarySensorState {
+		t.Fatalf("the jack went out as message %d, want a binary sensor state (%d)",
+			msgType, msgBinarySensorState)
+	}
+	key, value, missing := sensorReading(t, msgType, payload)
+	if key != s.keyJackOn || value != 0 || missing {
+		t.Errorf("the unplug carried key %d value %v missing %v, want the jack (%d) at 0",
+			key, value, missing, s.keyJackOn)
+	}
+
+	// And plugged back in.
+	occupied = true
+	if got := pollAll(s); len(got) != 1 {
+		t.Fatalf("plugging in published %d readings, want 1", len(got))
+	}
+	msgType, payload, err = c.recv()
+	if err != nil {
+		t.Fatalf("the plug did not arrive: %v", err)
+	}
+	if key, value, _ := sensorReading(t, msgType, payload); key != s.keyJackOn || value != 1 {
+		t.Errorf("the plug carried key %d value %v, want the jack (%d) at 1", key, value, s.keyJackOn)
+	}
+}
+
+// A jack that cannot be read is reported as missing rather than as unplugged,
+// because unplugged is a state somebody would act on.
+func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	s.jack = func() (bool, bool) { return false, false }
+
+	for _, r := range s.readLive() {
+		if r.key != s.keyJackOn {
+			continue
+		}
+		if r.ok {
+			t.Error("a jack that could not be read was reported as a state")
+		}
+		if !r.binary {
+			t.Error("the jack went out as a sensor rather than a binary sensor")
+		}
+		return
+	}
+	t.Error("the live poll carries no jack reading at all")
 }
