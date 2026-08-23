@@ -103,11 +103,11 @@ func TestTheReadmeNamesTheKeyPathTheDaemonReads(t *testing.T) {
 	}
 }
 
-// The daemon picks the push interval and the package enforces the deadline, so
-// nothing but this connects the two.
-func TestTheSensorTickDoesNotSilenceTheClient(t *testing.T) {
+// The daemon picks the push interval and the package sets the floor, so nothing
+// but this connects the two.
+func TestTheSensorTickRespectsTheFloor(t *testing.T) {
 	if sensorTick < esphome.MinSensorTick {
-		t.Errorf("sensorTick is %v, under the %v that keeps a connection alive", sensorTick, esphome.MinSensorTick)
+		t.Errorf("sensorTick is %v, under the %v floor PollSensors would raise it to", sensorTick, esphome.MinSensorTick)
 	}
 }
 

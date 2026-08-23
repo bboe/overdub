@@ -43,7 +43,7 @@ func wantsStates(c *conn) bool { return c.states }
 
 func (s *Server) PollSensors(every time.Duration) {
 	if every < MinSensorTick {
-		log.Printf("esphome api: sensor tick of %v raised to %v, under it the client stops pinging", every, MinSensorTick)
+		log.Printf("esphome api: sensor tick of %v raised to the %v floor", every, MinSensorTick)
 		every = MinSensorTick
 	}
 	for range time.Tick(every) {

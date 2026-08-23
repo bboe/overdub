@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -22,13 +23,18 @@ const (
 	maxConns  = 8
 	sendQueue = 64
 
-	idleWait = 90 * time.Second
+	// ESPHome's own numbers: the device pings after this much silence and gives
+	// up at two and a half times it. docs/architecture.md says why the ratio is
+	// worth copying.
+	pingAfter = 60 * time.Second
+	idleWait  = pingAfter * 5 / 2
 
 	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
 	clientKeepalive = 20 * time.Second
 
-	// MinSensorTick is the shortest state-push interval that leaves a connection
-	// alive. docs/architecture.md has the measurement.
+	// MinSensorTick is the floor on how often state is pushed. It is a bound on
+	// traffic rather than on the connection's life, which the ping now keeps.
+	// docs/architecture.md has the measurement it came from.
 	MinSensorTick = 30 * time.Second
 
 	// The log is a file on /data that is truncated at boot, and every line below
@@ -103,8 +109,9 @@ type Server struct {
 	uptime func() (float32, bool)
 	wifi   func() (float32, bool)
 
-	// A field so a test can shrink it without racing another test's server.
+	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
+	pingWait      time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -127,6 +134,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		handshakeWait: 10 * time.Second,
+		pingWait:      pingAfter,
 		conns:         map[*conn]struct{}{},
 	}
 }
@@ -267,18 +275,33 @@ func (s *Server) serveConn(netConn net.Conn) {
 	}()
 
 	decrypted := false
+	pinged := false
 	for {
 		if decrypted {
-			netConn.SetReadDeadline(time.Now().Add(idleWait))
+			netConn.SetReadDeadline(time.Now().Add(s.readWait(pinged)))
 		} else {
 			netConn.SetReadDeadline(handshakeDeadline)
 		}
 		msgType, payload, err := conn.rw.read()
 		if err != nil {
+			// aioesphomeapi pings only when it has not heard from the device, so
+			// a device that talks enough is never pinged and a deadline waiting
+			// for that ping expires on a connection that is working. Asking is
+			// what makes the deadline ours: the reply is a read, and a peer that
+			// cannot answer one is gone whatever it was sending.
+			if decrypted && !pinged && resumable(err) {
+				pinged = true
+				if err := s.send(conn, msgPingRequest, nil); err != nil {
+					s.peerLogf("esphome api: %s ping: %v", netConn.RemoteAddr(), err)
+					return
+				}
+				continue
+			}
 			s.peerLogf("esphome api: %s read: %v", netConn.RemoteAddr(), err)
 			return
 		}
 		decrypted = true
+		pinged = false
 		if err := s.handle(conn, msgType, payload); err != nil {
 			s.peerLogf("esphome api: %s handling message %d: %v", netConn.RemoteAddr(), msgType, err)
 			return
@@ -327,6 +350,22 @@ func walk(what string, payload []byte, fn func(pbField)) error {
 		return fmt.Errorf("malformed %s: %w", what, err)
 	}
 	return nil
+}
+
+// Whether the ping can take over a read that has just expired. Only a read that
+// took nothing off the socket qualifies: docs/architecture.md says why a frame
+// that stopped part-way cannot be retried.
+func resumable(err error) bool {
+	return errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, errMidFrame)
+}
+
+// Silence before the ping, and what is left of the budget after it. The two
+// together are idleWait. docs/architecture.md says why the second is the longer.
+func (s *Server) readWait(pinged bool) time.Duration {
+	if pinged {
+		return s.pingWait * 3 / 2
+	}
+	return s.pingWait
 }
 
 func (s *Server) handle(conn *conn, msgType int, payload []byte) error {

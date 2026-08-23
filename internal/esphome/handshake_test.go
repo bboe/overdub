@@ -221,7 +221,7 @@ func TestAShortDecryptedMessageIsRefusedRatherThanSliced(t *testing.T) {
 // The read deadline does not reach this: the server is blocked writing, not
 // reading. Without a write deadline a peer that sends its hello and then never
 // reads holds one of the eight slots for the life of the daemon, which is worse
-// than the ninety seconds a replay would have bought.
+// than the whole idle budget a replay would have bought.
 func TestAPeerThatNeverReadsDoesNotHoldItsSlot(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.handshakeWait = 300 * time.Millisecond
@@ -501,7 +501,7 @@ func TestTheWireConstantsAreWhatESPHomeExpects(t *testing.T) {
 // the key, but nothing fresh from the responder goes into it, so a passive
 // listener can replay it verbatim and Noise will not refuse it. What a replayer
 // cannot do is send a frame that decrypts, so that is what has to buy the
-// ninety-second deadline. Eight replays would otherwise hold every slot.
+// idle deadline. Eight replays would otherwise hold every slot.
 func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	psk := make([]byte, noisePSKLen)
 	if _, err := rand.Read(psk); err != nil {
@@ -575,7 +575,7 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("a replayed handshake held its slot past the handshake wait; " +
-			"eight of those lock Home Assistant out for ninety seconds apiece")
+			"eight of those lock Home Assistant out for the whole idle budget apiece")
 	}
 	if held := time.Since(opened); held > 3*s.handshakeWait/2 {
 		t.Errorf("the slot was held %v, past the %v a peer that has proved nothing gets",
@@ -650,7 +650,7 @@ func TestAnOversizeHandshakeFrameIsRefusedForItsSize(t *testing.T) {
 // deadSocket completes a handshake and then refuses every write, reading on
 // regardless. That is a peer whose socket is still up and whose receive window
 // has shut: the write fails, and only the close in the write loop ends the
-// connection. Without that close the read loop waits out the ninety-second idle
+// connection. Without that close the read loop waits out the whole idle
 // deadline still holding a slot.
 type deadSocket struct {
 	net.Conn
@@ -698,7 +698,7 @@ func TestAFailedWriteClosesTheSocketRatherThanWaitingOutTheIdleDeadline(t *testi
 	select {
 	case <-dead.closed:
 	case <-time.After(3 * time.Second):
-		t.Fatal("a failed write left the socket open, so the read loop holds the slot for ninety seconds")
+		t.Fatal("a failed write left the socket open, so the read loop holds the slot for the whole idle budget")
 	}
 	select {
 	case <-served:

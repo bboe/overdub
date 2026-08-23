@@ -3,6 +3,7 @@ package esphome
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"log"
 	"math"
@@ -55,7 +56,7 @@ func TestTheReadLoopActsOnHandlesError(t *testing.T) {
 	}
 
 	// Decided by the read returning rather than by a deadline: the connection has
-	// 90 seconds of idle left, so only the teardown can end it this quickly.
+	// a full idle budget left, so only the teardown can end it this quickly.
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := c.recv()
@@ -509,24 +510,22 @@ type fakeAddr struct{ net.Conn }
 
 func (fakeAddr) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1234} }
 
-// The three numbers are a chain rather than three independent choices: a push
-// cancels the client's ping, so the deadline has to outlast a push interval plus
-// the wait that follows it.
-func TestTheIdleDeadlineOutlastsWhatTheClientSaysOnItsOwn(t *testing.T) {
-	if MinSensorTick <= clientKeepalive {
-		t.Errorf("a %v push interval cancels a %v keepalive before it ever fires, so the client falls silent",
-			MinSensorTick, clientKeepalive)
-	}
-	if idleWait <= MinSensorTick+clientKeepalive {
-		t.Errorf("idleWait is %v, and a client can legitimately say nothing for %v",
-			idleWait, MinSensorTick+clientKeepalive)
+// A client that is still talking fills the deadline by itself, and the ping is
+// for one that has stopped. aioesphomeapi's timer is fixed and repeating rather
+// than reset by traffic, so a message buys one tick and the longest a healthy
+// client stays quiet is two of them. Ping sooner than that and every connection
+// is asked something it was already about to say.
+func TestAClientThatIsStillTalkingIsNeverPinged(t *testing.T) {
+	if quiet := 2 * clientKeepalive; pingAfter <= quiet {
+		t.Errorf("pingAfter is %v, but a client that is talking normally can be quiet for %v",
+			pingAfter, quiet)
 	}
 }
 
 // The constant is exported as a contract, so the package has to hold it rather
 // than leave it to a test on the caller: a second caller, or a flag, would get
 // no protection from a test that compares two constants.
-func TestPollSensorsWillNotAcceptATickThatSilencesTheClient(t *testing.T) {
+func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
@@ -733,5 +732,316 @@ func TestThePollPushesBothReadings(t *testing.T) {
 			t.Errorf("the poll sent %v for key %d, want %v", value, key, expected)
 		}
 		delete(want, key)
+	}
+}
+
+// aioesphomeapi pings only when it has not heard from the device, and cancels
+// the pending one on any message. A device that talks often enough is never
+// pinged, and a read deadline waiting for that ping expires on a connection
+// that is working. So the deadline is satisfied by a ping of our own.
+func TestAQuietConnectionIsPingedRatherThanDropped(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.pingWait = 150 * time.Millisecond
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One message first: the longer deadline is bought by a frame that decrypts,
+	// not by finishing the handshake, and until then the handshake budget runs.
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingResponse {
+		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
+	}
+
+	// Then say nothing at all, twice over, answering each ping. A client that only
+	// ever answers is one the deadline must not drop.
+	for round := 1; round <= 2; round++ {
+		msgType, _, err := c.recv()
+		if err != nil {
+			t.Fatalf("round %d: no ping arrived: %v", round, err)
+		}
+		if msgType != msgPingRequest {
+			t.Fatalf("round %d: got message type %d, want a ping (%d)", round, msgType, msgPingRequest)
+		}
+		if err := c.send(msgPingResponse, nil); err != nil {
+			t.Fatalf("round %d: answering the ping: %v", round, err)
+		}
+	}
+}
+
+// The ping is asked once. A peer that will not answer it is gone, and the
+// budget it is gone after is ESPHome's, two and a half pings.
+func TestAPeerThatWillNotAnswerThePingIsDropped(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.pingWait = 150 * time.Millisecond
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingResponse {
+		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
+	}
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingRequest {
+		t.Fatalf("no ping arrived: type %d, %v", msgType, err)
+	}
+
+	// Answer nothing. The next deadline has no second ping to spend.
+	if _, _, err := c.recv(); err == nil {
+		t.Error("a peer that never answered the ping was still connected")
+	}
+}
+
+// ESPHome's own shape: its device pings after KEEPALIVE_TIMEOUT_MS of silence
+// and gives up at two and a half times it, so a client that is slow to answer
+// is given longer than one that has merely gone quiet.
+func TestTheKeepaliveBudgetMatchesESPHome(t *testing.T) {
+	if pingAfter != 60*time.Second {
+		t.Errorf("pingAfter is %v, want ESPHome's KEEPALIVE_TIMEOUT_MS of 60s", pingAfter)
+	}
+	// The literal, not pingAfter*5/2: that would restate the line that defines
+	// idleWait and could not fail.
+	if idleWait != 150*time.Second {
+		t.Errorf("idleWait is %v, want ESPHome's KEEPALIVE_DISCONNECT_TIMEOUT of 150s", idleWait)
+	}
+
+	// What a Dot actually runs with. Every other test here shrinks pingWait, so
+	// without this nothing reads what NewServer sets.
+	if live := NewServer("dot", "model", "00:00:5E:00:53:00", make([]byte, noisePSKLen)); live.pingWait != 60*time.Second {
+		t.Errorf("NewServer starts a connection on %v, want %v", live.pingWait, pingAfter)
+	}
+
+	// The two waits the read loop actually spends have to add up to that budget,
+	// or the constant documents a timeout the code does not keep.
+	s := &Server{pingWait: pingAfter}
+	if spent := s.readWait(false) + s.readWait(true); spent != idleWait {
+		t.Errorf("the read loop spends %v before it gives up, want %v", spent, idleWait)
+	}
+	if s.readWait(true) <= s.readWait(false) {
+		t.Error("the wait after the ping is not the longer one, so a slow answer costs the connection")
+	}
+}
+
+// The ping is for a peer that has proved it holds the key and then gone quiet.
+// A peer that finishes the handshake and sends nothing has proved nothing --
+// message 1 replays verbatim -- and gets the handshake budget and no more. Ping
+// it and that budget doubles, which is a slot held twice as long for free.
+func TestAPeerThatHasProvedNothingIsNotPinged(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.handshakeWait = 600 * time.Millisecond
+	s.pingWait = 50 * time.Millisecond
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Say nothing. The handshake budget runs out and that is the whole of it.
+	start := time.Now()
+	msgType, _, err := c.recv()
+	took := time.Since(start)
+	if err == nil {
+		t.Errorf("a peer that sent nothing was answered with message type %d", msgType)
+	}
+	if msgType == msgPingRequest {
+		t.Error("a peer that never decrypted a frame was pinged, which buys it a second deadline")
+	}
+	// Which end hung up matters as much as that one did: the client carries a
+	// deadline of its own, and without this the test passes against a server
+	// that holds the slot for ever.
+	if took > 3*s.handshakeWait {
+		t.Errorf("the connection lasted %v, well past the %v budget: the client's own deadline ended it, not the server",
+			took, s.handshakeWait)
+	}
+}
+
+// The asymmetry is spent on the client: a peer that has been asked something
+// waits longer than one that has merely gone quiet. Measured as one span from a
+// single mark rather than as two intervals either side of the ping, because
+// those two are anti-correlated -- noticing the ping late inflates the first and
+// shrinks the second by the same amount, so a scheduling hiccup of a few tens of
+// milliseconds fails an honest server. This span only ever grows.
+//
+// A whole second rather than the milliseconds the other tests use, because the
+// band has to separate 2.5 from the 3 a hard-coded readWait(true) spends, and
+// what a loaded machine adds is a fixed number of milliseconds rather than a
+// proportion. Measured under one emulated ARM cpu against eight busy ones, a
+// truthful run reached 2.99 at 300ms, which is inside the mutant. Widening the
+// band cannot fix that and scaling it can.
+func TestTheWaitAfterThePingIsSpentOnTheClient(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.pingWait = time.Second
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingResponse {
+		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
+	}
+
+	start := time.Now()
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingRequest {
+		t.Fatalf("no ping arrived: type %d, %v", msgType, err)
+	}
+	if _, _, err := c.recv(); err == nil {
+		t.Fatal("a peer that never answered the ping was still connected")
+	}
+	lived := time.Since(start)
+
+	// Two and a half pingWaits. Hard-coding either branch of readWait at the call
+	// site gives two (both short) or three (both long), and the band is wide
+	// enough that only those land outside it.
+	if low, high := s.pingWait*11/5, s.pingWait*14/5; lived < low || lived > high {
+		t.Errorf("a quiet connection lasted %v, want about %v (between %v and %v): the two waits are not %v then half again",
+			lived, s.pingWait*5/2, low, high, s.pingWait)
+	}
+}
+
+// The ping takes over a read that expired, so it may only do so when that read
+// took nothing off the socket. io.ReadFull copies what it got into a buffer the
+// caller drops with the error, so retrying a frame that stopped part-way reads
+// the rest of it as a fresh header and every frame after that is garbage. Both
+// of the reads it makes can stop that way, and the payload one always has the
+// header behind it.
+func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sent int // bytes of the frame the server is given before the stall
+	}{
+		{"part of the header", 2},
+		{"the whole header and none of the payload", 3},
+		{"the header and part of the payload", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out lockedBuffer
+			defer restoreLog(t, &out)()
+
+			psk := testPSK(t)
+			s := testServer(t, psk)
+			s.pingWait = 150 * time.Millisecond
+
+			c, err := dial(t, s, psk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.send(msgPingRequest, nil); err != nil {
+				t.Fatal(err)
+			}
+			if msgType, _, err := c.recv(); err != nil || msgType != msgPingResponse {
+				t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
+			}
+
+			// A whole valid frame, of which the server is given only the front.
+			inner := make([]byte, 4)
+			binary.BigEndian.PutUint16(inner[0:2], uint16(msgPingRequest))
+			sealed, err := c.out.Encrypt(nil, nil, inner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame := make([]byte, 3, 3+len(sealed))
+			frame[0] = leadEncrypted
+			binary.BigEndian.PutUint16(frame[1:3], uint16(len(sealed)))
+			frame = append(frame, sealed...)
+			if tc.sent >= len(frame) {
+				t.Fatalf("the frame is only %d bytes, so %d of it is all of it", len(frame), tc.sent)
+			}
+			// Inside pingWait of the server's last read, or the stall under test is
+			// the wait rather than the frame. One small encrypt stands between the
+			// two, so the margin is wide.
+			if _, err := c.conn.Write(frame[:tc.sent]); err != nil {
+				t.Fatal(err)
+			}
+
+			// The deadline now expires part-way through. Answering it with a ping
+			// would leave the server inside a frame it can never resynchronise.
+			msgType, _, err := c.recv()
+			if err == nil {
+				t.Fatalf("a half-read frame was answered with message type %d rather than dropped", msgType)
+			}
+			if msgType == msgPingRequest {
+				t.Error("the server pinged part-way through a frame, so the rest of it becomes a header")
+			}
+			// The operator's only signal. Blaming the peer for a lead byte this end
+			// lost is the failure the mark exists to prevent being reported as.
+			if said := out.String(); !strings.Contains(said, "mid-frame") {
+				t.Errorf("the log does not say the stream was left mid-frame: %s", said)
+			}
+		})
+	}
+}
+
+// Only a deadline is a peer that has gone quiet. Every other read error is a
+// peer that said something wrong, and pinging it spends the one ping this
+// connection has on a question already answered.
+func TestOnlyAnExpiredReadDrawsAPing(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	// Under the client's own deadline, so a drop this test sees is the server's,
+	// and far enough above an immediate one that a ping could not be mistaken for
+	// the error's doing.
+	s := testServer(t, psk)
+	s.pingWait = 2 * time.Second
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if msgType, _, err := c.recv(); err != nil || msgType != msgPingResponse {
+		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
+	}
+
+	// A frame that will not decrypt. The deadline is ten seconds away, so a ping
+	// arriving here came from the error rather than from silence.
+	if err := writeNoiseFrame(c.w, []byte("not sealed under the key at all")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	msgType, _, err := c.recv()
+	took := time.Since(start)
+	if err == nil {
+		t.Fatalf("a frame that failed to decrypt was answered with message type %d", msgType)
+	}
+	if msgType == msgPingRequest {
+		t.Error("a peer that sent an undecryptable frame was pinged rather than dropped")
+	}
+	// The error ends it, so it ends at once. Left unbounded this passes on any
+	// deadline that happens to expire later, the client's included.
+	if took > s.pingWait/2 {
+		t.Errorf("the drop took %v, long enough that a deadline ended it rather than the frame", took)
 	}
 }

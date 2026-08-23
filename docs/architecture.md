@@ -52,15 +52,15 @@ Home Assistant enforces no floor, so the number states what is implemented
 rather than how recent the device is.
 
 Only a frame that decrypts buys the longer read deadline, so a peer that cannot
-prove it has the key holds a slot for ten seconds rather than ninety. Finishing
-the handshake is not that proof. Message 1 is sealed under the key, so a peer
-cannot compose one without it, but nothing fresh from this side goes into it, so
-a captured one replays verbatim and Noise will not refuse it. What a replayer
-cannot do is send a frame that decrypts, and eight of them would otherwise hold
-every slot for ninety seconds apiece on a captured message and no key. Ten
-seconds is one budget rather than one per read, for the same reason: a peer that
-stalled the handshake to just inside its deadline would otherwise be given a
-second full wait to send that first frame in.
+prove it has the key holds a slot for ten seconds rather than the full idle
+budget. Finishing the handshake is not that proof. Message 1 is sealed under the
+key, so a peer cannot compose one without it, but nothing fresh from this side
+goes into it, so a captured one replays verbatim and Noise will not refuse it.
+What a replayer cannot do is send a frame that decrypts, and eight of them would
+otherwise hold every slot for the whole idle budget apiece on a captured message
+and no key. Ten seconds is one budget rather than one per read, for the same
+reason: a peer that stalled the handshake to just inside its deadline would
+otherwise be given a second full wait to send that first frame in.
 
 A connection is counted against the eight from the moment it opens rather than
 from the moment its handshake succeeds, because a socket that is not counted is
@@ -95,19 +95,66 @@ sensor push is logged after the lock is dropped. The lock gates the accept
 path's cap check and every other connection's handler, so a write to `/data`
 underneath it stalls the server.
 
-The ninety-second idle deadline, the sixty-second sensor push and the client's
-own keepalive are one chain rather than three separate numbers. The deadline is
-a read deadline and this daemon never pings, so on an otherwise quiet connection
-the only thing that satisfies it is Home Assistant's keepalive, and
-`aioesphomeapi` cancels that ping on *any* message from the device, our own
-state pushes included. Push more often than the client waits and it stops
-pinging altogether, and the deadline then expires on a connection that is
-perfectly healthy. Measured against the real client: a five-second tick drops
-Home Assistant at exactly ninety seconds, over and over, with a reconnect each
-time. `MinSensorTick` is where that constraint is written down, and
-`PollSensors` raises anything under it to the floor rather than trusting its
-caller, because the constant is exported and the cost of getting it wrong lands
-on a connection that is working.
+The idle deadline is a read deadline, and what fills it is a ping.
+`aioesphomeapi` runs a twenty-second timer that repeats from the moment it
+connects, and *any* message from the device, our own state pushes included,
+clears the ping that timer has pending. The timer itself never moves, so what a
+message buys is one tick rather than a fresh twenty seconds, and the silence
+before a ping actually goes out is between twenty and forty. Either way a device
+that talks often enough is never pinged, and a deadline waiting for that ping
+expires on a connection that is perfectly healthy. Measured against the real
+client: a five-second push cadence dropped Home Assistant at exactly ninety
+seconds, over and over, with a reconnect each time.
+
+The deadline is ours rather than the client's because this daemon asks. Sixty
+seconds of silence draws a `PingRequest` from this side; the answer is a read,
+and the deadline resets on it. Ninety more without one drops the connection.
+What has gone is the requirement that the client speak first, and with it the
+rule that this daemon stay quieter than the client's own timer.
+
+The ping takes over a read that has just expired, and it may only do that when
+the read took nothing off the socket. `io.ReadFull` copies what it did get into
+a buffer the caller drops along with the error, so a frame that stopped part-way
+is already missing those bytes: reading again would take the rest of that frame
+as a fresh header, and everything behind it as rubbish. So `readNoiseFrame`
+marks every error it returns once the header is read, and the loop drops the
+connection on those rather than spending its ping, which is what every read
+error did before there was a ping to spend. The mark is on all of them and not
+only on the expiry that can reach the ping today, because what it records is
+that the stream is no longer at a frame boundary; a later reader who widens what
+may be resumed should find that already true rather than have to notice it. Home
+Assistant does not produce the case at all -- that needs a segment boundary
+inside a frame and then a whole deadline of silence -- but the alternative is a
+frame that arrives complete and inside the budget and is refused anyway, under a
+log line blaming the peer for bytes this end lost.
+
+Those are ESPHome's numbers and ESPHome's shape rather than ones chosen here.
+Its own firmware pings at `KEEPALIVE_TIMEOUT_MS`, sixty seconds, and gives up at
+`KEEPALIVE_DISCONNECT_TIMEOUT`, two and a half times it. The ratio is the part
+worth copying, and not because a ping can go missing. TCP retransmits, so the
+ping is not lost the way a UDP datagram would be. What TCP will not do is say
+whether it arrived, and it will not report a peer that has vanished either: on
+this device `tcp_retries2` is 15, so the kernel spends about fifteen minutes on
+an unacknowledged write before it gives up. The whole hundred and fifty second
+budget sits inside that window, which is why the read deadline is what ends
+these connections and never the socket. So what the margin buys is a slow answer
+rather than a missing one. A Home Assistant part-way through a recorder write, a
+garbage collection or an integration reload will service its socket late, and
+the longer of the two waits is the one spent on a client that has been asked
+something rather than one that has merely gone quiet. Splitting a single budget
+in half, which is where this started, gives it the shorter wait instead.
+
+An unreachable peer now costs a hundred and fifty seconds rather than ninety.
+The budget that bounds slot exhaustion is the other one and it has not moved:
+the ping is only for a peer that has proved it holds the key, and finishing the
+handshake is not that proof, since message 1 replays verbatim. A connection that
+has decrypted nothing keeps its ten seconds and is not pinged -- pinging it
+would hand it a second deadline and twice the slot for free. ESPHome draws the
+same line, updating its `last_traffic_` only after authentication.
+
+`MinSensorTick` remains the floor on `PollSensors` because a tick under it is
+still a lot of traffic for readings that change slowly, but it is no longer what
+keeps the connection alive.
 
 The sensors are read once per tick and each is sent only if its read
 succeeded. A reading that failed is left out rather than sent as zero, because

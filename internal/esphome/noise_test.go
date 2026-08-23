@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -89,6 +90,36 @@ func TestReadNoiseFrameRejectsTruncated(t *testing.T) {
 	r := bufio.NewReader(bytes.NewReader([]byte{0x01, 0x00, 0x04, 0xaa, 0xbb}))
 	if _, err := readNoiseFrame(r, maxDataFrame); err == nil {
 		t.Fatal("readNoiseFrame accepted a truncated payload")
+	}
+}
+
+// Whether the stream is still at a frame boundary is what decides if a read can
+// be taken over rather than dropped, so every return that has already taken the
+// header off the socket has to say so. A return added later that does not is a
+// resume three bytes into a frame.
+func TestEveryErrorPastTheHeaderSaysTheStreamIsMidFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bytes []byte
+		limit int
+		mid   bool
+	}{
+		{"nothing at all", nil, maxDataFrame, false},
+		{"part of the header", []byte{0x01}, maxDataFrame, true},
+		{"a plaintext lead byte", []byte{0x00, 0x00, 0x01, 0x42}, maxDataFrame, true},
+		{"a length past the limit", []byte{0x01, 0xff, 0xff}, maxHandshakeFrame, true},
+		{"a payload that stops short", []byte{0x01, 0x00, 0x04, 0xaa, 0xbb}, maxDataFrame, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bufio.NewReader(bytes.NewReader(tc.bytes))
+			_, err := readNoiseFrame(r, tc.limit)
+			if err == nil {
+				t.Fatal("readNoiseFrame accepted it")
+			}
+			if got := errors.Is(err, errMidFrame); got != tc.mid {
+				t.Errorf("errors.Is(err, errMidFrame) = %v, want %v for %v: %v", got, tc.mid, tc.bytes, err)
+			}
+		})
 	}
 }
 

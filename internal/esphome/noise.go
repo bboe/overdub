@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -60,21 +61,30 @@ const (
 	maxDataFrame      = 32768
 )
 
+// errMidFrame marks an error left with the stream no longer at a frame
+// boundary, because part of one is already off the socket. Every return below
+// that follows the header read carries it. docs/architecture.md says why such a
+// read cannot be retried.
+var errMidFrame = errors.New("stream left mid-frame")
+
 func readNoiseFrame(r *bufio.Reader, limit int) ([]byte, error) {
 	var head [3]byte
-	if _, err := io.ReadFull(r, head[:]); err != nil {
+	if n, err := io.ReadFull(r, head[:]); err != nil {
+		if n > 0 {
+			return nil, fmt.Errorf("%w: %w", errMidFrame, err)
+		}
 		return nil, err
 	}
 	if head[0] != leadEncrypted {
-		return nil, fmt.Errorf("expected an encrypted frame, got lead byte 0x%02x", head[0])
+		return nil, fmt.Errorf("%w: expected an encrypted frame, got lead byte 0x%02x", errMidFrame, head[0])
 	}
 	size := int(binary.BigEndian.Uint16(head[1:3]))
 	if size > limit {
-		return nil, fmt.Errorf("frame of %d bytes exceeds the %d byte limit", size, limit)
+		return nil, fmt.Errorf("%w: frame of %d bytes exceeds the %d byte limit", errMidFrame, size, limit)
 	}
 	payload := make([]byte, size)
 	if _, err := io.ReadFull(r, payload); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errMidFrame, err)
 	}
 	return payload, nil
 }
