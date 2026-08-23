@@ -215,6 +215,10 @@ Dot's own firewall.
 | `sensor.<name>_uptime` | diagnostic | seconds since boot |
 | `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 
+Both are read once a minute, and again when Home Assistant connects, and are
+sent only when they change: the uptime arrives every minute and the signal only
+when it moves.
+
 Both are read-only, and both are the connection proved end to end. The button
 still chimes on the device, and Home Assistant is not told about it.
 

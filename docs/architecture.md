@@ -156,11 +156,11 @@ same line, updating its `last_traffic_` only after authentication.
 still a lot of traffic for readings that change slowly, but it is no longer what
 keeps the connection alive.
 
-The sensors are read once per tick and each is sent only if its read
-succeeded. A reading that failed is left out rather than sent as zero, because
-zero is a plausible value for both of them: zero dBm is a signal level and zero
-seconds an uptime, so Home Assistant would draw either as a measurement rather
-than as the gap it is.
+The sensors are read once per tick, and once more whenever a connection
+subscribes for the first time. Zero is a plausible value for both of them --
+zero dBm is a signal level and zero seconds an uptime -- so a reading that could
+not be taken cannot be published as one, which the paragraph on `missing_state`
+below picks up.
 
 The signal is the fourth field of the `wlan0` line in `/proc/net/wireless`, and
 that file is the reason the reading needs two guards rather than none. Measured
@@ -208,6 +208,50 @@ the driver keeps its last statistics, so the reading never changes.
 So the zero row is real and the guard is not dead code, but it is not what
 catches a radio that drops. Both paths arrive at the same place, which is the
 point: no reading.
+
+Both readings share one published state, and that is the point rather than a
+convenience. It is what every subscriber has been told and the only thing any of
+them is ever told: the poll reads the device, and a reading that differs from
+what is published replaces it and goes to every subscriber. A reading equal to
+the published one sends nothing at all, so a signal that has not moved costs the
+read and no traffic. A client that has just arrived is answered from that state
+rather than from a reading of its own.
+
+A second reader is what makes that necessary. If the snapshot answering
+`SubscribeStatesRequest` took its own reading, it could tell one client a value
+the poll never saw, and the poll would then find the device back at the value it
+remembered and stay quiet -- leaving that client on a number nothing would ever
+correct. It needs no failure of any kind: a reading that moves and moves back
+inside one tick, with a client subscribing in between, is enough. A tick that
+carried every reading whether or not it had changed would heal that within the
+minute, which is what these two had while every tick was a full push. One reader
+instead of two is what makes the tick free to carry only what changed.
+
+So the snapshot is sent from `handle`, under the lock that orders it against a
+concurrent push, and it reads nothing. That is also why `publish` collects what
+it could not send and logs after the lock is dropped rather than under it.
+
+Subscribing wakes the poll instead. The value the snapshot just answered with is
+up to a whole tick old, which is a minute here, so a subscriber that took no
+reading and got no wake would sit on it for that long. Only the first
+`SubscribeStatesRequest` on a connection wakes anything, because a peer holding
+the key can send them as fast as it likes and each one after the first would
+otherwise be a reading of the device it asked for and got.
+
+That wake is sent with the server lock held, so it is a send that may be
+dropped rather than one that may block. A bare send would deadlock the server
+outright: `handle` holds the lock for its whole body, and the poll that would
+empty the channel takes that same lock to publish.
+
+`MinSensorTick` bounds the ticker rather than the push rate, which the wake
+exceeds by a read per connection that subscribes.
+
+The poll is now the only thing that reads these two, which is the cost of there
+being one reader rather than two. A poll that wedged would leave every
+subscriber on the last published values, including ones that connect
+afterwards, where before this each new subscriber at least took a reading of its
+own. Both readings come from procfs, which is why that is a trade worth making
+here and not one to repeat for a reading that forks a process.
 
 A reading that fails is still sent, with `missing_state` set. Leaving it out was
 the first attempt and it is only right before the first one: afterwards Home

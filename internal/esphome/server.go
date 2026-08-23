@@ -32,8 +32,9 @@ const (
 	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
 	clientKeepalive = 20 * time.Second
 
-	// MinSensorTick is the floor on how often state is pushed. It is a bound on
-	// traffic rather than on the connection's life, which the ping now keeps.
+	// MinSensorTick is the floor under PollSensors' ticker. It bounds that
+	// ticker rather than the push rate, which a subscriber's wake can exceed,
+	// and rather than the connection's life, which the ping now keeps.
 	// docs/architecture.md has the measurement it came from.
 	MinSensorTick = 30 * time.Second
 
@@ -116,6 +117,17 @@ type Server struct {
 	mu    sync.Mutex
 	conns map[*conn]struct{}
 
+	// What every subscriber has been told, and the only thing any of them is
+	// ever told. docs/architecture.md says why a second reader of the device
+	// would put a connection out of step with this.
+	published map[uint32]reading
+
+	// Woken when a connection subscribes for the first time, so the value it was
+	// answered with is corrected by a read rather than by the next tick.
+	// Buffered by one and never blocked on: a wake already waiting is a read
+	// already coming.
+	sensorWake chan struct{}
+
 	logMu        sync.Mutex
 	logWindowEnd time.Time
 	logLines     int
@@ -136,6 +148,8 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		conns:         map[*conn]struct{}{},
+		published:     map[uint32]reading{},
+		sensorWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -306,17 +320,6 @@ func (s *Server) serveConn(netConn net.Conn) {
 			s.peerLogf("esphome api: %s handling message %d: %v", netConn.RemoteAddr(), msgType, err)
 			return
 		}
-		// The first reading goes out here rather than from handle, which holds the
-		// server lock for its whole body: reading procfs underneath that lock
-		// stalls the accept path and every other connection.
-		if msgType == msgSubscribeStates {
-			up, upOK := s.uptime()
-			signal, signalOK := s.wifi()
-			if err := s.sendSensorsAt(conn, up, upOK, signal, signalOK); err != nil {
-				s.peerLogf("esphome api: %s first sensor push: %v", netConn.RemoteAddr(), err)
-				return
-			}
-		}
 		if conn.said != "" {
 			s.peerLogf("esphome api: %s hello from %q", netConn.RemoteAddr(), conn.said)
 			conn.said = ""
@@ -407,7 +410,22 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		return s.listEntities(conn)
 
 	case msgSubscribeStates:
+		// Only the first one wakes the poll. ESPHome's client subscribes once,
+		// and a peer that asks again would otherwise be asking for a reading of
+		// the device, as fast as it can send the request.
+		first := !conn.states
 		conn.states = true
+		// The snapshot first, then the poll is woken: a value not read for a
+		// while is corrected a read later rather than withheld.
+		if err := s.sendSensorsAt(conn, s.snapshot()); err != nil {
+			return err
+		}
+		if first {
+			select {
+			case s.sensorWake <- struct{}{}:
+			default:
+			}
+		}
 		return nil
 
 	case msgDisconnectRequest:

@@ -166,7 +166,7 @@ func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
 	s.conns[loud] = struct{}{}
 	s.mu.Unlock()
 
-	s.pollOnce()
+	s.publish("sensors", s.readTicked())
 
 	if n := len(quiet.out); n != 0 {
 		t.Errorf("a client that never subscribed was sent %d frames", n)
@@ -311,30 +311,59 @@ func TestALongClientNameIsCutBeforeItReachesTheLog(t *testing.T) {
 	}
 }
 
-// The server lock gates the accept path's cap check and every other
-// connection's handler, so a read of procfs underneath it stalls all of them.
-// The first sensor reading goes out from the read loop for that reason.
-func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
+// Two rules at once, and the second is what the published state rests on: the
+// poll is the only reader of the device, and it reads outside the lock. A
+// reading taken on a connection's goroutine would be a second reader, and one
+// taken under the lock would stall the accept path and every other connection,
+// since handle holds that lock for its whole body.
+//
+// Driven through PollSensors rather than through a helper that calls publish
+// the way it does. A helper cannot say where the real poll takes the lock, and
+// a suite that only asks the helper stays green with the read moved inside it.
+func TestOnlyThePollReadsTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
-	// Set on serveConn's goroutine and read after the reply has arrived, which
-	// orders the two.
-	locked := false
+
+	var mu sync.Mutex
+	reads, underLock := 0, false
+	read := make(chan struct{}, 1)
 	watch := func(v float32) func() (float32, bool) {
 		return func() (float32, bool) {
+			mu.Lock()
+			reads++
+			// TryLock rather than a flag set around the call: what is being
+			// asserted is that nobody holds the lock at the moment of the read,
+			// and the poll is the only thing running here to hold it.
 			if s.mu.TryLock() {
 				s.mu.Unlock()
 			} else {
-				locked = true
+				underLock = true
 			}
+			select {
+			case read <- struct{}{}:
+			default:
+			}
+			mu.Unlock()
 			return v, true
 		}
 	}
-	s.uptime = watch(1)
-	s.wifi = watch(-48)
+	s.uptime, s.wifi = watch(1), watch(-48)
+
+	go s.PollSensors(MinSensorTick)
+	<-read
+
+	mu.Lock()
+	polled := reads
+	if underLock {
+		t.Error("the poll read the device with the server lock held")
+	}
+	mu.Unlock()
+	if polled == 0 {
+		t.Fatal("the poll read nothing, so this test would pass on a server that never reads")
+	}
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -343,18 +372,28 @@ func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := c.recv(); err != nil {
-		t.Fatalf("the first reading did not arrive: %v", err)
+	for n := 0; n < 2; n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the snapshot did not arrive: %v", err)
+		}
 	}
 
-	if locked {
-		t.Error("procfs was read with the server lock held")
+	// Subscribing wakes the poll, so the reads it is allowed are the woken
+	// ones: what must not happen is a reading taken on the connection's own
+	// goroutine, which is what the lock check above would catch and what the
+	// count below bounds.
+	<-read
+	mu.Lock()
+	defer mu.Unlock()
+	if underLock {
+		t.Error("the device was read with the server lock held")
 	}
-
-	locked = false
-	s.pollOnce()
-	if locked {
-		t.Error("the sixty-second poll read procfs with the server lock held")
+	// polled is one poll's worth, since only the startup publish had run when
+	// it was taken. Calling readTicked here instead would deadlock: the stubs
+	// take this same lock.
+	if reads > 2*polled {
+		t.Errorf("answering a subscriber took %d readings beyond the wake's own; the snapshot has to replay what was published, or the two readers can disagree",
+			reads-2*polled)
 	}
 }
 
@@ -579,14 +618,29 @@ func sensorReading(t *testing.T, payload []byte) (uint32, float32, bool) {
 	return key, value, missing
 }
 
-func TestSubscribingGetsTheUptimeAndTheSignal(t *testing.T) {
+// Every sensor the server pushes, stubbed to a value nothing else would
+// produce, so a reading filed under the wrong key is visible rather than
+// plausible. A sensor added later is a line here and a line in want().
+func stubSensors(s *Server) map[uint32]float32 {
+	s.uptime = func() (float32, bool) { return 1234, true }
+	s.wifi = func() (float32, bool) { return -48, true }
+	return map[uint32]float32{s.keyUptime: 1234, s.keyWifi: -48}
+}
+
+// What the poll puts into the published state, without its ticker. Returns what
+// it changed, for the tests that care.
+func pollAll(s *Server) []reading {
+	return s.publish("sensors", s.readTicked())
+}
+
+func TestSubscribingGetsEverySensor(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
-	s.uptime = func() (float32, bool) { return 1234, true }
-	s.wifi = func() (float32, bool) { return -55, true }
+	want := stubSensors(s)
+	pollAll(s)
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -596,7 +650,6 @@ func TestSubscribingGetsTheUptimeAndTheSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := map[uint32]float32{s.keyUptime: 1234, s.keyWifi: -55}
 	// Counted rather than ranged: deleting from a map inside a range over it
 	// may end the loop early, which read one message instead of two and failed
 	// two runs in five.
@@ -626,31 +679,32 @@ func TestSubscribingGetsTheUptimeAndTheSignal(t *testing.T) {
 	}
 }
 
-// Zero dBm is a plausible signal and zero seconds a plausible uptime, so a
-// reading that could not be taken has to be left out rather than sent as zero.
 // A reading that could not be taken is sent and flagged, not sent as zero and
 // not left out. Zero is a plausible value for both of these, and Home Assistant
 // would draw it as a measurement; leaving it out is no better once a value has
 // been published, because the old one stays on screen as though it were current.
 // missing_state is the field the protocol has for exactly this.
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		uptime  bool
-		signal  bool
-		wantKey func(*Server) uint32
-	}{
-		{"the uptime could not be read", false, true, func(s *Server) uint32 { return s.keyUptime }},
-		{"the signal could not be read", true, false, func(s *Server) uint32 { return s.keyWifi }},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, failing := range []string{"uptime", "wifi_signal"} {
+		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
 
 			psk := testPSK(t)
 			s := testServer(t, psk)
-			s.uptime = func() (float32, bool) { return 1234, tt.uptime }
-			s.wifi = func() (float32, bool) { return -48, tt.signal }
+			want := stubSensors(s)
+			fail := func(f *func() (float32, bool)) { *f = func() (float32, bool) { return 0, false } }
+			var failedKey uint32
+			switch failing {
+			case "uptime":
+				fail(&s.uptime)
+				failedKey = s.keyUptime
+			case "wifi_signal":
+				fail(&s.wifi)
+				failedKey = s.keyWifi
+			}
+
+			pollAll(s)
 
 			c, err := dial(t, s, psk)
 			if err != nil {
@@ -660,15 +714,14 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			failed := tt.wantKey(s)
 			seen := false
-			for n := 0; n < 2; n++ {
+			for n := 0; n < len(want); n++ {
 				_, payload, err := c.recv()
 				if err != nil {
-					t.Fatalf("only %d of the two readings arrived: %v", n, err)
+					t.Fatalf("only %d of the %d readings arrived: %v", n, len(want), err)
 				}
 				key, value, missing := sensorReading(t, payload)
-				if key != failed {
+				if key != failedKey {
 					if missing {
 						t.Errorf("key %d was marked missing, and it was read successfully", key)
 					}
@@ -688,17 +741,17 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	}
 }
 
-// The sixty-second push is the only thing that keeps these fresh in Home
-// Assistant: a reading taken once at subscribe and never again leaves an entity
-// that looks live and is not.
+// The minute tick is the only thing that reads these, so it is the only thing
+// that keeps them fresh in Home Assistant: a reading taken at subscribe and
+// never again leaves an entity that looks live and is not.
 func TestThePollPushesBothReadings(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
-	s.uptime = func() (float32, bool) { return 1234, true }
-	s.wifi = func() (float32, bool) { return -48, true }
+	first := stubSensors(s)
+	pollAll(s)
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -707,21 +760,30 @@ func TestThePollPushesBothReadings(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	for n := 0; n < 2; n++ {
+	for n := 0; n < len(first); n++ {
 		if _, _, err := c.recv(); err != nil {
-			t.Fatalf("the first readings did not arrive: %v", err)
+			t.Fatalf("the snapshot did not arrive: %v", err)
 		}
 	}
 
 	s.uptime = func() (float32, bool) { return 5678, true }
 	s.wifi = func() (float32, bool) { return -70, true }
-	s.pollOnce()
+	s.publish("sensors", s.readTicked())
+
+	// A ping behind the tick. One queue per connection and in order, so the
+	// answer arriving marks the end of what the tick sent.
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	want := map[uint32]float32{s.keyUptime: 5678, s.keyWifi: -70}
-	for n := len(want); n > 0; n-- {
-		_, payload, err := c.recv()
+	for {
+		msgType, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("a polled reading did not arrive: %v", err)
+		}
+		if msgType == msgPingResponse {
+			break
 		}
 		key, value, _ := sensorReading(t, payload)
 		expected, known := want[key]
@@ -732,6 +794,9 @@ func TestThePollPushesBothReadings(t *testing.T) {
 			t.Errorf("the poll sent %v for key %d, want %v", value, key, expected)
 		}
 		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Errorf("the poll never sent %d of the readings that have no other source", len(want))
 	}
 }
 
@@ -1043,5 +1108,485 @@ func TestOnlyAnExpiredReadDrawsAPing(t *testing.T) {
 	// deadline that happens to expire later, the client's included.
 	if took > s.pingWait/2 {
 		t.Errorf("the drop took %v, long enough that a deadline ended it rather than the frame", took)
+	}
+}
+
+// Read every tick, sent only when it moves. The uptime changes on every read
+// and the signal does not, so what a quiet minute costs is the read alone.
+func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	want := stubSensors(s)
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing is published yet, so the snapshot is empty and the first poll is
+	// what fills it.
+	pollAll(s)
+	for n := 0; n < len(want); n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the first readings did not arrive: %v", err)
+		}
+	}
+
+	// The uptime is held still, so every push below is the signal's.
+	s.uptime = func() (float32, bool) { return 1234, true }
+	reads := func(v float32, ok bool) { s.wifi = func() (float32, bool) { return v, ok } }
+	signal := func() []reading { return pollAll(s) }
+
+	// stubSensors reads -48, so that is what the first poll above published.
+	reads(-55, true)
+	if got := signal(); len(got) != 1 {
+		t.Fatal("a changed signal was not published")
+	}
+	if got := signal(); len(got) != 0 {
+		t.Error("a reading equal to the published one was sent again")
+	}
+
+	reads(-60, true)
+	signal()
+
+	for _, expect := range []float32{-55, -60} {
+		_, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("the push carrying %v did not arrive: %v", expect, err)
+		}
+		key, value, missing := sensorReading(t, payload)
+		if key != s.keyWifi || value != expect || missing {
+			t.Errorf("a push carried key %d value %v missing %v, want the signal (%d) at %v",
+				key, value, missing, s.keyWifi, expect)
+		}
+	}
+
+	// A read that starts failing is a change even when the number it returns is
+	// the one already published, or a signal that reached zero and then became
+	// unreadable stays on screen as a real zero.
+	reads(0, true)
+	signal()
+	if _, _, err := c.recv(); err != nil {
+		t.Fatalf("the zero did not arrive: %v", err)
+	}
+	reads(0, false)
+	signal()
+	_, payload, err := c.recv()
+	if err != nil {
+		t.Fatalf("the missing reading did not arrive: %v", err)
+	}
+	if _, _, missing := sensorReading(t, payload); !missing {
+		t.Error("a reading that could not be taken went out as a measurement")
+	}
+}
+
+// Nothing published is not the same as a published zero. A reading of zero that
+// could not be taken at all is the zero value in both fields, and it is the
+// first thing a Dot with no signal to read would have to say.
+func TestAnUnreadableFirstReadingIsStillPublished(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	if got := s.publish("sensors", []reading{{s.keyWifi, 0, false}}); len(got) != 1 {
+		t.Error("the first reading was not published, so a signal that cannot be read is never reported")
+	}
+	if got := s.publish("sensors", []reading{{s.keyWifi, 0, false}}); len(got) != 0 {
+		t.Error("the same unreadable signal was published twice")
+	}
+}
+
+// The defect that makes the published state a single thing: two readers of the
+// device put a subscriber permanently out of step. The snapshot must replay
+// what was published rather than take a reading of its own, or a value it alone
+// saw is one the poll will never correct.
+func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+	s.uptime = func() (float32, bool) { return 1234, true }
+
+	// Published: -48.
+	pollAll(s)
+
+	// Moved between ticks, and a subscriber arrives inside that window.
+	s.wifi = func() (float32, bool) { return -55, true }
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	var told float32
+	for n := 0; n < 2; n++ {
+		_, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("the snapshot did not arrive: %v", err)
+		}
+		if key, v, _ := sensorReading(t, payload); key == s.keyWifi {
+			told = v
+		}
+	}
+
+	// Back where it was before the next tick, so the poll sees no change at all.
+	s.wifi = func() (float32, bool) { return -48, true }
+	if got := pollAll(s); len(got) != 0 {
+		t.Fatal("the poll published; this test no longer covers the case it was written for")
+	}
+
+	if told != -48 {
+		t.Errorf("the subscriber was told %v and the device reads -48, with no push left to correct it", told)
+	}
+}
+
+// A writer that records whether the server lock was held while a line was
+// written to it.
+type lockWatchingWriter struct {
+	s      *Server
+	mu     sync.Mutex
+	held   bool
+	writes int
+}
+
+func (w *lockWatchingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes++
+	if w.s.mu.TryLock() {
+		w.s.mu.Unlock()
+	} else {
+		w.held = true
+	}
+	return len(p), nil
+}
+
+// The lock gates the accept path and every other connection's handler, so a
+// write to /data underneath it stalls the server. publish is where that rule
+// now lives for every reading, which is the whole reason it is one function.
+func TestPublishLogsWhatItCouldNotSendAfterDroppingTheLock(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	w := &lockWatchingWriter{s: s}
+	was := log.Writer()
+	log.SetOutput(w)
+	defer log.SetOutput(was)
+
+	// A subscriber whose queue is already full, so the send fails and the
+	// failure has to be reported.
+	near, far := net.Pipe()
+	t.Cleanup(func() { near.Close(); far.Close() })
+	stalled := &conn{sock: fakeAddr{Conn: near}, out: make(chan frame), states: true}
+	s.mu.Lock()
+	s.conns[stalled] = struct{}{}
+	s.mu.Unlock()
+
+	s.publish("sensors", []reading{{s.keyWifi, -48, true}})
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.writes == 0 {
+		t.Fatal("nothing was logged, so this test would pass on a publish that never reports a failure")
+	}
+	if w.held {
+		t.Error("a failure was logged with the server lock held")
+	}
+}
+
+// eachConn drops a connection whose send failed, and it can only know to do
+// that if sendSensorsAt stops at the first failure and says so. Carrying on
+// would leave a subscriber holding some of a push and still in the table.
+func TestAFailedSendDropsTheConnectionRatherThanContinuing(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	// Room for one frame, and two readings to send.
+	near, far := net.Pipe()
+	t.Cleanup(func() { near.Close(); far.Close() })
+	stalled := &conn{sock: fakeAddr{Conn: near}, out: make(chan frame, 1), states: true}
+	s.mu.Lock()
+	s.conns[stalled] = struct{}{}
+	s.mu.Unlock()
+
+	s.publish("sensors", []reading{
+		{s.keyUptime, 1, true},
+		{s.keyWifi, -48, true},
+	})
+
+	s.mu.Lock()
+	_, still := s.conns[stalled]
+	s.mu.Unlock()
+	if still {
+		t.Error("a connection that could not take a whole push is still in the table")
+	}
+	// The scenario rather than the behaviour: a queue that refused the first
+	// frame too would make the drop above prove nothing about stopping. What
+	// carries this test is the connection being gone.
+	if n := len(stalled.out); n != 1 {
+		t.Errorf("the stalled connection was queued %d frames, so this is not the case the test means to cover", n)
+	}
+}
+
+// The wake is what a subscriber gets instead of a reading of its own, so asking
+// for it again has to cost nothing. A peer holding the key can send
+// SubscribeStatesRequest as fast as it likes, and every one of them would
+// otherwise be a reading of the device it asked for and got.
+func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+	pollAll(s)
+
+	var mu sync.Mutex
+	reads := 0
+	count := func(v float32) func() (float32, bool) {
+		return func() (float32, bool) { mu.Lock(); reads++; mu.Unlock(); return v, true }
+	}
+	s.uptime, s.wifi = count(1234), count(-48)
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A tick far enough away that only a wake can cause a read.
+	go s.PollSensors(time.Hour)
+
+	ask := func(i int) {
+		t.Helper()
+		if err := c.send(msgSubscribeStates, nil); err != nil {
+			t.Fatalf("subscribe %d: %v", i, err)
+		}
+		for n := 0; n < 2; n++ {
+			if _, _, err := c.recv(); err != nil {
+				t.Fatalf("draining subscribe %d: %v", i, err)
+			}
+		}
+	}
+
+	// The first one is allowed to wake the poll; what it costs is not the point
+	// here, so it is measured rather than assumed.
+	ask(0)
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	first := reads
+	mu.Unlock()
+	if first == 0 {
+		t.Fatal("the first subscribe woke nothing, so this test would pass on a server that never reads")
+	}
+
+	const asks = 50
+	for i := 1; i <= asks; i++ {
+		ask(i)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if reads != first {
+		t.Errorf("%d further subscribe requests drew %d more readings of the device; a peer holding the key can ask as fast as it likes",
+			asks, reads-first)
+	}
+}
+
+// The snapshot replays what was published, so a subscriber arriving between
+// ticks is answered with a value up to a whole tick old. Waking the poll is
+// what keeps that to a read rather than to a minute.
+func TestSubscribingWakesTheSensorPoll(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	want := stubSensors(s)
+
+	// The reading moves, not the function: PollSensors calls this from its own
+	// goroutine, so swapping s.uptime underneath it is a race on the field.
+	var mu sync.Mutex
+	uptime := want[s.keyUptime]
+	read := make(chan struct{}, 1)
+	s.uptime = func() (float32, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		select {
+		case read <- struct{}{}:
+		default:
+		}
+		return uptime, true
+	}
+	pollAll(s)
+	<-read
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Started, and parked on a tick an hour away, while the reading is still the
+	// published one: its own first publish must not be what delivers the new
+	// value, or this passes without any wake at all. Waited for rather than
+	// slept past, because a sleep that a loaded machine outruns turns this into
+	// a test that passes with the wake deleted.
+	go s.PollSensors(time.Hour)
+	<-read
+
+	// Only now does the device move on.
+	mu.Lock()
+	uptime = 9999
+	mu.Unlock()
+
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The deadline is the client's, so a wake that never comes ends this rather
+	// than the loop spinning until dial's own five seconds run out.
+	if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("subscribing left the uptime at its published value with no read to correct it before the next tick: %v", err)
+		}
+		if key, v, _ := sensorReading(t, payload); key == s.keyUptime && v == 9999 {
+			return
+		}
+	}
+}
+
+// A subscriber is answered from the published state, so something has to have
+// published before the first tick comes round: a Dot whose sensor tick is a
+// minute would otherwise answer its first subscriber with nothing at all.
+func TestTheSensorPollPublishesBeforeItsFirstTick(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+
+	go s.PollSensors(time.Hour)
+	time.Sleep(200 * time.Millisecond)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.published) == 0 {
+		t.Error("nothing was published before the first tick, so a subscriber arriving inside it is told nothing")
+	}
+}
+
+// Only what changed goes on the wire, not the whole batch it arrived in.
+func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+	pollAll(s)
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 2; n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the snapshot did not arrive: %v", err)
+		}
+	}
+
+	// One of the two moves; the other is exactly what was published.
+	s.publish("sensors", []reading{
+		{s.keyUptime, 4321, true},
+		{s.keyWifi, stubSensors(s)[s.keyWifi], true},
+	})
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// A ping behind the push: one queue per connection and in order, so the
+	// answer marks the end of what the push sent.
+	for {
+		msgType, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("waiting on the push: %v", err)
+		}
+		if msgType == msgPingResponse {
+			return
+		}
+		key, value, _ := sensorReading(t, payload)
+		if key != s.keyUptime {
+			t.Errorf("a reading equal to the published one was sent again: key %d carried %v", key, value)
+		}
+	}
+}
+
+// The told flag, which every real key hides: entityKey is a hash and none of
+// them is zero, so a reading that is the zero value in every field is the only
+// thing that can tell "published" from "never published" apart. Without the
+// flag it reads as already published and is never sent at all.
+func TestAReadingThatIsZeroInEveryFieldIsStillPublished(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	if got := s.publish("sensors", []reading{{}}); len(got) != 1 {
+		t.Error("a reading that is zero in every field was taken for one already published")
+	}
+	if got := s.publish("sensors", []reading{{}}); len(got) != 0 {
+		t.Error("the same reading was published twice")
+	}
+}
+
+// The wake is sent with the server lock held, so it must never block. A bare
+// send would deadlock the whole server: handle would hold the lock against
+// every other connection and the accept path, while the poll that drains the
+// channel is itself waiting on that lock inside publish. Nothing else here can
+// see that, because every other test sends one wake into an empty buffer.
+func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+
+	// Filled, with no poll running to drain it.
+	s.sensorWake <- struct{}{}
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A ping behind the subscribe: one queue per connection and in order, so an
+	// answer to it is the handler having come back from the wake.
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msgType, _, err := c.recv()
+		if err != nil {
+			t.Fatalf("the handler never came back from a wake it could not send, and it holds the server lock: %v", err)
+		}
+		if msgType == msgPingResponse {
+			return
+		}
 	}
 }

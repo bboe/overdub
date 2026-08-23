@@ -6,11 +6,39 @@ import (
 	"time"
 )
 
-func (s *Server) sendSensorsAt(conn *conn, up float32, upOK bool, signal float32, signalOK bool) error {
-	if err := s.send(conn, msgSensorState, floatState(s.keyUptime, up, !upOK)); err != nil {
-		return err
+type reading struct {
+	key   uint32
+	value float32
+	ok    bool
+}
+
+// The readings the tick carries, read together and published together.
+func (s *Server) readTicked() []reading {
+	up, upOK := s.uptime()
+	signal, signalOK := s.wifi()
+	return []reading{
+		{s.keyUptime, up, upOK},
+		{s.keyWifi, signal, signalOK},
 	}
-	return s.send(conn, msgSensorState, floatState(s.keyWifi, signal, !signalOK))
+}
+
+// What a subscriber is told when it arrives: the published state as it stands,
+// and never a reading of its own. Caller holds mu.
+func (s *Server) snapshot() []reading {
+	readings := make([]reading, 0, len(s.published))
+	for _, r := range s.published {
+		readings = append(readings, r)
+	}
+	return readings
+}
+
+func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
+	for _, r := range readings {
+		if err := s.send(conn, msgSensorState, floatState(r.key, r.value, !r.ok)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func floatState(key uint32, v float32, missing bool) []byte {
@@ -41,27 +69,51 @@ func (s *Server) eachConn(what string, wants func(*conn) bool, send func(*conn) 
 
 func wantsStates(c *conn) bool { return c.states }
 
+// The one way a reading reaches anybody. It records what it sends and sends
+// only what it has not already recorded, so the published state is exactly what
+// every subscriber holds. The snapshot sends too, but only what this has
+// already published. The log write waits until the lock is dropped, because the
+// lock gates the accept path and every other connection's handler.
+func (s *Server) publish(what string, readings []reading) []reading {
+	s.mu.Lock()
+	var changed []reading
+	for _, r := range readings {
+		// told rather than the zero reading standing for "not published": every
+		// key here is a hash that happens never to be zero, so the two are
+		// distinguishable without it, but that is not a thing to rest it on.
+		if was, told := s.published[r.key]; told && was == r {
+			continue
+		}
+		s.published[r.key] = r
+		changed = append(changed, r)
+	}
+	var failed []string
+	if len(changed) > 0 {
+		failed = s.eachConn(what, wantsStates, func(c *conn) error {
+			return s.sendSensorsAt(c, changed)
+		})
+	}
+	s.mu.Unlock()
+	for _, line := range failed {
+		s.peerLogf("%s", line)
+	}
+	return changed
+}
+
+// Published once before the wait, so a subscriber arriving in the first minute
+// is not told nothing at all: time.Tick fires after the interval, not at it.
 func (s *Server) PollSensors(every time.Duration) {
 	if every < MinSensorTick {
 		log.Printf("esphome api: sensor tick of %v raised to the %v floor", every, MinSensorTick)
 		every = MinSensorTick
 	}
-	for range time.Tick(every) {
-		s.pollOnce()
-	}
-}
-
-func (s *Server) pollOnce() {
-	// Read once, and before the lock: it is the same value for every connection,
-	// and procfs under the server lock is the rule this file keeps elsewhere.
-	up, upOK := s.uptime()
-	signal, signalOK := s.wifi()
-	s.mu.Lock()
-	failed := s.eachConn("sensors", wantsStates, func(c *conn) error {
-		return s.sendSensorsAt(c, up, upOK, signal, signalOK)
-	})
-	s.mu.Unlock()
-	for _, line := range failed {
-		s.peerLogf("%s", line)
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		s.publish("sensors", s.readTicked())
+		select {
+		case <-tick.C:
+		case <-s.sensorWake:
+		}
 	}
 }
