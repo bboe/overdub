@@ -16,9 +16,11 @@ type reading struct {
 func (s *Server) readTicked() []reading {
 	up, upOK := s.uptime()
 	signal, signalOK := s.wifi()
+	cpu, cpuOK := s.cpu()
 	return []reading{
 		{s.keyUptime, up, upOK},
 		{s.keyWifi, signal, signalOK},
+		{s.keyCPU, cpu, cpuOK},
 	}
 }
 

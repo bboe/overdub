@@ -2,7 +2,9 @@ package device
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -300,5 +302,118 @@ func TestOneReadCannotOutlastItsBudget(t *testing.T) {
 	if limit := VolumeReadBudget() + 100*time.Millisecond; elapsed > limit {
 		t.Errorf("one read took %v against a budget of %v; the budget has to bound the whole call",
 			elapsed, VolumeReadBudget())
+	}
+}
+
+// Millidegrees, and the two bounds that separate a reading from a zone with
+// nothing to say. Measured on the Dot: mtktscpu answered 41300.
+func TestParseMilliCelsius(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want float32
+		ok   bool
+	}{
+		{"the Dot as it stands", "41300\n", 41.3, true},
+		{"no newline", "41300", 41.3, true},
+		{"carriage return too", "41300\r\n", 41.3, true},
+		{"a tenth is kept", "41305\n", 41.305, true},
+		{"cool but plausible", "-39000\n", -39, true},
+		{"hot but plausible", "149000\n", 149, true},
+		// The kernel's own "nothing to report" answer, and the reason the lower
+		// bound is not a test for zero.
+		{"the invalid marker", "-127000\n", 0, false},
+		{"below the bound", "-40000\n", 0, false},
+		{"above the bound", "150000\n", 0, false},
+		{"not a number", "warm\n", 0, false},
+		{"empty", "", 0, false},
+		// Zero millidegrees is 0C, which no powered SoC indoors reports, but it
+		// is inside the bounds and is passed through rather than guessed at.
+		{"zero", "0\n", 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseMilliCelsius(tt.raw)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("parseMilliCelsius(%q) = %v, %v; want %v, %v", tt.raw, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+// The zone is found by its type, because the index is not stable and the names
+// do not even sort into their own order: thermal_zone10 comes before
+// thermal_zone2. The layout below is this Dot's, with the CPU zone deliberately
+// neither first nor last.
+func TestCPUTemperatureFindsItsZoneByType(t *testing.T) {
+	zones := map[string]string{
+		"thermal_zone0":  "mtktswmt",
+		"thermal_zone1":  "mtktscpu",
+		"thermal_zone10": "mtkts_bts2",
+		"thermal_zone2":  "mtkts1",
+		"thermal_zone7":  "tmp103",
+	}
+	temps := map[string]string{
+		"thermal_zone0":  "37000",
+		"thermal_zone1":  "41300",
+		"thermal_zone10": "37000",
+		"thermal_zone2":  "39400",
+		"thermal_zone7":  "35606",
+	}
+
+	for _, tt := range []struct {
+		name string
+		drop string
+		want float32
+		ok   bool
+	}{
+		{"the CPU zone is found among the others", "", 41.3, true},
+		// A different SoC has no zone of this type, and a reading nobody can
+		// take is missing rather than another zone's answer.
+		{"no zone of that type", "thermal_zone1", 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for zone, kind := range zones {
+				if zone == tt.drop {
+					continue
+				}
+				dir := filepath.Join(root, zone)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write := func(name, body string) {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte(body+"\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				write("type", kind)
+				write("temp", temps[zone])
+			}
+			// A stray entry that is not a zone at all: the real directory holds
+			// fifty-four cooling_device* beside the zones.
+			if err := os.MkdirAll(filepath.Join(root, "cooling_device0"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			was := thermalRoot
+			defer func() { thermalRoot = was }()
+			thermalRoot = root
+
+			got, ok := CPUTemperature()
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("CPUTemperature() = %v, %v; want %v, %v", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+// Nothing to read at all, which is every machine this suite runs on.
+func TestCPUTemperatureWithNoThermalDirectory(t *testing.T) {
+	was := thermalRoot
+	defer func() { thermalRoot = was }()
+	thermalRoot = filepath.Join(t.TempDir(), "absent")
+
+	if got, ok := CPUTemperature(); ok {
+		t.Errorf("CPUTemperature() reported %v with no thermal directory", got)
 	}
 }

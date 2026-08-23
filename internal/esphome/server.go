@@ -109,12 +109,14 @@ type Server struct {
 	keyUptime uint32
 	keyWifi   uint32
 	keyVolume uint32
+	keyCPU    uint32
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
 	uptime func() (float32, bool)
 	wifi   func() (float32, bool)
 	volume func() (float32, bool)
+	cpu    func() (float32, bool)
 
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
@@ -152,9 +154,11 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyUptime:     entityKey("uptime"),
 		keyWifi:       entityKey("wifi_signal"),
 		keyVolume:     entityKey("volume"),
+		keyCPU:        entityKey("cpu_temperature"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		volume:        device.MusicVolumePercent,
+		cpu:           device.CPUTemperature,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		volumeGap:     minVolumeReadGap,

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,50 @@ func MACAddress(iface string) string {
 		return ""
 	}
 	return mac
+}
+
+// The zone is found by its type rather than by its index: this Dot has eleven,
+// their names are not zero-padded so they do not even sort into their own
+// order, and nothing fixes which number the CPU lands on.
+const cpuThermalType = "mtktscpu"
+
+var thermalRoot = "/sys/class/thermal"
+
+func CPUTemperature() (float32, bool) {
+	zones, err := os.ReadDir(thermalRoot)
+	if err != nil {
+		return 0, false
+	}
+	for _, zone := range zones {
+		if !strings.HasPrefix(zone.Name(), "thermal_zone") {
+			continue
+		}
+		kind, err := os.ReadFile(filepath.Join(thermalRoot, zone.Name(), "type"))
+		if err != nil || strings.TrimSpace(string(kind)) != cpuThermalType {
+			continue
+		}
+		milli, err := os.ReadFile(filepath.Join(thermalRoot, zone.Name(), "temp"))
+		if err != nil {
+			return 0, false
+		}
+		return parseMilliCelsius(string(milli))
+	}
+	return 0, false
+}
+
+func parseMilliCelsius(raw string) (float32, bool) {
+	milli, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, false
+	}
+	// A zone with nothing to report answers -127000, and one being read while
+	// its driver is down can answer anything. Neither bound is a temperature a
+	// powered SoC indoors can reach, so what falls outside them is not a
+	// reading rather than a cold or burning Dot.
+	if milli <= -40000 || milli >= 150000 {
+		return 0, false
+	}
+	return float32(milli) / 1000, true
 }
 
 func WifiSignal() (float32, bool) {

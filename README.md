@@ -6,7 +6,7 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports three diagnostic sensors over that connection, and a press still plays
+reports four diagnostic sensors over that connection, and a press still plays
 its chime on the device itself.
 
 ## Scope
@@ -215,6 +215,7 @@ Dot's own firewall.
 | `sensor.<name>_uptime` | diagnostic | seconds since boot |
 | `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 | `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
+| `sensor.<name>_cpu_temperature` | diagnostic | °C, from the SoC's own thermal zone |
 
 Uptime and signal are read once a minute, and again when Home Assistant
 connects, and are sent only when they change: the uptime arrives every minute
@@ -225,8 +226,9 @@ buttons, from an app, or by asking Alexa. It is the speaker's own level: with a
 headset in the jack or a bluetooth speaker paired, Android tracks that route
 separately and this reading does not follow it.
 
-All three are read-only, and they are the connection proved end to end. The
-button still chimes on the device, and Home Assistant is not told about it.
+Uptime, signal and temperature share the minute tick. All four are read-only,
+and they are the connection proved end to end. The button still chimes on the
+device, and Home Assistant is not told about it.
 
 ### Encryption
 

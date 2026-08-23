@@ -209,6 +209,26 @@ So the zero row is real and the guard is not dead code, but it is not what
 catches a radio that drops. Both paths arrive at the same place, which is the
 point: no reading.
 
+The CPU temperature comes from `/sys/class/thermal`, in millidegrees: `41300`
+is 41.3 degrees. It rides the minute tick with the uptime and the signal,
+because it is one `sysfs` read and costs nothing worth gating.
+
+The zone is found by its `type` rather than by its index, and that is the
+`- STREAM_MUSIC:` rule again rather than caution. This Dot has eleven zones and
+fifty-four cooling devices in the same directory, the names are not zero-padded
+so `thermal_zone10` sorts before `thermal_zone2`, and nothing fixes which number
+the CPU lands on. Measured here, `mtktscpu` is `thermal_zone1` and reads 41.3
+degrees; `tmp103` is a discrete sensor elsewhere on the board and reads five
+degrees cooler. The SoC is the one worth reporting, because throttling is
+decided on its die and not on the board.
+
+A zone with nothing to report answers `-127000`, so the reading is kept only
+between -40 and 150 degrees. Neither bound is a temperature a powered SoC
+indoors can reach, which is what makes them safe to reject on. Zero is inside
+them and passed through: it is not a plausible reading either, but it is not the
+kernel's marker for anything, and a guess about which zero is which would be
+the `p2p0` row all over again with no second signal to lean on.
+
 The volume comes out of `dumpsys audio`, which carries both the numbers it
 takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
 each output device appears as `<hex mask> (<name>): <level>`. The speaker is the

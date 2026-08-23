@@ -383,7 +383,7 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	for n := 0; n < 3; n++ {
+	for n := 0; n < sensorCount; n++ {
 		if _, _, err := c.recv(); err != nil {
 			t.Fatalf("the snapshot did not arrive: %v", err)
 		}
@@ -635,8 +635,16 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.uptime = func() (float32, bool) { return 1234, true }
 	s.wifi = func() (float32, bool) { return -48, true }
 	s.volume = func() (float32, bool) { return 40, true }
-	return map[uint32]float32{s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40}
+	s.cpu = func() (float32, bool) { return 41.3, true }
+	return map[uint32]float32{s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40, s.keyCPU: 41.3}
 }
+
+// How many readings a subscriber's snapshot carries once everything has been
+// polled. A constant rather than a call: the tests that count device reads stub
+// the readers, so anything that asks the server how many sensors it has would
+// be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
+// honest.
+const sensorCount = 4
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -698,7 +706,7 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 // been published, because the old one stays on screen as though it were current.
 // missing_state is the field the protocol has for exactly this.
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
-	for _, failing := range []string{"uptime", "wifi_signal", "volume"} {
+	for _, failing := range []string{"uptime", "wifi_signal", "volume", "cpu_temperature"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -718,6 +726,9 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 			case "volume":
 				fail(&s.volume)
 				failedKey = s.keyVolume
+			case "cpu_temperature":
+				fail(&s.cpu)
+				failedKey = s.keyCPU
 			}
 
 			pollAll(s)
@@ -783,6 +794,7 @@ func TestThePollCarriesTheTickedSensorsAndNotTheVolume(t *testing.T) {
 	s.uptime = func() (float32, bool) { return 5678, true }
 	s.wifi = func() (float32, bool) { return -70, true }
 	s.volume = func() (float32, bool) { return 90, true }
+	s.cpu = func() (float32, bool) { return 55.5, true }
 	s.publish("sensors", s.readTicked())
 
 	// A ping behind the tick. One queue per connection and in order, so the
@@ -792,7 +804,7 @@ func TestThePollCarriesTheTickedSensorsAndNotTheVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := map[uint32]float32{s.keyUptime: 5678, s.keyWifi: -70}
+	want := map[uint32]float32{s.keyUptime: 5678, s.keyWifi: -70, s.keyCPU: 55.5}
 	for {
 		msgType, payload, err := c.recv()
 		if err != nil {
@@ -1156,9 +1168,10 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 		}
 	}
 
-	// The other two are held still, so every push below is the signal's.
+	// The others are held still, so every push below is the signal's.
 	s.uptime = func() (float32, bool) { return 1234, true }
 	s.volume = func() (float32, bool) { return 40, true }
+	s.cpu = func() (float32, bool) { return 41.3, true }
 	reads := func(v float32, ok bool) { s.wifi = func() (float32, bool) { return v, ok } }
 	signal := func() []reading { return pollAll(s) }
 
@@ -1248,7 +1261,7 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 		t.Fatal(err)
 	}
 	var told float32
-	for n := 0; n < 3; n++ {
+	for n := 0; n < sensorCount; n++ {
 		_, payload, err := c.recv()
 		if err != nil {
 			t.Fatalf("the snapshot did not arrive: %v", err)
@@ -1450,7 +1463,7 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 		if err := c.send(msgSubscribeStates, nil); err != nil {
 			t.Fatalf("subscribe %d: %v", i, err)
 		}
-		for n := 0; n < 3; n++ {
+		for n := 0; n < sensorCount; n++ {
 			if _, _, err := c.recv(); err != nil {
 				t.Fatalf("draining subscribe %d: %v", i, err)
 			}
@@ -1636,7 +1649,7 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	for n := 0; n < 3; n++ {
+	for n := 0; n < sensorCount; n++ {
 		if _, _, err := c.recv(); err != nil {
 			t.Fatalf("the snapshot did not arrive: %v", err)
 		}
@@ -1706,7 +1719,7 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 		if err := c.send(msgSubscribeStates, nil); err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
-		for n := 0; n < 3; n++ {
+		for n := 0; n < sensorCount; n++ {
 			if _, _, err := c.recv(); err != nil {
 				t.Fatalf("%s snapshot: %v", what, err)
 			}
@@ -1769,7 +1782,7 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 		if err := c.send(msgSubscribeStates, nil); err != nil {
 			t.Fatalf("round %d: %v", round, err)
 		}
-		for n := 0; n < 3; n++ {
+		for n := 0; n < sensorCount; n++ {
 			if _, _, err := c.recv(); err != nil {
 				t.Fatalf("round %d snapshot: %v", round, err)
 			}
@@ -1921,5 +1934,15 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 		if msgType == msgPingResponse {
 			return
 		}
+	}
+}
+
+// The drain counts in this file are written against sensorCount, and a sensor
+// added without moving it would leave every one of them one frame short --
+// which surfaces as an unrelated test hanging on a read, rather than as this.
+func TestTheSensorCountMatchesTheListing(t *testing.T) {
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	if got := len(listed(t, s)); got != sensorCount {
+		t.Errorf("the server lists %d sensors and sensorCount is %d", got, sensorCount)
 	}
 }

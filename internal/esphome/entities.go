@@ -38,6 +38,7 @@ func (s *Server) listEntities(conn *conn) error {
 		{"uptime", s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing},
 		{"wifi_signal", s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement},
 		{"volume", s.keyVolume, "Volume", "%", "", stateClassMeasurement},
+		{"cpu_temperature", s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)
