@@ -182,11 +182,14 @@ will show the device as unavailable; delete it there when you are done.
 
 ## Home Assistant
 
-Add the Dot by hand, at **Settings -> Devices & Services -> Add integration ->
-ESPHome**, with the Dot's address and port `6053`. Nothing announces it on the
-network yet, so Home Assistant will not offer it on its own.
-`adb shell ip -4 addr show wlan0` gives the address. It will then ask for the
-encryption key the installer printed.
+The Dot announces itself, so Home Assistant discovers it: it appears under
+**Settings -> Devices & Services** as an ESPHome device named after `-name`,
+and adding it asks only for the encryption key the installer printed.
+
+If it does not appear, add it by hand at **Add integration -> ESPHome** with the
+Dot's address and port `6053`; `adb shell ip -4 addr show wlan0` gives the
+address. Discovery is multicast and does not cross subnets, so a Home Assistant
+on a different network segment needs the address either way.
 
 > **The key is the whole of the access control.** ESPHome has no peer
 > allowlist, so anything that can route to the Dot may open a connection. What
@@ -197,8 +200,9 @@ encryption key the installer printed.
 > range, so that reach is wider than the local subnet, and a VPN client on
 > another one is inside it. SECURITY.md has the measurement.
 
-**Set a DHCP reservation.** Home Assistant stores the address you gave it, and
-nothing here announces a new one.
+**A DHCP reservation is still worth setting.** Home Assistant stores the address
+it found, and re-finds the device by name after a change, but only while
+discovery reaches it.
 
 The device is the server and Home Assistant dials in, the reverse of most
 integrations. It needs inbound reach to tcp/6053, which the daemon opens on the

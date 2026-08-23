@@ -2,12 +2,17 @@ package esphome
 
 const entityCategoryDiagnostic = 2
 
+// What Home Assistant shows as the device's firmware version. Sent twice, in
+// DeviceInfoResponse and in the mDNS TXT record, and the two have to agree:
+// docs/architecture.md says what the number is for.
+const esphomeVersion = "2026.8.0"
+
 func (s *Server) deviceInfo() []byte {
 	var msg pb
 	msg.boolean(1, false) // uses_password
 	msg.str(2, s.name)
 	msg.str(3, s.mac)
-	msg.str(4, "2026.8.0")
+	msg.str(4, esphomeVersion)
 	msg.str(6, s.model)
 	msg.str(12, "Amazon")
 	msg.str(13, s.name) // friendly_name

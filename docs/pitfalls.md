@@ -103,6 +103,14 @@ fails if that check is removed. `DecodeNoisePSK` means the one caller cannot
 reach it today, but a key that is configured and not enforced only looks like
 protection.
 
+**udp/5353 needs no rule, and the port is already taken.** Unlike tcp/6053, the
+stock INPUT chain accepts `udp dpt:5353` outright: measured on a Dot, that rule
+is there with 15,293 packets against it, because Alexa runs its own mDNS. The
+same fact is why the socket sets `SO_REUSEADDR` and `SO_REUSEPORT` before
+binding: two sockets are already on `0.0.0.0:5353`, and without both options the
+bind fails rather than sharing. So the responder needs nothing from the firewall
+and everything from the socket options, which is the reverse of the API.
+
 **`adb` merges the device's stderr into its stdout**, so every read-back in the
 deploy scripts is one line of noise away from a wrong answer. A linker warning
 from `su` prepended to a key file makes it decode to nothing; taken as the answer
@@ -124,6 +132,30 @@ staged key, and from a `0700` directory of our own the same read is denied. So
 boot script go through the shared one still, because neither is a secret: the
 binary is read back by hash, and the boot script compared against what was
 pushed.
+
+**Which socket options qemu-user implements depends on the qemu build**, so a
+socket test can pass in one emulator and fail in another for reasons that have
+nothing to do with the code. Under `qemu-arm-static` on x86-64, which is
+what CI runs, *setting* `IP_MULTICAST_IF` fails with `protocol not available`,
+so the responder cannot open a socket at all. Under Docker's `linux/arm/v7` and
+`linux/arm64` it is set without complaint. `IP_ADD_MEMBERSHIP` on the line
+before succeeds everywhere, so the socket opens far enough to look right either
+way.
+
+Reading an option back is a separate question from setting it, and the answer
+is not qemu's. Linux refuses `getsockopt(IP_MULTICAST_IF)` with the same
+`ENOPROTOOPT`, measured on native arm64 as well as under emulation, so the one
+socket option whose loss would send replies out of whichever interface the
+route table prefers is the one no test can assert. The other three are read
+back and checked.
+
+The tests that need a real multicast socket therefore skip on `ENOPROTOOPT`
+rather than fail on it, and the assertions that read an option back skip
+individually, so an option one emulator will not report does not take the other
+three with it. The daemon never meets any of this: the Dot runs ARM without an
+emulator. What made it worth writing down is how it presented. The socket test
+had never once passed in CI, and the single green run that seemed to prove
+otherwise predated the file.
 
 **Two frames are indexed right after they are measured**, and a peer with no key
 reaches the first. An empty second handshake frame would be read at `[0]` for

@@ -49,7 +49,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ---------------------------------------------------------------------------
 golang.org/x/crypto -- Curve25519, ChaCha20-Poly1305, and the BLAKE2
                        flynn/noise compiles in beside them
+golang.org/x/net    -- the DNS wire format in internal/esphome/mdns.go
+                       (dns/dnsmessage)
 BSD-3-Clause
+
+Both carry the same licence, which is reproduced once below.
 
 Copyright 2009 The Go Authors.
 

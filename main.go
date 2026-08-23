@@ -29,6 +29,7 @@ func main() {
 	}
 
 	if err := serve(flags); err != nil {
+		withdraw()
 		log.Printf("overdub: %v", err)
 		os.Exit(1)
 	}

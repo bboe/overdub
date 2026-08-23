@@ -131,6 +131,65 @@ that cannot keep up overruns its queue and is dropped instead, which is what
 ESPHome itself does. Connections are capped for the same reason: one frame in
 flight each, and the product has to fit a 256 MB device.
 
+## Discovery
+
+`internal/esphome/mdns.go`. Without it the Dot is added to Home Assistant by
+address, and a DHCP reservation is the only thing keeping that address true.
+With it the Dot answers for `<name>._esphomelib._tcp.local.` and Home
+Assistant's own integration offers the device unprompted. The messages are built
+and read with `golang.org/x/net/dns/dnsmessage`; docs/constraints.md says why
+that import is here.
+
+It is separate from the API server because the two are different sockets with
+different rules: a TCP listener with a key and a connection cap, and a stateless
+responder that answers anyone. They share the name, the MAC, the port, and the
+version string, which is one constant so the TXT record and `DeviceInfoResponse`
+cannot drift.
+
+Nothing on the reply path is logged, because a peer causes every reply. A failed
+send is kept for the next address poll instead, at most once per rebuild, and
+counts against the socket only when it was aimed at the group: a querier can name
+somewhere unroutable, port zero does it, and counting that as ours hands anyone
+on the subnet a rebuild every poll. The responder rebuilds rather than adapts,
+because the socket is bound to an interface address and the records name it, so
+both go wrong together.
+
+Two of RFC 6762's rules are load-bearing. A record is multicast at most once a
+second, which is the only cap on the one unbounded thing a peer can ask for:
+forty bytes of query draw 328 to 700 back, at every host on the segment. And a
+query already carrying our PTR at half its TTL is not answered at all, because
+python-zeroconf repeats the known answer on every refresh and each one would
+otherwise draw a full reply. That answer is read from the answer section, which
+begins after *all* the questions — Home Assistant sends about ninety in one
+packet. It has to fit in that packet too: known answers that overflow one
+message are split across two, and the second carries no question, so a query
+split that way is answered. That costs a reply the rule would have saved and
+nothing else, because the once-a-second limit still holds. Unicast replies are held to twenty a second rather than one, because
+they reach only the host that asked, and a spoofed source otherwise makes this
+a reflector.
+
+Six divergences from the RFC are deliberate, and none of them stops
+python-zeroconf resolving the device: the answering record sits in the
+additional section, which it merges anyway; no NSEC is sent for the AAAA this
+device does not have; the source port is never looked at, so a legacy querier
+is answered as though it were an ordinary one, which means by multicast unless
+it asked for unicast and so by nothing it can see if it did not;
+shared records skip the twenty to a hundred and twenty millisecond delay meant
+to spread collisions among responders this network has one of; the
+`_services._dns-sd._udp.local.` meta-query goes unanswered, so a general browser
+never learns the Dot exists; and a truncated query is answered rather than held
+for the known answers that follow it, which section 7.2 asks for and
+python-zeroconf's own responder does.
+
+**Nothing probes for the name, and nothing notices a conflict.** The Dot claims
+its host and instance records as unique without asking whether another device
+holds them, and the read loop discards responses, so a conflicting claim is
+never seen. Two Dots given the same `-name` both assert the same records and
+Home Assistant sees one device flapping between two addresses; README says the
+name has to be unique, and that is the whole of the enforcement. The same
+deafness means a spoofed goodbye retires the Dot from every cache on the
+segment, unnoticed, until something asks again.
+
 ## Speech
 
 `internal/alexa/say.go` hands a URL to Alexa's `SpeechSynthesizer` via `am

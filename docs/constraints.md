@@ -20,11 +20,11 @@ filesystem: the key at `noiseKeyPath`. A flag whose only correct value is
 already known, or that restates whether a file exists, is configuration that can
 be got wrong for no gain.
 
-**The tree carries one direct dependency, and it is the handshake.** Everything
-else here is hand-rolled and checkable in isolation, including the protobuf. A
-Noise handshake is neither: Go's standard library has X25519 in `crypto/ecdh`
-but no ChaCha20-Poly1305, so an AEAD has to be imported whatever else happens,
-and the pattern itself is not something to hand-roll beside it. So
+**The tree carries two direct dependencies, and neither is a convenience.**
+Everything else here is hand-rolled and checkable in isolation, including the
+protobuf. A Noise handshake is not: Go's standard library has X25519 in
+`crypto/ecdh` but no ChaCha20-Poly1305, so an AEAD has to be imported whatever
+else happens, and the pattern itself is not one to write beside it. So
 `github.com/flynn/noise` is imported and `go.sum` is the lock. The cipher suite
 is not a choice either: `Noise_NNpsk0_25519_ChaChaPoly_SHA256` is a hardcoded
 constant in Home Assistant's client, mixed into the handshake hash, so both ends
@@ -40,10 +40,24 @@ tag the check is made against. That tag failing is what a wrong key looks like
 on the wire, and `chacha20poly1305: message authentication failed` is what the
 log says when Home Assistant offers one.
 
-`flynn/noise` and the `golang.org/x/crypto` it pulls in are both BSD-3-Clause,
-and both are compiled in. Source distribution needs nothing, but clause 2 asks
-that their notices travel with a *binary*, so `THIRD-PARTY.txt` carries them
-verbatim and belongs beside any build that is published.
+The second is `golang.org/x/net/dns/dnsmessage`, which builds and reads the DNS
+messages the mDNS responder sends. Building them is simple. Reading them is not:
+compression pointers are a peer-supplied graph, arriving on a socket open to the
+whole subnet before anything has proved anything, and every bound on that graph
+has to be right at once. It is the one peer-facing surface here where a suite
+that passes proves less than it looks like it does, which is what makes it worth
+not owning.
+
+It costs 69 KB of the binary and pulls in nothing else: its dependency closure
+outside the standard library is itself alone, which is why it is here and an
+mDNS library is not. Those all route through `github.com/miekg/dns`, about
+22,000 lines, and the smallest of them adds eleven packages.
+
+`flynn/noise`, `golang.org/x/net`, and the `golang.org/x/crypto` that
+flynn/noise pulls in are all BSD-3-Clause, and all are compiled in. Source
+distribution needs nothing, but clause 2 asks that their notices travel with a
+*binary*, so `THIRD-PARTY.txt` carries them verbatim and belongs beside any
+build that is published.
 
 **The clip is served over http, from loopback.** `SpeechSynthesizer` casts the
 connection to `HttpURLConnection` without checking, so `file://` throws

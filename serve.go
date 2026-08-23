@@ -31,6 +31,23 @@ const (
 	firewallRe = 30 * time.Second
 )
 
+// The responder exists only once serveAPI has an address to advertise, and the
+// signal handler is installed before that. Held here so the handler can withdraw
+// the records rather than leave Home Assistant to time them out.
+var advertised atomic.Pointer[esphome.Responder]
+
+// Every path out of this process goes through here, because an advertised
+// record that outlives the daemon is one Home Assistant keeps for the PTR's
+// full lifetime. The listener dying is the likelier exit and the one where the
+// record has actually become a lie. The button failing is the other, and it
+// returns through main rather than exiting here, which is why main withdraws
+// too: the read loop and a failed re-emission are both fatal by design.
+func withdraw() {
+	if r := advertised.Load(); r != nil {
+		r.Goodbye()
+	}
+}
+
 func serve(flags config) error {
 	psk, err := loadPSK(noiseKeyPath)
 	if err != nil {
@@ -47,6 +64,7 @@ func serve(flags config) error {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
+		withdraw()
 		i.Close()
 		os.Exit(0)
 	}()
@@ -57,6 +75,7 @@ func serve(flags config) error {
 	} else {
 		go func() {
 			log.Printf("chime server stopped: %v", <-chimeStopped)
+			withdraw()
 			os.Exit(1)
 		}()
 	}
@@ -100,6 +119,10 @@ func serveAPI(name string, psk []byte) {
 	}
 	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac, psk)
 
+	responder := &esphome.Responder{Instance: name, MAC: mac, Iface: wifiIface, Port: apiPort}
+	advertised.Store(responder)
+	go responder.Run()
+
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)
 	}
@@ -109,6 +132,7 @@ func serveAPI(name string, psk []byte) {
 	// A bind that fails leaves a daemon serving the button and nothing else, and
 	// the supervisor cannot tell: it only restarts a process that exited.
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
+	withdraw()
 	os.Exit(1)
 }
 
