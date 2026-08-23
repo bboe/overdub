@@ -51,11 +51,27 @@ this daemon does not have, and capability requests it would then have to answer.
 Home Assistant enforces no floor, so the number states what is implemented
 rather than how recent the device is.
 
-Only a `HelloRequest` buys the longer read deadline, so a peer that says nothing
-useful holds a slot for ten seconds rather than ninety. Eight peers can still
-hold every slot by sending one hello each and renewing it, and nothing evicts
-the oldest connection. SECURITY.md says the same of the port: bounded rather
-than guarded.
+Only a frame that decrypts buys the longer read deadline, so a peer that cannot
+prove it has the key holds a slot for ten seconds rather than ninety. Finishing
+the handshake is not that proof. Message 1 is sealed under the key, so a peer
+cannot compose one without it, but nothing fresh from this side goes into it, so
+a captured one replays verbatim and Noise will not refuse it. What a replayer
+cannot do is send a frame that decrypts, and eight of them would otherwise hold
+every slot for ninety seconds apiece on a captured message and no key. Ten
+seconds is one budget rather than one per read, for the same reason: a peer that
+stalled the handshake to just inside its deadline would otherwise be given a
+second full wait to send that first frame in.
+
+A connection is counted against the eight from the moment it opens rather than
+from the moment its handshake succeeds, because a socket that is not counted is
+not bounded at all. That is the trade rather than a defence, and it is worth
+saying plainly which way it runs: the key gates what a peer can *reach*, never
+whether it can *hold a slot*. Eight peers that send nothing at all still fill
+the table for a handshake wait each, and can reconnect for as long as they like;
+nothing evicts the oldest connection. So the API is available to whoever can
+route to the Dot on `wlan0`, and denying that availability costs an attacker
+eight sockets. SECURITY.md says the same of the port: bounded rather than
+guarded.
 
 A `HelloRequest` that does not parse is not answered. `pbWalk` visits the fields
 it read before it failed, so replying would mean replying to whatever was
@@ -78,6 +94,20 @@ reported through its error rather than logged where it is found, and a failed
 sensor push is logged after the lock is dropped. The lock gates the accept
 path's cap check and every other connection's handler, so a write to `/data`
 underneath it stalls the server.
+
+The ninety-second idle deadline, the sixty-second sensor push and the client's
+own keepalive are one chain rather than three separate numbers. The deadline is
+a read deadline and this daemon never pings, so on an otherwise quiet connection
+the only thing that satisfies it is Home Assistant's keepalive, and
+`aioesphomeapi` cancels that ping on *any* message from the device, our own
+state pushes included. Push more often than the client waits and it stops
+pinging altogether, and the deadline then expires on a connection that is
+perfectly healthy. Measured against the real client: a five-second tick drops
+Home Assistant at exactly ninety seconds, over and over, with a reconnect each
+time. `MinSensorTick` is where that constraint is written down, and
+`PollSensors` raises anything under it to the floor rather than trusting its
+caller, because the constant is exported and the cost of getting it wrong lands
+on a connection that is working.
 
 `DeviceInfoResponse` carries an `esphome_version` of `2026.8.0`, which Home
 Assistant shows as the device's firmware version. It names a real ESPHome
@@ -141,3 +171,46 @@ service started.` and returning zero, so its output is read as well as its
 status. That is exactly the state a suppressed Alexa stack leaves behind, and
 without the check the play reads as accepted, and what surfaces is the device's
 own two-minute timeout rather than a reason.
+
+## Encryption
+
+`internal/esphome/noise.go`. `NewServer` takes the key rather than reading it,
+and `serve` refuses to start if the file is missing rather than falling back to
+something weaker. That is the one API failure that stops the daemon
+before the button is taken: an address arrives on its own a few seconds later,
+and a missing key never does. Reading it first is what lets a daemon that cannot
+serve the API exit without having taken the button away from Alexa. A bind that
+fails later is fatal too, but by then the button is already grabbed, and exiting
+is what hands it back.
+
+A client that opens in plaintext is answered with an empty encrypted frame
+rather than a closed socket. Home Assistant reads that as
+`RequiresEncryptionAPIError` and offers to take a key; a closed socket reaches
+it as `SocketClosedAPIError`, which prompts nothing and leaves the device
+unavailable with no way forward. A handshake refused by the cipher, which is
+what a wrong key looks like, is answered with the exact text `Handshake MAC
+failure`, which Home Assistant string-matches to report a wrong key rather than
+a generic failure. The handshake's other refusals write nothing and close: a
+client hello that is not empty, an empty or oversize frame, a non-zero
+preamble. None of those is a peer that holds the key and got it wrong. Both
+were driven with `aioesphomeapi`, the library Home Assistant itself uses, and
+report `RequiresEncryptionAPIError` and `InvalidEncryptionKeyAPIError`
+respectively.
+
+Two framings live in one connection, which is ESPHome's doing: `0x01` and a
+two-byte big-endian length outside the encryption, `[type:2][len:2][payload]`
+inside it. The third, plaintext framing is not implemented at all: it would only
+serve a client this daemon refuses.
+
+The 16-bit length is what the field can say rather than what is accepted. Every
+frame is bounded before it is allocated for, and by ESPHome's own two numbers:
+128 bytes while the handshake is running, 32768 once it is done. Both matter
+because both reads happen before a peer has proved anything, and taking the
+field at its word would let one that has proved nothing reserve 64 KiB. The
+largest message this daemon will send comes out of the second number, less the
+four-byte inner header and Poly1305's sixteen-byte tag.
+
+The key is generated by `deploy/install.sh`, and only when the device has none,
+so reinstalling does not lock Home Assistant out of a Dot it was talking to.
+Nothing generates a key on the device itself, so there is no unencrypted first
+connection to be caught during.

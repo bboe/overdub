@@ -35,20 +35,47 @@ func TestSendDropsRatherThanBlockingOnAStalledClient(t *testing.T) {
 	}
 }
 
-func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
-	client, server := net.Pipe()
-	defer client.Close()
-	go s.serveConn(server)
+// handle reports a DisconnectRequest as an error, and the read loop is what acts
+// on it. Covering the error being produced is not the same as covering it being
+// obeyed: a loop that ignored it would answer the goodbye and then hold the
+// connection open until the idle deadline.
+func TestTheReadLoopActsOnHandlesError(t *testing.T) {
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgDisconnectRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.recv(); err != nil {
+		t.Fatalf("the goodbye was not answered: %v", err)
+	}
 
-	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	// Decided by the read returning rather than by a deadline: the connection has
+	// 90 seconds of idle left, so only the teardown can end it this quickly.
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.recv()
+		done <- err
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Error("the connection outlived the DisconnectRequest, so handle's error was ignored")
+	}
+}
+
+func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	c, err := dial(t, s, psk)
+	if err != nil {
 		t.Fatal(err)
 	}
-	w := bufio.NewWriter(client)
-	if err := writeFrame(w, msgDisconnectRequest, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Flush(); err != nil {
+
+	if err := c.send(msgDisconnectRequest, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +85,7 @@ func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
 	// into an EOF, and Home Assistant logs a failed disconnect on every reconnect.
 	time.Sleep(200 * time.Millisecond)
 
-	msgType, _, err := readFrame(bufio.NewReader(client))
+	msgType, _, err := c.recv()
 	if err != nil {
 		t.Fatalf("reading the reply to DisconnectRequest: %v", err)
 	}
@@ -91,7 +118,7 @@ func serveOne(t *testing.T, s *Server) net.Conn {
 }
 
 func TestTheNinthConnectionIsRefused(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < maxConns; i++ {
 		serveOne(t, s)
 	}
@@ -128,7 +155,7 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 }
 
 func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	s.uptime = func() (float32, bool) { return 1234, true }
 	quiet := &conn{out: make(chan frame, sendQueue)}
 	loud := &conn{out: make(chan frame, sendQueue), states: true}
@@ -148,7 +175,7 @@ func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
 }
 
 func TestAClientThatSaysNothingLosesItsSlot(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	s.handshakeWait = 200 * time.Millisecond
 	silent := serveOne(t, s)
 	if err := silent.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -165,57 +192,62 @@ func TestAClientThatSaysNothingLosesItsSlot(t *testing.T) {
 	}
 }
 
-func TestAClientThatHasSaidHelloKeepsItsSlot(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+func TestAClientThatHasSentAFrameKeepsItsSlot(t *testing.T) {
+	psk := testPSK(t)
+	s := testServer(t, psk)
 	s.handshakeWait = 200 * time.Millisecond
-	client := serveOne(t, s)
-	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	c, err := dial(t, s, psk)
+	if err != nil {
 		t.Fatal(err)
 	}
-	ping := func(when string) {
-		t.Helper()
-		w := bufio.NewWriter(client)
-		if err := writeFrame(w, msgPingRequest, nil); err != nil {
-			t.Fatalf("%s: %v", when, err)
-		}
-		if err := w.Flush(); err != nil {
-			t.Fatalf("%s: %v", when, err)
-		}
-		msgType, _, err := readFrame(bufio.NewReader(client))
-		if err != nil {
-			t.Fatalf("%s: %v", when, err)
-		}
-		if msgType != msgPingResponse {
-			t.Fatalf("%s: answered with %d, want %d", when, msgType, msgPingResponse)
-		}
+
+	// One frame that decrypts, which is what a replayed handshake cannot manage.
+	// Home Assistant sends a HelloRequest the moment the handshake is done.
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.recv(); err != nil {
+		t.Fatal(err)
 	}
 
-	hello(t, client)
-	// Past the handshake wait. A client that has introduced itself is allowed to
-	// go quiet: Home Assistant holds the connection open between pings.
+	// Past the handshake wait. A client that has proved it has the key is allowed
+	// to go quiet: Home Assistant holds the connection open between pings.
 	time.Sleep(3 * s.handshakeWait)
-	ping("ping after going quiet")
+
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatalf("ping after going quiet: %v", err)
+	}
+	msgType, _, err := c.recv()
+	if err != nil {
+		t.Fatalf("ping after going quiet: %v", err)
+	}
+	if msgType != msgPingResponse {
+		t.Fatalf("answered with %d, want %d", msgType, msgPingResponse)
+	}
 }
 
-// A ping is not an introduction. Eight peers pinging once each would otherwise
-// hold every slot for 90 seconds apiece and lock Home Assistant out.
-func TestAPingDoesNotBuyTheHandshakeGrace(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+// Bytes are not a handshake. Eight peers dribbling a frame each would otherwise
+// hold every slot without ever proving they have the key.
+func TestAnUnfinishedHandshakeDoesNotBuyTheGrace(t *testing.T) {
+	psk := testPSK(t)
+	s := testServer(t, psk)
 	s.handshakeWait = 200 * time.Millisecond
 	client := serveOne(t, s)
 	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
+	// The client hello, and then nothing: the handshake is begun and never
+	// finished.
 	w := bufio.NewWriter(client)
-	if err := writeFrame(w, msgPingRequest, nil); err != nil {
+	if err := writeNoiseFrame(w, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := readFrame(bufio.NewReader(client)); err != nil {
-		t.Fatalf("ping was not answered: %v", err)
+	if _, err := readNoiseFrame(bufio.NewReader(client), maxDataFrame); err != nil {
+		t.Fatalf("the server hello did not arrive: %v", err)
 	}
 
 	// Decided by the select below rather than by a read deadline: a deadline
@@ -233,64 +265,47 @@ func TestAPingDoesNotBuyTheHandshakeGrace(t *testing.T) {
 			t.Fatal("the connection was still open, and sent something")
 		}
 	case <-time.After(3 * time.Second):
-		t.Error("a client that only pinged kept its slot past the handshake wait")
+		t.Error("a half-finished handshake kept its slot past the handshake wait")
 	}
 }
 
-func hello(t *testing.T, client net.Conn) {
-	t.Helper()
-	var p pb
-	p.str(1, "test client")
-	w := bufio.NewWriter(client)
-	if err := writeFrame(w, msgHelloRequest, p.b); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	msgType, _, err := readFrame(bufio.NewReader(client))
-	if err != nil {
-		t.Fatalf("hello was not answered: %v", err)
-	}
-	if msgType != msgHelloResponse {
-		t.Fatalf("hello answered with %d, want %d", msgType, msgHelloResponse)
-	}
-}
-
-// The log is a file on /data, and every byte below arrives from an
-// unauthenticated peer, and %q renders each of these bytes as four characters,
-// so a full frame of client_info quotes to four times maxFrame.
+// The log is a file on /data, and every byte below arrives from a peer that has
+// the key. %q renders each of these bytes as four characters, so a full frame of
+// client_info would quote to four times the frame.
 func TestALongClientNameIsCutBeforeItReachesTheLog(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
-	var p pb
-	p.str(1, strings.Repeat("\xff", maxFrame-16))
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	// Through serveConn, because the read loop is what writes the line: driving
-	// handle alone only sets the field it carries out, and would pass with no
-	// truncation at all.
-	client, server := net.Pipe()
-	done := make(chan struct{})
-	go func() { s.serveConn(server); close(done) }()
-	w := bufio.NewWriter(client)
-	if err := writeFrame(w, msgHelloRequest, p.b); err != nil {
+	var p pb
+	p.str(1, strings.Repeat("\xff", maxNoiseMessage-16))
+	if err := c.send(msgHelloRequest, p.b); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := readFrame(bufio.NewReader(client)); err != nil {
+	if _, _, err := c.recv(); err != nil {
 		t.Fatalf("hello was not answered: %v", err)
 	}
-	client.Close()
-	<-done
-	// Bounded, rather than proportional to what arrived: %q renders each of
-	// these bytes as four characters, so the ceiling is the truncation, not
-	// the frame.
+
+	// The reply is queued by handle, but the log line is written after handle
+	// returns, so the reply arriving proves nothing about the log. A second round
+	// trip does: the read loop writes the hello line before it reads again.
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.recv(); err != nil {
+		t.Fatalf("ping was not answered: %v", err)
+	}
+
+	// Bounded, rather than proportional to what arrived: the ceiling is the
+	// truncation, not the frame.
 	if n := len(out.String()); n > 1024 {
-		t.Errorf("one hello wrote %d bytes of log for a %d byte name", n, maxFrame-16)
+		t.Errorf("one hello wrote %d bytes of log for a %d byte name", n, maxNoiseMessage-16)
 	}
 }
 
@@ -301,9 +316,10 @@ func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
-	// Set on serveConn's goroutine and read after it has returned, so the receive
-	// below orders the two.
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	// Set on serveConn's goroutine and read after the reply has arrived, which
+	// orders the two.
 	locked := false
 	s.uptime = func() (float32, bool) {
 		if s.mu.TryLock() {
@@ -314,21 +330,16 @@ func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
 		return 1, true
 	}
 
-	client, server := net.Pipe()
-	done := make(chan struct{})
-	go func() { s.serveConn(server); close(done) }()
-	w := bufio.NewWriter(client)
-	if err := writeFrame(w, msgSubscribeStates, nil); err != nil {
+	c, err := dial(t, s, psk)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Flush(); err != nil {
+	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := readFrame(bufio.NewReader(client)); err != nil {
+	if _, _, err := c.recv(); err != nil {
 		t.Fatalf("the first reading did not arrive: %v", err)
 	}
-	client.Close()
-	<-done
 
 	if locked {
 		t.Error("/proc/uptime was read with the server lock held")
@@ -339,7 +350,7 @@ func TestTheLogRateLimitCapsWhatOnePeerCanWrite(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < 500; i++ {
 		s.peerLogf("esphome api: line %d", i)
 	}
@@ -356,7 +367,7 @@ func TestTheRateLimitHoldsAcrossConcurrentPeers(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	var wg sync.WaitGroup
 	for i := 0; i < maxConns; i++ {
 		wg.Add(1)
@@ -382,7 +393,7 @@ func TestPeerLoggingStopsAtItsCeilingForTheRun(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < logTotal+logBurst*3; i++ {
 		// Past the window each time, so the rate limit never refuses: the total
 		// is what has to stop it.
@@ -403,7 +414,7 @@ func TestAMalformedHelloIsNotAnswered(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	conn := &conn{sock: fakeAddr{}, out: make(chan frame, sendQueue)}
 	if err := s.handle(conn, msgHelloRequest, []byte{0x08}); err == nil {
 		t.Error("a truncated HelloRequest was accepted")
@@ -445,15 +456,23 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A")
+	psk := testPSK(t)
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", psk)
+
+	// Three ways to churn, because they reach different lines. Closing before
+	// the lead byte never leaves the accept path; an empty hello and then a
+	// close reaches "handshake failed", which needs no key at all. Both are a
+	// peer's to repeat for as long as it likes.
 	for i := 0; i < 200; i++ {
 		client, server := net.Pipe()
 		done := make(chan struct{})
 		go func() { s.serveConn(server); close(done) }()
-		w := bufio.NewWriter(client)
-		_ = writeFrame(w, msgDisconnectRequest, nil)
-		_ = w.Flush()
-		_, _, _ = readFrame(bufio.NewReader(client))
+		if i%2 == 1 {
+			w := bufio.NewWriter(client)
+			_ = writeNoiseFrame(w, nil)
+			_ = w.Flush()
+			_, _ = readNoiseFrame(bufio.NewReader(client), maxDataFrame)
+		}
 		client.Close()
 		<-done
 	}
@@ -461,8 +480,57 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 		t.Errorf("200 connect/disconnect cycles wrote %d log lines, want at most %d",
 			lines, 2*logBurst)
 	}
+
+	// The third is a session that succeeds, which needs the key and so is not a
+	// stranger's to repeat. It still goes through the same limit, and the burst
+	// above is spent: the line has to be suppressed rather than written.
+	before := out.String()
+	if _, err := dial(t, s, psk); err != nil {
+		t.Fatal(err)
+	}
+	added := strings.TrimPrefix(out.String(), before)
+	if strings.Contains(added, "encrypted session established") {
+		t.Errorf("an established session wrote past a spent burst: %s", added)
+	}
 }
 
 type fakeAddr struct{ net.Conn }
 
 func (fakeAddr) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1234} }
+
+// The three numbers are a chain rather than three independent choices: a push
+// cancels the client's ping, so the deadline has to outlast a push interval plus
+// the wait that follows it.
+func TestTheIdleDeadlineOutlastsWhatTheClientSaysOnItsOwn(t *testing.T) {
+	if MinSensorTick <= clientKeepalive {
+		t.Errorf("a %v push interval cancels a %v keepalive before it ever fires, so the client falls silent",
+			MinSensorTick, clientKeepalive)
+	}
+	if idleWait <= MinSensorTick+clientKeepalive {
+		t.Errorf("idleWait is %v, and a client can legitimately say nothing for %v",
+			idleWait, MinSensorTick+clientKeepalive)
+	}
+}
+
+// The constant is exported as a contract, so the package has to hold it rather
+// than leave it to a test on the caller: a second caller, or a flag, would get
+// no protection from a test that compares two constants.
+func TestPollSensorsWillNotAcceptATickThatSilencesTheClient(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	done := make(chan struct{})
+	go func() { s.PollSensors(time.Millisecond); close(done) }()
+
+	// It raises the tick to the floor rather than refusing, so the goroutine
+	// stays alive; what is observable is the line saying so.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), "raised to") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("a 1ms tick was accepted; the log says %q", out.String())
+}

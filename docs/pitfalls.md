@@ -92,14 +92,56 @@ line a minute saying so grows the same file. Connection churn is the same
 hazard at a smaller size, a connect and a disconnect line apiece, so those are
 limited too rather than only the lines carrying a peer's own bytes.
 
-**Nothing locks the API port yet.** There is no peer allowlist, because ESPHome
-has no such concept, so tcp/6053 is open to the subnet exactly like a keyless
-ESPHome node, and every entity behind it is reachable by anything that can route
-to the Dot on `wlan0`.
+**An empty pre-shared key is not a weak key, it is no key.** `flynn/noise` reads
+an empty `PresharedKey` as *no psk modifier at all*, so `NNpsk0` quietly becomes
+plain `NN` and every peer on the subnet completes the handshake. It fails open,
+and it fails silently: nothing errors. Measured by asking it for a first
+handshake message each way: 48 bytes with a 32-byte key, and **32 bytes with a
+nil one**, which is the psk contribution simply missing. So `noiseAccept` checks
+the length before it uses the key, and `TestAServerWithNoKeyRefusesEveryone`
+fails if that check is removed. `DecodeNoisePSK` means the one caller cannot
+reach it today, but a key that is configured and not enforced only looks like
+protection.
 
-**`-name` is an identity, not a label, and it is required.** README.md carries
-the rule a user needs, which is not to change it after adding the device. The
-rest of this is why there is no way around that.
+**`adb` merges the device's stderr into its stdout**, so every read-back in the
+deploy scripts is one line of noise away from a wrong answer. A linker warning
+from `su` prepended to a key file makes it decode to nothing; taken as the answer
+to `[ -x ... ]` it is not `yes`; counted as "anything still on the device" it is
+six things left behind. So no read compares the whole stream against a literal.
+Each one matches the shape it expects, and the ones whose answer is a decision
+rather than a value end the remote command with a word of their own and demand
+it, because otherwise silence and "no" are the same reading, and a dropped cable
+becomes a confident wrong diagnosis.
+
+**`adb push` does not carry the local mode, and `/data/local/tmp` is `0771`.**
+A key written locally as `0600` lands on the device as `0666`, and the `o+x` on
+that directory lets any uid reach it by name, so staging the key there hands it
+to every app on the device for as long as it sits there. Nothing reports this:
+the install succeeds, the key is correct, and the mode it finally lands with is
+right. Measured both ways on a Dot: from `/data/local/tmp` an app uid reads the
+staged key, and from a `0700` directory of our own the same read is denied. So
+`install.sh` makes that directory first and removes it after. The binary and the
+boot script go through the shared one still, because neither is a secret: the
+binary is read back by hash, and the boot script compared against what was
+pushed.
+
+**Two frames are indexed right after they are measured**, and a peer with no key
+reaches the first. An empty second handshake frame would be read at `[0]` for
+its preamble, and a decrypted message shorter than four bytes sliced for its
+inner header. Neither is a crash the daemon survives usefully: the supervisor
+brings it back five seconds later with the button ungrabbed each time, so one
+peer repeating one empty frame is a reboot loop. Each guard has a test that
+panics without it, rather than one that reads the code back.
+
+**There is still no peer allowlist**, because ESPHome has no such concept. The
+key is the whole of the access control, and it guards what a peer can reach
+rather than whether it gets in: anything that can route to the Dot on `wlan0`
+may open a connection and hold one of the eight slots until the handshake wait
+expires, and eight of those keep Home Assistant off the device for as long as
+somebody cares to. What is behind the slot needs the key.
+
+**`-name` is required and has to be unique.** README.md carries the rule a user
+needs; the rest of this is why there is no way around it.
 
 The daemon checks it as well as `install.sh`, because the binary can be run by
 hand, and the rules are ESPHome's own: the name is the device's identity in Home

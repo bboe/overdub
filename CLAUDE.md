@@ -35,7 +35,7 @@ internal/alexa     speech through Alexa: the intent, the clip, and the server
                    that serves it to her
 internal/button    the exclusive grab, the clone, and the read loop
 internal/device    the Dot itself: its network, and the firewall rule
-internal/esphome   the ESPHome API and its protobuf
+internal/esphome   the ESPHome API, its protobuf, and the Noise transport
 internal/evdev     evdev and uinput primitives
 ```
 

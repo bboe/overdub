@@ -1,6 +1,7 @@
 // Package esphome pretends to be an ESPHome device, so Home Assistant adopts
-// the Echo Dot with its own first-party integration: no custom component, no
-// MQTT, no credential on the Dot.
+// the Echo Dot with its own first-party integration: no custom component and no
+// MQTT. The API is encrypted, and the pre-shared key it needs is the one
+// credential the Dot holds.
 // docs/architecture.md has the measurements.
 package esphome
 
@@ -22,6 +23,13 @@ const (
 	sendQueue = 64
 
 	idleWait = 90 * time.Second
+
+	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
+	clientKeepalive = 20 * time.Second
+
+	// MinSensorTick is the shortest state-push interval that leaves a connection
+	// alive. docs/architecture.md has the measurement.
+	MinSensorTick = 30 * time.Second
 
 	// The log is a file on /data that is truncated at boot, and every line below
 	// is written because an unauthenticated peer did something. Rate-limited, and
@@ -71,7 +79,7 @@ type frame struct {
 
 type conn struct {
 	sock   net.Conn
-	writer *bufio.Writer
+	rw     *noiseRW
 	out    chan frame
 	states bool // sent SubscribeStatesRequest
 
@@ -85,15 +93,15 @@ type Server struct {
 	model string
 	mac   string
 
+	psk []byte
+
 	keyUptime uint32
 
 	// Reads the device, so the test can answer for it: /proc/uptime is Linux's,
 	// and the tests run wherever the developer is.
 	uptime func() (float32, bool)
 
-	// A client that has said nothing holds one of the eight slots, so it gets far
-	// less rope than one that has introduced itself. A field so the test can
-	// shrink it without racing another test's server.
+	// A field so a test can shrink it without racing another test's server.
 	handshakeWait time.Duration
 
 	mu    sync.Mutex
@@ -106,11 +114,12 @@ type Server struct {
 	logWritten   int
 }
 
-func NewServer(name, model, mac string) *Server {
+func NewServer(name, model, mac string, psk []byte) *Server {
 	return &Server{
 		name:          name,
 		model:         model,
 		mac:           mac,
+		psk:           psk,
 		keyUptime:     entityKey("uptime"),
 		uptime:        device.UptimeSeconds,
 		handshakeWait: 10 * time.Second,
@@ -185,11 +194,7 @@ func truncate(s string) string {
 }
 
 func (s *Server) serveConn(netConn net.Conn) {
-	conn := &conn{
-		sock:   netConn,
-		writer: bufio.NewWriter(netConn),
-		out:    make(chan frame, sendQueue),
-	}
+	conn := &conn{sock: netConn, out: make(chan frame, sendQueue)}
 
 	s.mu.Lock()
 	if len(s.conns) >= maxConns {
@@ -203,41 +208,73 @@ func (s *Server) serveConn(netConn net.Conn) {
 
 	s.peerLogf("esphome api: %s connected", netConn.RemoteAddr())
 	written := make(chan struct{})
-	go func() {
-		s.writeLoop(conn)
-		close(written)
-	}()
+	writing := false
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, conn)
 		s.mu.Unlock()
 		// Let what is already queued reach the wire. The reply to a
 		// DisconnectRequest is queued and then this returns, and closing the socket
-		// first turns an orderly goodbye into an EOF at the other end.
-		close(conn.out)
-		select {
-		case <-written:
-		case <-time.After(2 * time.Second):
+		// first turns an orderly goodbye into an EOF at the other end. Only if the
+		// writer was ever started: a connection refused at the handshake has no
+		// goroutine to wait for.
+		if writing {
+			close(conn.out)
+			select {
+			case <-written:
+			case <-time.After(2 * time.Second):
+			}
 		}
 		netConn.Close()
 		s.peerLogf("esphome api: %s disconnected", netConn.RemoteAddr())
 	}()
 
 	reader := bufio.NewReader(netConn)
-	idle := s.handshakeWait
+	writer := bufio.NewWriter(netConn)
+
+	handshakeDeadline := time.Now().Add(s.handshakeWait)
+	netConn.SetReadDeadline(handshakeDeadline)
+	lead, err := reader.Peek(1)
+	if err != nil {
+		s.peerLogf("esphome api: %s: %v", netConn.RemoteAddr(), err)
+		return
+	}
+	if lead[0] != leadEncrypted {
+		s.peerLogf("esphome api: %s tried plaintext", netConn.RemoteAddr())
+		// A budget of its own, not what is left of the handshake's.
+		netConn.SetWriteDeadline(time.Now().Add(s.handshakeWait))
+		_ = writeNoiseFrame(writer, nil)
+		_ = writer.Flush()
+		return
+	}
+
+	session, err := noiseAccept(netConn, reader, writer, s.name, s.psk, handshakeDeadline)
+	if err != nil {
+		s.peerLogf("esphome api: %s handshake failed: %v", netConn.RemoteAddr(), err)
+		return
+	}
+	conn.rw = session
+	s.peerLogf("esphome api: %s encrypted session established", netConn.RemoteAddr())
+
+	writing = true
+	go func() {
+		s.writeLoop(conn)
+		close(written)
+	}()
+
+	decrypted := false
 	for {
-		netConn.SetReadDeadline(time.Now().Add(idle))
-		msgType, payload, err := readFrame(reader)
+		if decrypted {
+			netConn.SetReadDeadline(time.Now().Add(idleWait))
+		} else {
+			netConn.SetReadDeadline(handshakeDeadline)
+		}
+		msgType, payload, err := conn.rw.read()
 		if err != nil {
 			s.peerLogf("esphome api: %s read: %v", netConn.RemoteAddr(), err)
 			return
 		}
-		// Introducing itself is what buys the longer wait, and only that: any
-		// frame at all would let eight peers hold every slot with one ping
-		// apiece.
-		if msgType == msgHelloRequest {
-			idle = idleWait
-		}
+		decrypted = true
 		if err := s.handle(conn, msgType, payload); err != nil {
 			s.peerLogf("esphome api: %s handling message %d: %v", netConn.RemoteAddr(), msgType, err)
 			return
@@ -270,14 +307,8 @@ func (s *Server) send(conn *conn, msgType int, payload []byte) error {
 
 func (s *Server) writeLoop(conn *conn) {
 	for f := range conn.out {
-		conn.sock.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := writeFrame(conn.writer, f.msgType, f.payload); err != nil {
+		if err := conn.rw.write(f.msgType, f.payload); err != nil {
 			s.peerLogf("esphome api: %s write: %v", conn.sock.RemoteAddr(), err)
-			conn.sock.Close()
-			return
-		}
-		if err := conn.writer.Flush(); err != nil {
-			s.peerLogf("esphome api: %s flush: %v", conn.sock.RemoteAddr(), err)
 			conn.sock.Close()
 			return
 		}

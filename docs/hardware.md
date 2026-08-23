@@ -31,7 +31,11 @@ automations. Prefer targeted tests.
 adb forward tcp:16053 tcp:6053     # over USB, so this needs no LAN route
                                    # the daemon opens wlan0 only; this rides
                                    # the stock chain's own loopback accept
-pip install aioesphomeapi          # then connect to 127.0.0.1:16053
+pip install aioesphomeapi
+adb shell 'su -c "cat /data/local/bin/.overdub-noise-key"'   # the key it needs
+# APIClient("127.0.0.1", 16053, None, noise_psk=<that key>)
+# Without noise_psk the client gets RequiresEncryptionAPIError: the daemon
+# speaks the encrypted transport and nothing else.
 
 # Simulate a button press
 adb shell 'su -c "sendevent /dev/input/event1 1 138 1; sendevent /dev/input/event1 0 0 0;

@@ -2,6 +2,7 @@ package esphome
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -41,6 +42,10 @@ func (s *Server) eachConn(what string, wants func(*conn) bool, send func(*conn) 
 func wantsStates(c *conn) bool { return c.states }
 
 func (s *Server) PollSensors(every time.Duration) {
+	if every < MinSensorTick {
+		log.Printf("esphome api: sensor tick of %v raised to %v, under it the client stops pinging", every, MinSensorTick)
+		every = MinSensorTick
+	}
 	for range time.Tick(every) {
 		s.pollOnce()
 	}

@@ -22,6 +22,8 @@ const (
 	wifiIface  = device.WifiInterface
 	apiPort    = 6053
 
+	noiseKeyPath = "/data/local/bin/.overdub-noise-key"
+
 	nodeWait   = 60 * time.Second
 	macWait    = 60 * time.Second
 	macRetry   = 30 * time.Second
@@ -30,6 +32,11 @@ const (
 )
 
 func serve(flags config) error {
+	psk, err := loadPSK(noiseKeyPath)
+	if err != nil {
+		return err
+	}
+
 	i, err := button.Open(inputNode, actionKey, uinputName, nodeWait)
 	if err != nil {
 		return err
@@ -57,7 +64,7 @@ func serve(flags config) error {
 	// Off the read loop, because the button is not the network's to wait for: a
 	// Dot with no wlan0 keeps its button rather than restarting every five
 	// seconds, and mute passes through while this is still waiting.
-	go serveAPI(flags.Name)
+	go serveAPI(flags.Name, psk)
 
 	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
 		inputNode, actionKey, uinputName)
@@ -77,7 +84,7 @@ func serve(flags config) error {
 	})
 }
 
-func serveAPI(name string) {
+func serveAPI(name string, psk []byte) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		// Kept waiting rather than given up on: nothing restarts a daemon that
@@ -91,7 +98,7 @@ func serveAPI(name string) {
 		}
 		log.Printf("%s appeared", wifiIface)
 	}
-	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac)
+	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac, psk)
 
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)
@@ -103,4 +110,16 @@ func serveAPI(name string) {
 	// the supervisor cannot tell: it only restarts a process that exited.
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
 	os.Exit(1)
+}
+
+func loadPSK(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w (deploy/install.sh generates one)", err)
+	}
+	psk, err := esphome.DecodeNoisePSK(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return psk, nil
 }

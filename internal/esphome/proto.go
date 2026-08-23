@@ -1,11 +1,8 @@
 package esphome
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 )
 
@@ -100,53 +97,4 @@ func pbWalk(msg []byte, visit func(pbField)) error {
 		visit(entry)
 	}
 	return nil
-}
-
-func writeFrame(w io.Writer, msgType int, payload []byte) error {
-	var h pb
-	h.b = append(h.b, 0x00)
-	h.uvarint(uint64(len(payload)))
-	h.uvarint(uint64(msgType))
-	if _, err := w.Write(append(h.b, payload...)); err != nil {
-		return err
-	}
-	return nil
-}
-
-// What real ESPHome accepts: api_frame_helper.h sets MAX_MESSAGE_SIZE to 32768
-// on esp32 and refuses anything longer, so a client that talks to ESPHome
-// devices has no reason to send more. The length itself is a varint and not a
-// 16-bit field, so the framing does not bound this and the constant has to.
-// What arrives here is a command or a subscription, hundreds of bytes, and this
-// is also what an unauthenticated peer can make the daemon allocate on a device
-// with 256 MB shared with Android and Alexa.
-const maxFrame = 32768
-
-func readFrame(reader *bufio.Reader) (int, []byte, error) {
-	lead, err := reader.ReadByte()
-	if err != nil {
-		return 0, nil, err
-	}
-	if lead != 0x00 {
-		if lead == 0x01 {
-			return 0, nil, fmt.Errorf("encrypted frame on a plaintext connection; the stream is out of step")
-		}
-		return 0, nil, fmt.Errorf("bad frame lead byte 0x%02x", lead)
-	}
-	length, err := binary.ReadUvarint(reader)
-	if err != nil {
-		return 0, nil, err
-	}
-	if length > maxFrame {
-		return 0, nil, fmt.Errorf("frame of %d bytes exceeds the %d byte limit", length, maxFrame)
-	}
-	msgType, err := binary.ReadUvarint(reader)
-	if err != nil {
-		return 0, nil, err
-	}
-	var payload bytes.Buffer
-	if _, err := io.CopyN(&payload, reader, int64(length)); err != nil {
-		return 0, nil, err
-	}
-	return int(msgType), payload.Bytes(), nil
 }

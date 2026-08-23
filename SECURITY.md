@@ -24,7 +24,7 @@ anything that hands that reach to somebody who does not have it.
 
 | Surface | What guards it |
 |---|---|
-| tcp/6053, the ESPHome API | **nothing yet.** The port is open to the subnet and the transport is plaintext. What a peer can spend is bounded rather than guarded: eight connections, 32 KiB a frame, and a rate-limited log |
+| tcp/6053, the ESPHome API | the Noise pre-shared key, and nothing besides. ESPHome has no peer allowlist, so the key is the whole of it, and the daemon refuses to start without one. What the key does not do is decide who gets a connection: a peer is counted against the eight from the moment it opens a socket, so anyone who can route to the Dot can hold every slot and keep Home Assistant off it, without the key and without ever sending a byte. What such a peer can spend is bounded rather than refused: one handshake wait per slot, which neither a replayed handshake nor a stalled one extends, frames bounded before they are allocated, and log lines rate-limited |
 
 The rule the daemon adds matches the interface rather than a source range:
 `-i wlan0 -p tcp --dport 6053 -j ACCEPT`, source `0.0.0.0/0`. So the port is

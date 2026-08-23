@@ -46,6 +46,23 @@ and `init` would need an `.rc` entry in a ramdisk this Magisk cannot patch, so
 `service.d` is the hook and a shell loop is the restart. It supplies the name;
 everything else the daemon does for itself.
 
+The third is the API's pre-shared key, and it is the only pushed thing that is a
+secret. It is generated on the installing machine rather than the Dot, printed
+once, and never printed again: an install that finds one keeps it, so
+reinstalling does not lock Home Assistant out of a Dot it was talking to. Which
+means the branch that decides "is there one already" is the only check in either
+script whose wrong answer destroys something, and it is written to fail closed in
+both directions rather than one. The whole key step runs before anything is
+pushed, so a device whose key cannot be settled keeps the binary it had, and the
+message saying nothing changed is true.
+
+Staging is where the secret is exposed rather than where it lands. `adb push`
+does not carry the local mode and `/data/local/tmp` is world-traversable, so the
+key goes through a `0700` directory of the installer's own making, is read back
+to confirm that directory is gone, and is reaped by the trap on any exit that
+happens in between. `uninstall.sh` removes that directory too, because a copy
+left there is the live key and nothing else would ever look for it.
+
 The daemon waits up to 60 seconds for its input node, because `service.d` runs
 before the input drivers are certainly up. Without the wait a cold boot spends
 its first restarts failing to open a node that is about to exist.
@@ -61,7 +78,8 @@ a daemon that exits immediately, if it had no key for example, would otherwise
 append a failure every five seconds for the rest of the boot. Counted rather
 than measured: this toolbox has no `wc`.
 
-`deploy/uninstall.sh` reverses that. The boot script goes first and alone,
+`deploy/uninstall.sh` reverses that, key included. The boot script goes first and
+alone,
 because it is the only thing that starts the daemon at boot: a reboot part way
 through then leaves a Dot with nothing running rather than a supervisor
 respawning a half-deleted install.

@@ -108,7 +108,7 @@ event: `internal/evdev` asserts the 32-bit `timeval` this device has.
 ## Install
 
 ```sh
-deploy/install.sh kitchen                                      # binary and boot script
+deploy/install.sh kitchen                          # binary, boot script, key
 ```
 
 More than one Dot on `adb` means telling it which. `install.sh` uses plain
@@ -123,6 +123,7 @@ ANDROID_SERIAL=<serial> deploy/install.sh kitchen
 |---|---|
 | `overdub` | `/data/local/bin/` |
 | `overdub.sh` | Magisk `service.d`, inside `magisk.img` on Magisk 17.3 |
+| `.overdub-noise-key` | `/data/local/bin/`, mode 600, generated if absent |
 
 **The name is required, and must be unique on your network.** Every entity id
 Home Assistant creates is prefixed with it, so a duplicate collides there, and
@@ -169,8 +170,8 @@ respawning a half-deleted install. The daemon gets `SIGTERM` rather than being
 killed outright, so it gives the button back and destroys its uinput clones on
 the way out.
 
-Everything goes: the boot script, the binary, and the log the boot script
-writes. `/data/local/bin` goes with them if nothing else is left in it.
+Everything goes: the boot script, the binary, the API key, and the log the boot
+script writes. `/data/local/bin` goes with them if nothing else is left in it.
 
 The tcp/6053 rule the daemon opened goes too, once the daemon is confirmed
 gone, so no reboot is needed. An uninstall that reports trouble stops before
@@ -184,13 +185,17 @@ will show the device as unavailable; delete it there when you are done.
 Add the Dot by hand, at **Settings -> Devices & Services -> Add integration ->
 ESPHome**, with the Dot's address and port `6053`. Nothing announces it on the
 network yet, so Home Assistant will not offer it on its own.
-`adb shell ip -4 addr show wlan0` gives the address.
+`adb shell ip -4 addr show wlan0` gives the address. It will then ask for the
+encryption key the installer printed.
 
-> **Nothing authenticates tcp/6053.** ESPHome has no peer allowlist, so the
-> port is open exactly as a keyless ESPHome node is. The rule matches the
-> interface rather than a source range, so the reach is anything that can route
-> to the Dot on `wlan0`, which is wider than the local subnet; SECURITY.md has
-> the measurement. Put the Dot on a network you trust.
+> **The key is the whole of the access control.** ESPHome has no peer
+> allowlist, so anything that can route to the Dot may open a connection. What
+> the key guards is what that connection reaches, not whether it is made: a peer
+> without the key learns the device name and holds one of eight slots for ten
+> seconds, and eight of them can keep Home Assistant off the Dot for as long as
+> they care to. The firewall rule matches the interface rather than a source
+> range, so that reach is wider than the local subnet, and a VPN client on
+> another one is inside it. SECURITY.md has the measurement.
 
 **Set a DHCP reservation.** Home Assistant stores the address you gave it, and
 nothing here announces a new one.
@@ -208,6 +213,30 @@ Dot's own firewall.
 One sensor, and it is read-only: this is the connection, proved end to end. The
 button still chimes on the device, and Home Assistant is not told about it.
 
+### Encryption
+
+The API speaks ESPHome's `Noise_NNpsk0_25519_ChaChaPoly_SHA256`, and speaks
+nothing else. There is no plaintext mode, because this build does not implement
+one, and no peer allowlist, because ESPHome has no such concept: the device is
+the server, and the client authenticates with a pre-shared key.
+
+`deploy/install.sh` generates that key when the device has none, the way
+ESPHome's own tooling does, and prints it once:
+
+```
+Generated an API encryption key. Paste it into Home Assistant's
+ESPHome integration. The installer keeps no copy:
+
+    kR2b...
+```
+
+Keep it. The installer does not take a key of your own, and re-running it leaves
+an existing one alone, so reinstalling does not lock Home Assistant out of a Dot
+it was already talking to.
+
+To rotate: delete `/data/local/bin/.overdub-noise-key` on the Dot, install
+again, and paste the new key into Home Assistant.
+
 ## Troubleshooting
 
 ```sh
@@ -221,6 +250,10 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on p
 | you need the Dot's address to add it | `adb shell ip -4 addr show wlan0` |
 | Home Assistant times out adding the Dot | the tcp/6053 packet counter. Zero means the traffic never arrived |
 | Home Assistant logs `Unexpected device found` | the stored address now answers with a different MAC, so it is a different device: set a DHCP reservation |
+| Home Assistant says the key is invalid | the daemon log. `handshake failed` means the key it sent is not the one on the Dot |
+| Home Assistant says the device requires encryption | it has no key stored for this Dot; give it the one the installer printed |
+| nothing starts, and the log ends `no such file or directory (deploy/install.sh generates one)` | there is no key on the device: rerun `deploy/install.sh <name>` |
+| nothing starts, and the log says the key `decodes to N bytes` | the key on the device is corrupt. A reinstall keeps an existing key, so delete it first: `adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"'` |
 | nothing starts, and the log says `NAME is unset` | the boot script was installed by hand; rerun `deploy/install.sh <name>` |
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |

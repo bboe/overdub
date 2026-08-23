@@ -1,13 +1,8 @@
 package esphome
 
 import (
-	"bufio"
 	"bytes"
-	"encoding/binary"
-	"io"
 	"math"
-	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -129,98 +124,5 @@ func TestWalkReportsAMalformedMessage(t *testing.T) {
 	}
 	if err := walk("test", []byte{0x08, 0x01}, func(pbField) {}); err != nil {
 		t.Errorf("a well-formed message was reported as malformed: %v", err)
-	}
-}
-
-func TestFrameLayoutIsWhatHomeAssistantExpects(t *testing.T) {
-	payload := []byte{0xde, 0xad, 0xbe, 0xef}
-	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
-	if err := writeFrame(w, msgHelloResponse, payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	// Plaintext lead byte, then the payload length, then the message type,
-	// then the payload. Getting the order or the lead byte wrong desynchronises
-	// the stream and Home Assistant drops the device.
-	want := []byte{0x00, 0x04, 0x02, 0xde, 0xad, 0xbe, 0xef}
-	if !bytes.Equal(buf.Bytes(), want) {
-		t.Fatalf("frame is % x, want % x", buf.Bytes(), want)
-	}
-
-	msgType, got, err := readFrame(bufio.NewReader(&buf))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msgType != msgHelloResponse {
-		t.Errorf("round trip gave message type %d, want %d", msgType, msgHelloResponse)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Errorf("round trip gave % x, want % x", got, payload)
-	}
-}
-
-func TestFrameBudgetConstantsFitTheDevice(t *testing.T) {
-	// biscuit has 256 MB. Every accepted connection can hold one frame in
-	// flight, so the ceiling that matters is the product, not maxFrame alone.
-	// The reader grows by doubling and copies, so at the moment it grows both
-	// buffers are live: measured on arm, one maxFrame payload allocates four
-	// times it. The ceiling is well above what these constants ask for, and
-	// low enough that raising maxFrame back to a megabyte fails here.
-	const perConn = 4 * maxFrame
-	if peak := maxConns * perConn; peak > 8<<20 {
-		t.Errorf("%d connections x %d bytes peaks at %d bytes of frame buffer; too "+
-			"much for this device", maxConns, perConn, peak)
-	}
-}
-
-// endless supplies whatever it is asked for, so an oversize frame is refused for
-// its length rather than for running out of bytes. Reading the promised bytes
-// from a short buffer fails either way, and would pass with no limit at all.
-type endless struct{}
-
-func (endless) Read(p []byte) (int, error) { return len(p), nil }
-
-func TestReadFrameRejectsAnOversizeLength(t *testing.T) {
-	var head bytes.Buffer
-	head.WriteByte(0x00)
-	var v [binary.MaxVarintLen64]byte
-	head.Write(v[:binary.PutUvarint(v[:], maxFrame+1)])
-	head.Write(v[:binary.PutUvarint(v[:], 1)])
-
-	reader := bufio.NewReader(io.MultiReader(&head, endless{}))
-	_, _, err := readFrame(reader)
-	if err == nil {
-		t.Fatal("readFrame accepted a frame larger than the limit")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("readFrame failed with %v, want the length limit", err)
-	}
-}
-
-func TestReadFrameAllocatesWhatArrivesNotWhatIsClaimed(t *testing.T) {
-	var head bytes.Buffer
-	head.WriteByte(0x00)
-	var v [binary.MaxVarintLen64]byte
-	head.Write(v[:binary.PutUvarint(v[:], maxFrame)])
-	head.Write(v[:binary.PutUvarint(v[:], 1)])
-	head.Write(make([]byte, 8)) // 8 of the promised maxFrame ever arrive
-	reader := bufio.NewReader(bytes.NewReader(head.Bytes()))
-
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	if _, _, err := readFrame(reader); err == nil {
-		t.Fatal("readFrame accepted a payload that never arrived")
-	}
-	runtime.ReadMemStats(&after)
-	// A loose budget on purpose: TotalAlloc is process-wide, and goroutines from
-	// earlier tests allocate too. Expressed against maxFrame rather than in bytes,
-	// so that it stays under the claim it is testing when that constant moves.
-	if grew := after.TotalAlloc - before.TotalAlloc; grew > maxFrame/2 {
-		t.Errorf("readFrame allocated %d bytes for an 8-byte payload: it is sizing "+
-			"the buffer from the length field, so any peer can claim %d", grew, maxFrame)
 	}
 }

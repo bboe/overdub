@@ -15,8 +15,35 @@ format because it is simple and a mistake is visible.
 
 **A flag has to earn its place.** One flag, `-name`, the one thing that cannot
 be defaulted. Every other fact about biscuit is a `const`, in `serve.go` or
-beside the code that needs it. A flag whose only correct value is already known
-is configuration that can be got wrong for no gain.
+beside the code that needs it, and the one conditional thing is read from the
+filesystem: the key at `noiseKeyPath`. A flag whose only correct value is
+already known, or that restates whether a file exists, is configuration that can
+be got wrong for no gain.
+
+**The tree carries one direct dependency, and it is the handshake.** Everything
+else here is hand-rolled and checkable in isolation, including the protobuf. A
+Noise handshake is neither: Go's standard library has X25519 in `crypto/ecdh`
+but no ChaCha20-Poly1305, so an AEAD has to be imported whatever else happens,
+and the pattern itself is not something to hand-roll beside it. So
+`github.com/flynn/noise` is imported and `go.sum` is the lock. The cipher suite
+is not a choice either: `Noise_NNpsk0_25519_ChaChaPoly_SHA256` is a hardcoded
+constant in Home Assistant's client, mixed into the handshake hash, so both ends
+must name it identically.
+
+An AEAD is *authenticated encryption with associated data*: one operation that
+both encrypts and authenticates, so a message that was tampered with, or sealed
+under a different key, fails rather than decrypting into plausible rubbish. The
+"associated data" is whatever is authenticated without being encrypted, which
+Noise uses for the handshake hash and this daemon adds nothing of its own to.
+ChaCha20-Poly1305 is one: ChaCha20 encrypts, Poly1305 computes the sixteen-byte
+tag the check is made against. That tag failing is what a wrong key looks like
+on the wire, and `chacha20poly1305: message authentication failed` is what the
+log says when Home Assistant offers one.
+
+`flynn/noise` and the `golang.org/x/crypto` it pulls in are both BSD-3-Clause,
+and both are compiled in. Source distribution needs nothing, but clause 2 asks
+that their notices travel with a *binary*, so `THIRD-PARTY.txt` carries them
+verbatim and belongs beside any build that is published.
 
 **The clip is served over http, from loopback.** `SpeechSynthesizer` casts the
 connection to `HttpURLConnection` without checking, so `file://` throws
