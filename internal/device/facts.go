@@ -26,6 +26,39 @@ func MACAddress(iface string) string {
 	return mac
 }
 
+func WifiSignal() (float32, bool) {
+	table, err := os.ReadFile("/proc/net/wireless")
+	if err != nil {
+		return 0, false
+	}
+	return parseWifiLevel(string(table), WifiInterface)
+}
+
+func parseWifiLevel(table, iface string) (float32, bool) {
+	for _, line := range strings.Split(table, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, iface+":") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 4 {
+			return 0, false
+		}
+		level, err := strconv.Atoi(strings.TrimSuffix(fields[3], "."))
+		if err != nil {
+			return 0, false
+		}
+		if level > 127 {
+			level -= 256
+		}
+		if level >= 0 || level <= -120 {
+			return 0, false
+		}
+		return float32(level), true
+	}
+	return 0, false
+}
+
 func UptimeSeconds() (float32, bool) {
 	b, err := os.ReadFile("/proc/uptime")
 	if err != nil {

@@ -96,10 +96,12 @@ type Server struct {
 	psk []byte
 
 	keyUptime uint32
+	keyWifi   uint32
 
-	// Reads the device, so the test can answer for it: /proc/uptime is Linux's,
-	// and the tests run wherever the developer is.
+	// Read the device, so the tests can answer for them: /proc/uptime and
+	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
 	uptime func() (float32, bool)
+	wifi   func() (float32, bool)
 
 	// A field so a test can shrink it without racing another test's server.
 	handshakeWait time.Duration
@@ -121,7 +123,9 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		mac:           mac,
 		psk:           psk,
 		keyUptime:     entityKey("uptime"),
+		keyWifi:       entityKey("wifi_signal"),
 		uptime:        device.UptimeSeconds,
+		wifi:          device.WifiSignal,
 		handshakeWait: 10 * time.Second,
 		conns:         map[*conn]struct{}{},
 	}
@@ -283,8 +287,9 @@ func (s *Server) serveConn(netConn net.Conn) {
 		// server lock for its whole body: reading procfs underneath that lock
 		// stalls the accept path and every other connection.
 		if msgType == msgSubscribeStates {
-			up, ok := s.uptime()
-			if err := s.sendSensorsAt(conn, up, ok); err != nil {
+			up, upOK := s.uptime()
+			signal, signalOK := s.wifi()
+			if err := s.sendSensorsAt(conn, up, upOK, signal, signalOK); err != nil {
 				s.peerLogf("esphome api: %s first sensor push: %v", netConn.RemoteAddr(), err)
 				return
 			}

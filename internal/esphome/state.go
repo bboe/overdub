@@ -6,18 +6,18 @@ import (
 	"time"
 )
 
-func (s *Server) sendSensorsAt(conn *conn, up float32, ok bool) error {
-	if !ok {
-		return nil
+func (s *Server) sendSensorsAt(conn *conn, up float32, upOK bool, signal float32, signalOK bool) error {
+	if err := s.send(conn, msgSensorState, floatState(s.keyUptime, up, !upOK)); err != nil {
+		return err
 	}
-	return s.send(conn, msgSensorState, floatState(s.keyUptime, up))
+	return s.send(conn, msgSensorState, floatState(s.keyWifi, signal, !signalOK))
 }
 
-func floatState(key uint32, v float32) []byte {
+func floatState(key uint32, v float32, missing bool) []byte {
 	var p pb
 	p.fixed32(1, key)
 	p.float(2, v)
-	p.boolean(3, false) // missing_state
+	p.boolean(3, missing)
 	return p.b
 }
 
@@ -54,10 +54,11 @@ func (s *Server) PollSensors(every time.Duration) {
 func (s *Server) pollOnce() {
 	// Read once, and before the lock: it is the same value for every connection,
 	// and procfs under the server lock is the rule this file keeps elsewhere.
-	up, ok := s.uptime()
+	up, upOK := s.uptime()
+	signal, signalOK := s.wifi()
 	s.mu.Lock()
 	failed := s.eachConn("sensors", wantsStates, func(c *conn) error {
-		return s.sendSensorsAt(c, up, ok)
+		return s.sendSensorsAt(c, up, upOK, signal, signalOK)
 	})
 	s.mu.Unlock()
 	for _, line := range failed {

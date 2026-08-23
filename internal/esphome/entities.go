@@ -1,6 +1,13 @@
 package esphome
 
-const entityCategoryDiagnostic = 2
+const (
+	entityCategoryDiagnostic = 2
+
+	stateClassMeasurement     = 1
+	stateClassTotalIncreasing = 2
+
+	sensorAccuracyDecimals = 0
+)
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
 // DeviceInfoResponse and in the mDNS TXT record, and the two have to agree:
@@ -20,19 +27,31 @@ func (s *Server) deviceInfo() []byte {
 }
 
 func (s *Server) listEntities(conn *conn) error {
-	var uptime pb
-	uptime.str(1, "uptime")
-	uptime.fixed32(2, s.keyUptime)
-	uptime.str(3, "Uptime")
-	uptime.str(6, "s")
-	uptime.u32(7, 0) // accuracy_decimals
-	uptime.boolean(8, false)
-	uptime.str(9, "duration")
-	uptime.u32(10, 2) // state_class: total_increasing
-	uptime.boolean(12, false)
-	uptime.u32(13, entityCategoryDiagnostic)
-	if err := s.send(conn, msgListSensor, uptime.b); err != nil {
-		return err
+	for _, sensor := range []struct {
+		objectID    string
+		key         uint32
+		name        string
+		unit        string
+		deviceClass string
+		stateClass  uint32
+	}{
+		{"uptime", s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing},
+		{"wifi_signal", s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement},
+	} {
+		var entity pb
+		entity.str(1, sensor.objectID)
+		entity.fixed32(2, sensor.key)
+		entity.str(3, sensor.name)
+		entity.str(6, sensor.unit)
+		entity.u32(7, sensorAccuracyDecimals)
+		entity.boolean(8, false)
+		entity.str(9, sensor.deviceClass)
+		entity.u32(10, sensor.stateClass)
+		entity.boolean(12, false)
+		entity.u32(13, entityCategoryDiagnostic)
+		if err := s.send(conn, msgListSensor, entity.b); err != nil {
+			return err
+		}
 	}
 
 	return s.send(conn, msgListEntitiesDone, nil)

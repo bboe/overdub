@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -321,14 +322,18 @@ func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
 	// Set on serveConn's goroutine and read after the reply has arrived, which
 	// orders the two.
 	locked := false
-	s.uptime = func() (float32, bool) {
-		if s.mu.TryLock() {
-			s.mu.Unlock()
-		} else {
-			locked = true
+	watch := func(v float32) func() (float32, bool) {
+		return func() (float32, bool) {
+			if s.mu.TryLock() {
+				s.mu.Unlock()
+			} else {
+				locked = true
+			}
+			return v, true
 		}
-		return 1, true
 	}
+	s.uptime = watch(1)
+	s.wifi = watch(-48)
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -342,7 +347,13 @@ func TestTheUptimeReadDoesNotHoldTheServerLock(t *testing.T) {
 	}
 
 	if locked {
-		t.Error("/proc/uptime was read with the server lock held")
+		t.Error("procfs was read with the server lock held")
+	}
+
+	locked = false
+	s.pollOnce()
+	if locked {
+		t.Error("the sixty-second poll read procfs with the server lock held")
 	}
 }
 
@@ -533,4 +544,194 @@ func TestPollSensorsWillNotAcceptATickThatSilencesTheClient(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Errorf("a 1ms tick was accepted; the log says %q", out.String())
+}
+
+// Every sensor reading is a key and a float, and the key is what tells Home
+// Assistant which entity it belongs to. Two readings go out per tick, so a
+// wrong key does not lose the value: it files it under the other sensor.
+func sensorReading(t *testing.T, payload []byte) (uint32, float32, bool) {
+	t.Helper()
+	var key uint32
+	var value float32
+	missing := false
+	seen := map[int]int{}
+	if err := pbWalk(payload, func(f pbField) {
+		seen[f.field] = f.wire
+		switch f.field {
+		case 1:
+			key = uint32(f.num)
+		case 2:
+			value = math.Float32frombits(uint32(f.num))
+		case 3:
+			missing = f.num != 0
+		}
+	}); err != nil {
+		t.Fatalf("sensor state did not parse: %v", err)
+	}
+	// The key and the value are fixed32 on the wire. Sent as varints they decode
+	// to the same number here and to nothing at all in Home Assistant, which
+	// skips the field it cannot read and files every reading under key zero.
+	if seen[1] != wireFixed32 {
+		t.Errorf("the key went out as wire type %d, want fixed32 (%d)", seen[1], wireFixed32)
+	}
+	if seen[2] != wireFixed32 {
+		t.Errorf("the value went out as wire type %d, want fixed32 (%d)", seen[2], wireFixed32)
+	}
+	return key, value, missing
+}
+
+func TestSubscribingGetsTheUptimeAndTheSignal(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.uptime = func() (float32, bool) { return 1234, true }
+	s.wifi = func() (float32, bool) { return -55, true }
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[uint32]float32{s.keyUptime: 1234, s.keyWifi: -55}
+	// Counted rather than ranged: deleting from a map inside a range over it
+	// may end the loop early, which read one message instead of two and failed
+	// two runs in five.
+	for n := len(want); n > 0; n-- {
+		msgType, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("a reading did not arrive: %v", err)
+		}
+		if msgType != msgSensorState {
+			t.Fatalf("got message type %d, want %d", msgType, msgSensorState)
+		}
+		key, value, missing := sensorReading(t, payload)
+		expected, known := want[key]
+		if !known {
+			t.Fatalf("a reading arrived under key %d, which is no sensor of ours", key)
+		}
+		if value != expected {
+			t.Errorf("key %d carried %v, want %v", key, value, expected)
+		}
+		if missing {
+			t.Errorf("key %d was marked missing, so Home Assistant shows no value for a reading that succeeded", key)
+		}
+		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Errorf("%d sensor readings never arrived", len(want))
+	}
+}
+
+// Zero dBm is a plausible signal and zero seconds a plausible uptime, so a
+// reading that could not be taken has to be left out rather than sent as zero.
+// A reading that could not be taken is sent and flagged, not sent as zero and
+// not left out. Zero is a plausible value for both of these, and Home Assistant
+// would draw it as a measurement; leaving it out is no better once a value has
+// been published, because the old one stays on screen as though it were current.
+// missing_state is the field the protocol has for exactly this.
+func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		uptime  bool
+		signal  bool
+		wantKey func(*Server) uint32
+	}{
+		{"the uptime could not be read", false, true, func(s *Server) uint32 { return s.keyUptime }},
+		{"the signal could not be read", true, false, func(s *Server) uint32 { return s.keyWifi }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out lockedBuffer
+			defer restoreLog(t, &out)()
+
+			psk := testPSK(t)
+			s := testServer(t, psk)
+			s.uptime = func() (float32, bool) { return 1234, tt.uptime }
+			s.wifi = func() (float32, bool) { return -48, tt.signal }
+
+			c, err := dial(t, s, psk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.send(msgSubscribeStates, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			failed := tt.wantKey(s)
+			seen := false
+			for n := 0; n < 2; n++ {
+				_, payload, err := c.recv()
+				if err != nil {
+					t.Fatalf("only %d of the two readings arrived: %v", n, err)
+				}
+				key, value, missing := sensorReading(t, payload)
+				if key != failed {
+					if missing {
+						t.Errorf("key %d was marked missing, and it was read successfully", key)
+					}
+					continue
+				}
+				seen = true
+				if !missing {
+					t.Errorf("a reading that failed went out as %v, which Home Assistant draws "+
+						"as a measurement", value)
+				}
+			}
+			if !seen {
+				t.Errorf("the reading that failed was left out entirely; Home Assistant keeps " +
+					"showing the last value it had")
+			}
+		})
+	}
+}
+
+// The sixty-second push is the only thing that keeps these fresh in Home
+// Assistant: a reading taken once at subscribe and never again leaves an entity
+// that looks live and is not.
+func TestThePollPushesBothReadings(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.uptime = func() (float32, bool) { return 1234, true }
+	s.wifi = func() (float32, bool) { return -48, true }
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 2; n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the first readings did not arrive: %v", err)
+		}
+	}
+
+	s.uptime = func() (float32, bool) { return 5678, true }
+	s.wifi = func() (float32, bool) { return -70, true }
+	s.pollOnce()
+
+	want := map[uint32]float32{s.keyUptime: 5678, s.keyWifi: -70}
+	for n := len(want); n > 0; n-- {
+		_, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("a polled reading did not arrive: %v", err)
+		}
+		key, value, _ := sensorReading(t, payload)
+		expected, known := want[key]
+		if !known {
+			t.Fatalf("the poll sent key %d, which is no sensor of ours", key)
+		}
+		if value != expected {
+			t.Errorf("the poll sent %v for key %d, want %v", value, key, expected)
+		}
+		delete(want, key)
+	}
 }

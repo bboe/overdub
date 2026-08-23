@@ -109,6 +109,70 @@ time. `MinSensorTick` is where that constraint is written down, and
 caller, because the constant is exported and the cost of getting it wrong lands
 on a connection that is working.
 
+The sensors are read once per tick and each is sent only if its read
+succeeded. A reading that failed is left out rather than sent as zero, because
+zero is a plausible value for both of them: zero dBm is a signal level and zero
+seconds an uptime, so Home Assistant would draw either as a measurement rather
+than as the gap it is.
+
+The signal is the fourth field of the `wlan0` line in `/proc/net/wireless`, and
+that file is the reason the reading needs two guards rather than none. Measured
+on the Dot:
+
+```
+ wlan0: 0000    0   208     0        0      0      0      0      0        0
+  p2p0: 0000    0     0     0        0      0      0      0      0        0
+```
+
+The level is an unsigned byte -- `struct iw_quality.level` is a `__u8`, so no
+driver can hand the kernel a negative one -- and -48 dBm arrives as 208, with
+256 coming back off anything above 127. A negative number does reach this file,
+but only because the kernel subtracts 0x100 itself for a driver that sets
+`IW_QUAL_DBM`, and a row written that way never trips the test.
+
+Each column is followed by a dot when its `IW_QUAL_*_UPDATED` flag is set, and
+reading the file clears those flags. So the dots are there for the first read
+after the driver refreshes and gone for every read until it refreshes again:
+measured on the Dot, one dotted row followed by nine plain ones in the same
+burst. This daemon reads once a minute, which means it gets the dotted form
+essentially every time, and stripping the suffix is the ordinary path rather
+than a concession to some other driver.
+
+A zero there is not a reading. The kernel prints a row for every wireless netdev
+and fills it with zeros when it has no statistics, which is what `p2p0` is doing
+above. Taken at face value that would publish 0 dBm, the strongest signal Home
+Assistant can draw, at a moment there is no link at all. So the level is kept
+only when it is a signal somebody could receive: at or above zero it is not one,
+and at or below -120 dBm it is under the noise floor of any radio. That also
+covers the -256 an `IW_QUAL_DBM` driver writes for the same absence, which a
+test for zero alone would let through.
+
+Which of these a running Dot actually produces was worth measuring rather than
+reasoning about, because the two obvious guesses are both wrong. Across a cold
+boot there is no row at all until 23 seconds, the zero row from 23 to 25, and a
+real level from 27 -- and the API is up for none of it, because `serveAPI` waits
+for the MAC before it binds and on that boot it bound at 27 seconds. Take the
+radio down on a running device and the row does not go to zeros either: it
+disappears, and the parser leaves by its "not found" path instead. Measured with
+`svc wifi disable`, which is what actually disassociates -- `ifconfig wlan0
+down` proves nothing, because the framework restores the interface at once and
+the driver keeps its last statistics, so the reading never changes.
+
+So the zero row is real and the guard is not dead code, but it is not what
+catches a radio that drops. Both paths arrive at the same place, which is the
+point: no reading.
+
+A reading that fails is still sent, with `missing_state` set. Leaving it out was
+the first attempt and it is only right before the first one: afterwards Home
+Assistant keeps drawing the last value it was given, so a radio that has dropped
+shows the signal it had when it was working, beside an uptime still ticking.
+Measured through Home Assistant's own client with the radio disabled: `state=0.0
+missing_state=True`, which it renders as no value rather than as a measurement.
+
+The line is matched on the whole interface name. `lo` is not in this file, so it
+is not what the match is for: `p2p0` is, and so is any driver that adds a second
+wireless netdev whose name contains ours.
+
 `DeviceInfoResponse` carries an `esphome_version` of `2026.8.0`, which Home
 Assistant shows as the device's firmware version. It names a real ESPHome
 release: ESPHome versions by calendar the way Home Assistant does, which is why

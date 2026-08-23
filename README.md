@@ -6,7 +6,7 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports one diagnostic sensor over that connection, and a press still plays its
+reports two diagnostic sensors over that connection, and a press still plays its
 chime on the device itself.
 
 ## Scope
@@ -213,9 +213,10 @@ Dot's own firewall.
 | Entity | Kind | Notes |
 |---|---|---|
 | `sensor.<name>_uptime` | diagnostic | seconds since boot |
+| `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 
-One sensor, and it is read-only: this is the connection, proved end to end. The
-button still chimes on the device, and Home Assistant is not told about it.
+Both are read-only, and both are the connection proved end to end. The button
+still chimes on the device, and Home Assistant is not told about it.
 
 ### Encryption
 
