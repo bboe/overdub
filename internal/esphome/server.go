@@ -32,11 +32,11 @@ const (
 	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
 	clientKeepalive = 20 * time.Second
 
-	// The shortest gap between two volume reads a wake can ask for, and the
-	// floor under a tick that is not positive.
-	minVolumeReadGap = time.Second
+	// The shortest gap between two live reads a wake can ask for, and the floor
+	// under a tick that is not positive. The volume's fork is what it is for.
+	minLiveReadGap = time.Second
 
-	// MinSensorTick is the floor under PollSensors' ticker; PollVolume has none.
+	// MinSensorTick is the floor under PollSensors' ticker; PollLive has none.
 	// It bounds that ticker rather than the push rate, which a subscriber's wake
 	// can exceed, and rather than the connection's life, which the ping keeps.
 	// docs/architecture.md has the measurement it came from.
@@ -110,6 +110,7 @@ type Server struct {
 	keyWifi   uint32
 	keyVolume uint32
 	keyCPU    uint32
+	keyMemory uint32
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
@@ -117,11 +118,12 @@ type Server struct {
 	wifi   func() (float32, bool)
 	volume func() (float32, bool)
 	cpu    func() (float32, bool)
+	memory func() (float32, bool)
 
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
 	pingWait      time.Duration
-	volumeGap     time.Duration
+	liveGap       time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -135,7 +137,7 @@ type Server struct {
 	// answered with is corrected by a read rather than by the next tick.
 	// Buffered by one and never blocked on: a wake already waiting is a read
 	// already coming.
-	volumeWake chan struct{}
+	liveWake   chan struct{}
 	sensorWake chan struct{}
 
 	logMu        sync.Mutex
@@ -155,16 +157,18 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyWifi:       entityKey("wifi_signal"),
 		keyVolume:     entityKey("volume"),
 		keyCPU:        entityKey("cpu_temperature"),
+		keyMemory:     entityKey("memory_available"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		volume:        device.MusicVolumePercent,
 		cpu:           device.CPUTemperature,
+		memory:        device.AvailableMemory,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
-		volumeGap:     minVolumeReadGap,
+		liveGap:       minLiveReadGap,
 		conns:         map[*conn]struct{}{},
 		published:     map[uint32]reading{},
-		volumeWake:    make(chan struct{}, 1),
+		liveWake:      make(chan struct{}, 1),
 		sensorWake:    make(chan struct{}, 1),
 	}
 }
@@ -437,7 +441,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			return err
 		}
 		if first && !s.stateSubscriberBesides(conn) {
-			for _, wake := range []chan struct{}{s.volumeWake, s.sensorWake} {
+			for _, wake := range []chan struct{}{s.liveWake, s.sensorWake} {
 				select {
 				case wake <- struct{}{}:
 				default:

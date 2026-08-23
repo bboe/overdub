@@ -12,15 +12,28 @@ type reading struct {
 	ok    bool
 }
 
-// The readings the tick carries, read together and published together.
+// The minute's readings: an uptime that changes on every read whatever the
+// cadence, and a signal that costs 1.8ms to take.
 func (s *Server) readTicked() []reading {
 	up, upOK := s.uptime()
 	signal, signalOK := s.wifi()
-	cpu, cpuOK := s.cpu()
 	return []reading{
 		{s.keyUptime, up, upOK},
 		{s.keyWifi, signal, signalOK},
+	}
+}
+
+// The short tick's readings, taken together because they are published
+// together. Measured on the Dot: 118us for the temperature, 111us for the
+// memory, and 11.7ms for the volume, which is the one that forks.
+func (s *Server) readLive() []reading {
+	cpu, cpuOK := s.cpu()
+	memory, memoryOK := s.memory()
+	volume, volumeOK := s.volume()
+	return []reading{
 		{s.keyCPU, cpu, cpuOK},
+		{s.keyMemory, memory, memoryOK},
+		{s.keyVolume, volume, volumeOK},
 	}
 }
 
@@ -103,9 +116,9 @@ func (s *Server) publish(what string, readings []reading) []reading {
 }
 
 // Starts a poll for every sensor listEntities names.
-func (s *Server) Poll(sensorTick, volumeTick time.Duration) {
+func (s *Server) Poll(sensorTick, liveTick time.Duration) {
 	go s.PollSensors(sensorTick)
-	go s.PollVolume(volumeTick)
+	go s.PollLive(liveTick)
 }
 
 // Published once before the wait, so a subscriber arriving in the first minute
@@ -126,27 +139,26 @@ func (s *Server) PollSensors(every time.Duration) {
 	}
 }
 
-func (s *Server) PollVolume(every time.Duration) {
+func (s *Server) PollLive(every time.Duration) {
 	// time.NewTicker panics rather than returning an error, and this poll has no
 	// floor of its own for a caller to have been stopped by.
 	if every <= 0 {
-		log.Printf("esphome api: volume tick of %v raised to %v", every, minVolumeReadGap)
-		every = minVolumeReadGap
+		log.Printf("esphome api: live tick of %v raised to %v", every, minLiveReadGap)
+		every = minLiveReadGap
 	}
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	var last time.Time
 	woken := false
 	for {
-		if s.anyStateSubscriber() && (!woken || time.Since(last) >= s.volumeGap) {
+		if s.anyStateSubscriber() && (!woken || time.Since(last) >= s.liveGap) {
 			last = time.Now()
-			volume, ok := s.volume()
-			s.publish("volume", []reading{{s.keyVolume, volume, ok}})
+			s.publish("live", s.readLive())
 		}
 		select {
 		case <-tick.C:
 			woken = false
-		case <-s.volumeWake:
+		case <-s.liveWake:
 			woken = true
 		}
 	}

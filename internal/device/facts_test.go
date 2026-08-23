@@ -396,8 +396,8 @@ func TestCPUTemperatureFindsItsZoneByType(t *testing.T) {
 			}
 
 			was := thermalRoot
-			defer func() { thermalRoot = was }()
-			thermalRoot = root
+			defer func() { thermalRoot, cpuZonePath = was, "" }()
+			thermalRoot, cpuZonePath = root, ""
 
 			got, ok := CPUTemperature()
 			if got != tt.want || ok != tt.ok {
@@ -410,10 +410,104 @@ func TestCPUTemperatureFindsItsZoneByType(t *testing.T) {
 // Nothing to read at all, which is every machine this suite runs on.
 func TestCPUTemperatureWithNoThermalDirectory(t *testing.T) {
 	was := thermalRoot
-	defer func() { thermalRoot = was }()
-	thermalRoot = filepath.Join(t.TempDir(), "absent")
+	defer func() { thermalRoot, cpuZonePath = was, "" }()
+	thermalRoot, cpuZonePath = filepath.Join(t.TempDir(), "absent"), ""
 
 	if got, ok := CPUTemperature(); ok {
 		t.Errorf("CPUTemperature() reported %v with no thermal directory", got)
+	}
+}
+
+// The search is skipped after the first reading, and picked up again if the
+// path it found stops working.
+func TestTheThermalZoneIsFoundOnceAndThenRead(t *testing.T) {
+	root := t.TempDir()
+	zone := filepath.Join(root, "thermal_zone1")
+	if err := os.MkdirAll(zone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(zone, name), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("type", "mtktscpu")
+	write("temp", "41300")
+
+	was := thermalRoot
+	defer func() { thermalRoot, cpuZonePath = was, "" }()
+	thermalRoot, cpuZonePath = root, ""
+
+	if got, ok := CPUTemperature(); got != 41.3 || !ok {
+		t.Fatalf("first reading = %v, %v; want 41.3, true", got, ok)
+	}
+	if cpuZonePath == "" {
+		t.Error("the zone was not remembered, so every reading pays for the search")
+	}
+
+	// The type file is what the search reads. Removing it leaves the remembered
+	// path working, so a second reading that still succeeds did not search.
+	if err := os.Remove(filepath.Join(zone, "type")); err != nil {
+		t.Fatal(err)
+	}
+	write("temp", "42000")
+	if got, ok := CPUTemperature(); got != 42 || !ok {
+		t.Errorf("second reading = %v, %v; want 42, true -- it searched again", got, ok)
+	}
+
+	// And when the path itself stops working, the next reading looks again
+	// rather than reporting nothing for the rest of the boot.
+	if err := os.Remove(filepath.Join(zone, "temp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := CPUTemperature(); ok {
+		t.Error("a zone whose temp file is gone still reported a reading")
+	}
+	if cpuZonePath != "" {
+		t.Error("the dead path was kept, so nothing will ever look for the zone again")
+	}
+	write("type", "mtktscpu")
+	write("temp", "39000")
+	if got, ok := CPUTemperature(); got != 39 || !ok {
+		t.Errorf("after the zone came back, reading = %v, %v; want 39, true", got, ok)
+	}
+}
+
+func TestParseAvailableMemory(t *testing.T) {
+	// The Dot as it stands, trimmed to the lines around the one that is read.
+	const meminfo = `MemTotal:         482956 kB
+MemFree:           36344 kB
+MemAvailable:     129196 kB
+Buffers:            8420 kB
+Cached:           126472 kB
+`
+	for _, tt := range []struct {
+		name string
+		info string
+		want float32
+		ok   bool
+	}{
+		{"the Dot as it stands", meminfo, 126.16797, true},
+		{"first line", "MemAvailable:     129196 kB\n", 126.16797, true},
+		{"no trailing newline", "MemAvailable:     129196 kB", 126.16797, true},
+		{"zero is a reading", "MemAvailable:          0 kB\n", 0, true},
+		// MemFree is the number that looks alarming and is not this one. The
+		// match carries its colon, so this is the guard against a parser keyed
+		// on something shorter rather than against a prefix of the full name.
+		{"MemFree is not MemAvailable", "MemFree:           36344 kB\n", 0, false},
+		{"absent before Linux 3.14", "MemTotal:         482956 kB\nMemFree: 36344 kB\n", 0, false},
+		{"a unit we did not expect", "MemAvailable:     129196 MB\n", 0, false},
+		{"no unit at all", "MemAvailable:     129196\n", 0, false},
+		{"not a number", "MemAvailable:       lots kB\n", 0, false},
+		{"negative", "MemAvailable:      -12 kB\n", 0, false},
+		{"empty", "", 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseAvailableMemory(tt.info)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("parseAvailableMemory() = %v, %v; want %v, %v", got, ok, tt.want, tt.ok)
+			}
+		})
 	}
 }

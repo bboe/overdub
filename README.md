@@ -6,7 +6,7 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports four diagnostic sensors over that connection, and a press still plays
+reports five diagnostic sensors over that connection, and a press still plays
 its chime on the device itself.
 
 ## Scope
@@ -216,19 +216,21 @@ Dot's own firewall.
 | `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 | `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
 | `sensor.<name>_cpu_temperature` | diagnostic | °C, from the SoC's own thermal zone |
+| `sensor.<name>_memory_available` | diagnostic | MiB the kernel says an allocation could get, which is not the same as free |
 
 Uptime and signal are read once a minute, and again when Home Assistant
-connects, and are sent only when they change: the uptime arrives every minute
-and the signal only when it moves. Volume is read every two and a half seconds
-while Home Assistant is connected, and sent the same way, so a volume you have
-just turned appears within a few seconds, whether you turned it with the
-buttons, from an app, or by asking Alexa. It is the speaker's own level: with a
-headset in the jack or a bluetooth speaker paired, Android tracks that route
-separately and this reading does not follow it.
+subscribes. Volume, temperature and memory are read every two and a half
+seconds, and only while something is subscribed. Everything is sent only when
+it changes, so the uptime arrives every minute, the others when they move, and
+a quiet short tick costs the reads and no traffic at all.
 
-Uptime, signal and temperature share the minute tick. All four are read-only,
-and they are the connection proved end to end. The button still chimes on the
-device, and Home Assistant is not told about it.
+That is why a volume you have just turned appears within a few seconds, whether
+you turned it with the buttons, from an app, or by asking Alexa. It is the
+speaker's own level: with a headset in the jack or a bluetooth speaker paired,
+Android tracks that route separately and this reading does not follow it.
+
+All five are read-only, and they are the connection proved end to end. The
+button still chimes on the device, and Home Assistant is not told about it.
 
 ### Encryption
 

@@ -28,7 +28,7 @@ const (
 	macWait    = 60 * time.Second
 	macRetry   = 30 * time.Second
 	sensorTick = 60 * time.Second
-	volumeTick = 2500 * time.Millisecond
+	liveTick   = 2500 * time.Millisecond
 	firewallRe = 30 * time.Second
 )
 
@@ -128,7 +128,7 @@ func serveAPI(name string, psk []byte) {
 		log.Printf("firewall: %v", err)
 	}
 	go device.HoldTCPOpen(apiPort, firewallRe)
-	server.Poll(sensorTick, volumeTick)
+	server.Poll(sensorTick, liveTick)
 
 	// A bind that fails leaves a daemon serving the button and nothing else, and
 	// the supervisor cannot tell: it only restarts a process that exited.

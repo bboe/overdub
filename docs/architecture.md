@@ -209,9 +209,37 @@ So the zero row is real and the guard is not dead code, but it is not what
 catches a radio that drops. Both paths arrive at the same place, which is the
 point: no reading.
 
+Which tick a sensor rides is decided by what its reading costs and by whether
+anybody would look for it sooner. Measured on the Dot, per reading:
+
+| reading | cost |
+|---|---|
+| `/proc/uptime` | 67us |
+| `/proc/meminfo` | 111us |
+| a thermal zone's `temp` | 118us |
+| `/proc/net/wireless` | 1.8ms |
+| `dumpsys audio` | 11.7ms |
+
+So the short tick carries the volume, the temperature and the memory, and the
+minute tick carries the uptime and the signal. The uptime is on the minute
+because it changes on every read whatever the cadence, so a short tick would
+publish it twenty-four times as often for nothing; the signal is there because
+it is sixteen times the cost of reading `/proc/meminfo` and twenty-seven times
+`/proc/uptime`, and moves slowly.
+Three readings on the short tick cost about 12ms of a core every two and a half
+seconds, which is half a percent, and almost all of it is the volume's fork.
+
 The CPU temperature comes from `/sys/class/thermal`, in millidegrees: `41300`
-is 41.3 degrees. It rides the minute tick with the uptime and the signal,
-because it is one `sysfs` read and costs nothing worth gating.
+is 41.3 degrees.
+
+The zone is looked for once and then read by its path. The search costs 4.6ms
+against the 118us of the read it ends in, because it opens the `type` file of
+every zone in a directory holding eleven of them and fifty-four cooling
+devices. Zones do not appear or move while the kernel is up, so paying that per
+reading buys nothing -- and at a two and a half second tick it would have been
+forty times the cost of the reading itself. A path that stops working is
+forgotten rather than kept, so a reading that fails once does not fail for the
+rest of the boot.
 
 The zone is found by its `type` rather than by its index, and that is the
 `- STREAM_MUSIC:` rule again rather than caution. This Dot has eleven zones and
@@ -221,6 +249,19 @@ the CPU lands on. Measured here, `mtktscpu` is `thermal_zone1` and reads 41.3
 degrees; `tmp103` is a discrete sensor elsewhere on the board and reads five
 degrees cooler. The SoC is the one worth reporting, because throttling is
 decided on its die and not on the board.
+
+The memory is `MemAvailable` from `/proc/meminfo`, in MiB. `MemFree` is the
+number that looks alarming and is the wrong one. Measured on this Dot: 35 MiB
+free of 472, beside 123 MiB of cache the kernel would hand back on demand, and
+`MemAvailable` of 126. So `MemFree` reads as a device about to fall over while
+`MemAvailable` reads as what an allocation could actually get. The two do not
+add up to each other, which is the point: the kernel's estimate discounts the
+cache it cannot reclaim. The unit is taken from the file rather than
+assumed, and a line without `kB` is not a reading, because a value scaled by a
+unit we guessed at would be wrong rather than absent. The field is absent
+before Linux 3.14, and there it is no reading at all: reconstructing it from
+`MemFree` and `Cached` is the guessed denominator again, since the kernel's own
+estimate accounts for what it cannot reclaim.
 
 A zone with nothing to report answers `-127000`, so the reading is kept only
 between -40 and 150 degrees. Neither bound is a temperature a powered SoC
@@ -292,7 +333,7 @@ second tick spends about half a percent of one core's wall time on that read,
 and reaches a change twenty-four times sooner than the minute tick would. What
 is read is not what is sent: only a value that differs from the published one
 goes out, so a volume nobody touches costs the read and no traffic at all.
-That is also why `PollVolume` has no `MinSensorTick` of its own. The floor there
+That is also why `PollLive` has no `MinSensorTick` of its own. The floor there
 bounds traffic, and a tick that publishes nothing produces none.
 
 Both polls are started by one call, `Poll`, rather than by a `go` statement each
@@ -302,8 +343,8 @@ inside the package that is a test: every key `listEntities` sends has to arrive
 as a state once `Poll` is running. Two `go` statements in `main` are reachable
 by no test at all.
 
-All three readings share one published state, and that is the point rather than
-a convenience. It is what every subscriber has been told and the only thing any
+Every reading shares one published state, and that is the point rather than a
+convenience. It is what every subscriber has been told and the only thing any
 of them is ever told: the pollers read the device, and a reading that differs
 from what is published replaces it and goes to every subscriber. A client that
 has just arrived is answered from it rather than from a reading of its own.
@@ -320,7 +361,7 @@ which is what the uptime and the signal had while they were the only two
 sensors. One reader instead of two is what makes the tick free to carry only
 what changed.
 
-`PollVolume` raises a tick that is not positive to a second, the same number the
+`PollLive` raises a tick that is not positive to a second, the same number the
 wake gap uses. `time.NewTicker` panics on one rather than returning an error,
 and this poll has no `MinSensorTick` for a caller to have been stopped by, so
 the panic would reach the supervisor and be repeated five seconds later.

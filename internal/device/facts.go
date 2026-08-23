@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,10 +37,40 @@ const cpuThermalType = "mtktscpu"
 
 var thermalRoot = "/sys/class/thermal"
 
+// The zone is looked for once and then read by path. Measured on the Dot, the
+// search costs 4.6ms against 118us for the read it ends in, because it opens
+// every type file in a directory holding eleven zones and fifty-four cooling
+// devices. Zones do not appear or move while the kernel is up, so paying that
+// per reading buys nothing.
+var (
+	thermalMu   sync.Mutex
+	cpuZonePath string
+)
+
 func CPUTemperature() (float32, bool) {
+	thermalMu.Lock()
+	defer thermalMu.Unlock()
+	if cpuZonePath == "" {
+		cpuZonePath = findCPUZone()
+		if cpuZonePath == "" {
+			return 0, false
+		}
+	}
+	milli, err := os.ReadFile(cpuZonePath)
+	if err != nil {
+		// The path was good once. Something changed under us, so the next
+		// reading looks again rather than reporting nothing for the rest of
+		// the boot.
+		cpuZonePath = ""
+		return 0, false
+	}
+	return parseMilliCelsius(string(milli))
+}
+
+func findCPUZone() string {
 	zones, err := os.ReadDir(thermalRoot)
 	if err != nil {
-		return 0, false
+		return ""
 	}
 	for _, zone := range zones {
 		if !strings.HasPrefix(zone.Name(), "thermal_zone") {
@@ -49,12 +80,44 @@ func CPUTemperature() (float32, bool) {
 		if err != nil || strings.TrimSpace(string(kind)) != cpuThermalType {
 			continue
 		}
-		milli, err := os.ReadFile(filepath.Join(thermalRoot, zone.Name(), "temp"))
-		if err != nil {
+		return filepath.Join(thermalRoot, zone.Name(), "temp")
+	}
+	return ""
+}
+
+// MemAvailable rather than MemFree. Measured on this Dot: 35 MiB free of 472,
+// beside 123 MiB of cache the kernel would hand back on demand, which is why
+// MemAvailable says 126. MemFree reads as a device about to fall over and
+// MemAvailable reads as what an allocation could actually get.
+func AvailableMemory() (float32, bool) {
+	info, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, false
+	}
+	return parseAvailableMemory(string(info))
+}
+
+func parseAvailableMemory(info string) (float32, bool) {
+	for _, line := range strings.Split(info, "\n") {
+		if !strings.HasPrefix(line, "MemAvailable:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "MemAvailable:"))
+		// The unit is the kernel's to state. Every line in this file is kB
+		// today, and a reading scaled by a unit we guessed at would be wrong
+		// rather than absent.
+		if len(fields) != 2 || fields[1] != "kB" {
 			return 0, false
 		}
-		return parseMilliCelsius(string(milli))
+		kb, err := strconv.Atoi(fields[0])
+		if err != nil || kb < 0 {
+			return 0, false
+		}
+		return float32(kb) / 1024, true
 	}
+	// Absent before Linux 3.14. Reconstructing it from MemFree and Cached is
+	// the guessed denominator again: the kernel's own estimate accounts for
+	// what it cannot reclaim, and an approximation of it is not this reading.
 	return 0, false
 }
 
