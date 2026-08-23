@@ -1,5 +1,12 @@
 # Deployment
 
+**The device name is an argument, not an edit.** A name kept in the tracked boot
+script is one `git checkout` away from being empty again, and the install that
+follows pushes that over a working Dot. Nothing complains at the time, because
+the supervisor still holds the old arguments; the device simply does not come
+back from its next reboot. The reboot check compares what was pushed rather than
+what is tracked, for the same reason.
+
 **A Dot rooted through EchoMuse arrives with the Alexa stack suppressed**, and
 `deploy/restore-amazon.sh` undoes that.
 
@@ -7,7 +14,7 @@
 disabled *underneath* being hidden is not reported by `pm list packages -d` until
 it is visible again, so the disabled set has to be read *after* unhiding: reading
 it first found six packages and missed six more. The script verifies the result
-rather than trusting `adb`, which exits 0 whatever happened remotely -- and
+rather than trusting `adb`, which exits 0 whatever happened remotely, and
 probes for root before it starts, because without it every read comes back empty
 and empty is indistinguishable from "nothing left to fix".
 
@@ -25,7 +32,7 @@ so "none of them moved" and "there was nothing to move" have the same
 arithmetic.
 
 Every step takes its work from the device rather than from a plan made at the
-start -- what to unhide, what to enable, what to verify. So the script resumes:
+start: what to unhide, what to enable, what to verify. So the script resumes:
 killed part way through, the next run reads the state it actually finds and does
 what is left.
 
@@ -36,17 +43,23 @@ what is left.
 to Magisk's `service.d` (inside `magisk.img` on Magisk 17.3, hence the `/sbin`
 path). That script is deliberately thin: Android has no user-level supervisor,
 and `init` would need an `.rc` entry in a ramdisk this Magisk cannot patch, so
-`service.d` is the hook and a shell loop is the restart. It supplies nothing:
-the daemon carries its own audio and finds its own input node.
+`service.d` is the hook and a shell loop is the restart. It supplies the name;
+everything else the daemon does for itself.
 
 The daemon waits up to 60 seconds for its input node, because `service.d` runs
 before the input drivers are certainly up. Without the wait a cold boot spends
 its first restarts failing to open a node that is about to exist.
 
+Both scripts find the daemon by matching the last field of `ps` against the
+binary's path, which keeps working now the boot script passes `-name` because
+this toolbox's `ps` prints `argv[0]` alone. A `ps` that printed the whole
+command line would match the name instead, and both scripts would then take
+their "no daemon" branch and report success having done nothing.
+
 The loop counts its own restarts and truncates the log every twentieth, because
-a daemon that exits immediately would otherwise append a failure every five
-seconds for the rest of the boot. Counted rather than measured: this toolbox has
-no `wc`.
+a daemon that exits immediately, if it had no key for example, would otherwise
+append a failure every five seconds for the rest of the boot. Counted rather
+than measured: this toolbox has no `wc`.
 
 `deploy/uninstall.sh` reverses that. The boot script goes first and alone,
 because it is the only thing that starts the daemon at boot: a reboot part way
@@ -75,6 +88,19 @@ as much, since the kernel drops the grab with the descriptor, so this is the
 handler being used rather than needed. The state is read back afterwards for the
 reason install.sh reads its own back: `adb shell` exits 0 whatever happened
 remotely.
+
+The tcp/6053 rule goes last, and after the daemon is confirmed dead rather than
+before: the daemon re-asserts that rule every thirty seconds, so a deletion
+taken earlier would be undone before the next line of the script ran. It is
+deleted in a loop, because the chain is not ours alone and one pass proves
+nothing, and then read back. A rule left behind is reported rather than failed
+on: nothing listens behind it once the daemon is gone, and it does not survive a
+reboot in any case.
+
+The port is a `const` in `serve.go` and a literal in the script, because shell
+cannot read a Go constant. A test compares the two: left to the read-back alone,
+a port that moved would surface as a rule that would not delete, which says
+nothing about why.
 
 **`/data/local/bin` is chosen, not conventional.** No such directory exists on a
 stock device, and every alternative is unavailable: Android has no `/usr`, `/` is

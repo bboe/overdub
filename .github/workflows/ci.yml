@@ -30,6 +30,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
       - run: GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...
 
+      # The race detector does not support GOARCH=arm, so the run above cannot
+      # use it. These two packages carry the concurrency and are the two that
+      # build for the runner, so they get a second run natively.
+      - run: go test -race ./internal/esphome/ ./internal/device/
+
       - run: ./build.sh
 
       # The shell is half of this repository, so it is linted like the Go.

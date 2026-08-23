@@ -10,6 +10,18 @@ clone up by inotify. Read the bitmap with `EVIOCGBIT`, never from sysfs: that
 file's word size differs from `/proc/bus/input/devices` here, and guessing wrong
 silently breaks mute.
 
+The wait for `wlan0` does not give up. Nothing restarts a daemon that has not
+exited, so a bounded wait that expired would cost the API for the rest of the
+boot on a Dot whose access point came back a minute late. It polls quietly after
+the first minute, because a line a minute for the rest of the boot would bury
+everything else.
+
+The button is taken before the network is waited for, and the API waits in its
+own goroutine. Waiting for the MAC first left a Dot with no `wlan0` exiting
+after a minute and being restarted five seconds later, with no button for the
+whole boot. Waiting in the read loop would be no better, because mute passes
+through that loop.
+
 `main.go` is left holding the constants, the decision about what a press means,
 how long to wait for the node, and the signal handler. That is the seam every
 later feature arrives through: the package opens the node and reads it, and the
@@ -29,6 +41,65 @@ The clone is destroyed before the grab is released, and not the other way round.
 The read loop can still be running when the close comes, so the reverse order
 opens the same window: `event1` ungrabbed and the clone still live, and a key
 pressed inside it lands twice. Losing that key is the cheaper failure.
+
+## ESPHome emulation
+
+`internal/esphome`. Home Assistant is the *client* and dials tcp/6053. We answer
+the handshake, list entities and push state. The advertised API version is 1.12,
+and nothing here needs anything above it: the versions above gate entity kinds
+this daemon does not have, and capability requests it would then have to answer.
+Home Assistant enforces no floor, so the number states what is implemented
+rather than how recent the device is.
+
+Only a `HelloRequest` buys the longer read deadline, so a peer that says nothing
+useful holds a slot for ten seconds rather than ninety. Eight peers can still
+hold every slot by sending one hello each and renewing it, and nothing evicts
+the oldest connection. SECURITY.md says the same of the port: bounded rather
+than guarded.
+
+A `HelloRequest` that does not parse is not answered. `pbWalk` visits the fields
+it read before it failed, so replying would mean replying to whatever was
+scraped out of a message we could not understand. It is the only message whose
+payload is read at all: the rest carry nothing this daemon needs, so their
+bodies are never looked at.
+
+Every line a peer can cause goes through the rate limit: the accept loop's,
+each connection's, and the sensor push's. Three lines in the package are
+written outside the count: the line the listener writes once at startup, the
+one saying how many were suppressed, and the one saying the ceiling is reached.
+Only the first is beyond a peer's reach, since exceeding the burst is what
+causes a suppressed-count line. All three stay bounded anyway: the
+suppressed-count line is written at most once a window and stops at the ceiling
+with everything else, and the ceiling line is written once.
+
+No log write happens with the server lock held, which is why the hello line is
+carried out of `handle` by the read loop, a message that will not parse is
+reported through its error rather than logged where it is found, and a failed
+sensor push is logged after the lock is dropped. The lock gates the accept
+path's cap check and every other connection's handler, so a write to `/data`
+underneath it stalls the server.
+
+`DeviceInfoResponse` carries an `esphome_version` of `2026.8.0`, which Home
+Assistant shows as the device's firmware version. It names a real ESPHome
+release: ESPHome versions by calendar the way Home Assistant does, which is why
+the two look alike. Nothing on the Dot corresponds to it. It has to parse as a
+version, because the bluetooth-proxy firmware check runs it through
+`AwesomeVersion` against a floor of 2026.5.1, but that check is reached only
+for a device advertising proxy flags, which this one does not.
+
+`Listen` retries a failed `Accept` rather than returning from it. Returning would
+leave the socket bound with nobody accepting, so Home Assistant would hang on a
+connection the kernel had already completed, with the iptables counter showing
+the packets arriving, which README.md gives as the sign that the firewall is not
+what dropped them.
+
+Every connection has its own queue and its own writer goroutine, so the server
+lock is never held across a socket write. Held there, one subscriber that has
+stopped reading parks every state and every other client behind it for the ten-
+second write deadline, and a second stalled client costs another ten. A client
+that cannot keep up overruns its queue and is dropped instead, which is what
+ESPHome itself does. Connections are capped for the same reason: one frame in
+flight each, and the product has to fit a 256 MB device.
 
 ## Speech
 

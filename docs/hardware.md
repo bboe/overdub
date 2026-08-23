@@ -27,6 +27,12 @@ A live Echo in someone's home: audio makes noise, and a press may drive real
 automations. Prefer targeted tests.
 
 ```sh
+# Drive the ESPHome API without Home Assistant, using the library HA itself uses
+adb forward tcp:16053 tcp:6053     # over USB, so this needs no LAN route
+                                   # the daemon opens wlan0 only; this rides
+                                   # the stock chain's own loopback accept
+pip install aioesphomeapi          # then connect to 127.0.0.1:16053
+
 # Simulate a button press
 adb shell 'su -c "sendevent /dev/input/event1 1 138 1; sendevent /dev/input/event1 0 0 0;
                   sendevent /dev/input/event1 1 138 0; sendevent /dev/input/event1 0 0 0"'

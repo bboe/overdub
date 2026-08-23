@@ -1,8 +1,9 @@
 # CLAUDE.md
 
 A single Go binary that takes over the action button on a rooted **Echo Dot (2nd
-Generation)** (model RS03QR, codename biscuit, FireOS 5.5.5.4). It runs on the
-Dot itself, under Magisk, alongside stock Alexa.
+Generation)** (model RS03QR, codename biscuit, FireOS 5.5.5.4) and presents the
+Dot to Home Assistant as an ESPHome device. It runs on the Dot itself, under
+Magisk, alongside stock Alexa.
 
 `README.md` says how to use it. This file and `docs/` say why, and most of it
 was measured on hardware rather than reasoned out.
@@ -11,11 +12,12 @@ was measured on hardware rather than reasoned out.
 
 ```sh
 ./build.sh                       # the only supported build
-deploy/install.sh                # build, push, install over adb
+deploy/install.sh <name>         # build, push, install over adb
 deploy/uninstall.sh              # remove it again, and give the button back
 gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
+go test -race ./internal/esphome/ ./internal/device/   # -race has no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
@@ -28,11 +30,13 @@ instead.
 ## Layout
 
 ```
-main.go          the constants, and what a press does
-internal/alexa   speech through Alexa: the intent, the clip, and the server
-                 that serves it to her
-internal/button  the exclusive grab, the clone, and the read loop
-internal/evdev   evdev and uinput primitives
+main.go, serve.go  the flag, the constants, and the wiring
+internal/alexa     speech through Alexa: the intent, the clip, and the server
+                   that serves it to her
+internal/button    the exclusive grab, the clone, and the read loop
+internal/device    the Dot itself: its network, and the firewall rule
+internal/esphome   the ESPHome API and its protobuf
+internal/evdev     evdev and uinput primitives
 ```
 
 ## The rest

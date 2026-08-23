@@ -4,6 +4,8 @@
 BIN=/data/local/bin/overdub
 LOG=/data/local/tmp/overdub.log
 
+NAME=
+
 : > "$LOG"
 
 if [ ! -x "$BIN" ]; then
@@ -11,10 +13,15 @@ if [ ! -x "$BIN" ]; then
   exit 0
 fi
 
+if [ -z "$NAME" ]; then
+  echo "overdub: NAME is unset in $0; refusing to start without a unique name" >> "$LOG"
+  exit 0
+fi
+
 (
   restarts=0
   while [ -x "$BIN" ]; do
-    "$BIN" >>"$LOG" 2>&1
+    "$BIN" -name "$NAME" >>"$LOG" 2>&1
     restarts=$((restarts + 1))
     if [ "$restarts" -ge 20 ]; then
       : > "$LOG"

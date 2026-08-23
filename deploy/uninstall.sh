@@ -60,10 +60,26 @@ done
 still=$(overdub_pid) || { echo "UNINSTALL FAILED: adb went away during the check" >&2; exit 1; }
 if [ -n "$still" ]; then
   echo "STILL RUNNING: overdub is pid $still; the kill did not take." >&2
-  echo "  Nothing starts it again -- the boot script and the binary are both" >&2
-  echo "  gone -- so a reboot is the end of it." >&2
+  echo "  Nothing starts it again, since the boot script and the binary are" >&2
+  echo "  both gone, so a reboot is the end of it." >&2
   fail=1
 fi
 [ "$fail" = 1 ] && { echo "UNINSTALL INCOMPLETE" >&2; exit 1; }
+
+# Only now the daemon is gone: it re-asserts this rule every thirty seconds, so
+# a deletion while it lived would be undone before the next line ran.
+adb shell "su -c '
+  while iptables -w -C INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT 2>/dev/null; do
+    iptables -w -D INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT || break
+  done
+'" >/dev/null 2>&1 || true
+
+rule=$(adb shell "su -c 'iptables -L INPUT -n | grep 6053'" | tr -d '\r' | grep . || true)
+if [ -n "$rule" ]; then
+  echo "The tcp/6053 rule is still in the INPUT chain:" >&2
+  echo "  $rule" >&2
+  echo "  Nothing listens behind it now. It lives in the chain rather than on" >&2
+  echo "  disk, so a reboot clears it." >&2
+fi
 
 echo "Removed. The action button belongs to Alexa again."

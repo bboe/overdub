@@ -9,9 +9,14 @@ the word size rather than the architecture, so `GOARCH=386` compiles and passes
 and nothing here would run on it. `build.sh` is the convenience, not the guard:
 anything that compiles the tree, `go vet` included, needs the target set.
 
-**A flag has to earn its place.** Every fact about biscuit is a `const`, in
-`main.go` or beside the code that needs it. A flag whose only correct value is
-already known is configuration that can be got wrong for no gain.
+**Dependencies are pure Go, and rare.** The binary must cross-compile with
+`CGO_ENABLED=0` and need nothing on the device. `proto.go` hand-rolls its wire
+format because it is simple and a mistake is visible.
+
+**A flag has to earn its place.** One flag, `-name`, the one thing that cannot
+be defaulted. Every other fact about biscuit is a `const`, in `serve.go` or
+beside the code that needs it. A flag whose only correct value is already known
+is configuration that can be got wrong for no gain.
 
 **The clip is served over http, from loopback.** `SpeechSynthesizer` casts the
 connection to `HttpURLConnection` without checking, so `file://` throws

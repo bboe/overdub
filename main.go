@@ -1,74 +1,54 @@
-// Command overdub takes over the Echo Dot's action button, and leaves the rest
-// of Amazon's stack alone.
+// Command overdub takes over the Echo Dot's action button and presents the Dot
+// to Home Assistant as an ESPHome device, leaving Amazon's stack alone.
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"os"
-	"os/signal"
-	"sync/atomic"
-	"syscall"
-	"time"
-
-	"github.com/bboe/overdub/internal/alexa"
-	"github.com/bboe/overdub/internal/button"
-)
-
-const (
-	inputNode  = "/dev/input/event1"
-	nodeWait   = 60 * time.Second
-	actionKey  = 138
-	uinputName = "mtk-kpd"
+	"strings"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetOutput(os.Stdout)
-	if err := intercept(); err != nil {
+
+	var flags config
+	flag.StringVar(&flags.Name, "name", "", "unique device name Home Assistant identifies this Dot by (required)")
+	flag.Parse()
+
+	if flags.Name == "" {
+		fmt.Fprintln(os.Stderr, "overdub: -name is required, and must be unique on the network")
+		os.Exit(2)
+	}
+
+	if err := checkName(flags.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "overdub: %v\n", err)
+		os.Exit(2)
+	}
+
+	if err := serve(flags); err != nil {
 		log.Printf("overdub: %v", err)
 		os.Exit(1)
 	}
 }
 
-func intercept() error {
-	i, err := button.Open(inputNode, actionKey, uinputName, nodeWait)
-	if err != nil {
-		return err
+type config struct {
+	Name string
+}
+
+func checkName(name string) error {
+	if len(name) > 63 {
+		return fmt.Errorf("-name is %d characters; a DNS label stops at 63", len(name))
 	}
-	defer i.Close()
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sig
-		i.Close()
-		os.Exit(0)
-	}()
-
-	chimeURL, chimeStopped, err := alexa.ServeChime()
-	if err != nil {
-		log.Printf("warning: %v; presses will be silent", err)
-	} else {
-		go func() {
-			log.Printf("chime server stopped: %v", <-chimeStopped)
-			os.Exit(1)
-		}()
+	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
+		return fmt.Errorf("-name must not start or end with -; that is not a valid DNS label")
 	}
-
-	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
-		inputNode, actionKey, uinputName)
-
-	var chiming atomic.Bool
-	return i.Run(func(held time.Duration) {
-		log.Printf("intercepted %d (held %v)", actionKey, held.Round(time.Millisecond))
-		if chimeURL == "" || !chiming.CompareAndSwap(false, true) {
-			return
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' {
+			return fmt.Errorf("-name must be lowercase letters, digits, - or _: %q", name)
 		}
-		go func() {
-			defer chiming.Store(false)
-			if err := alexa.Speak(chimeURL); err != nil {
-				log.Printf("chime: %v", err)
-			}
-		}()
-	})
+	}
+	return nil
 }

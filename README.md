@@ -1,8 +1,13 @@
 # overdub
 
-Take over the **action button** on a rooted Echo Dot (2nd Generation), while
-stock Alexa keeps running. A press plays a chime through Alexa's own player, so
-she ducks and mixes it the way she does her own speech.
+Take over the **action button** on a rooted Echo Dot (2nd Generation) and
+present the Dot to Home Assistant as an **ESPHome device**, while stock Alexa
+keeps running.
+
+Home Assistant adopts it with its own first-party ESPHome integration: no custom
+component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
+reports one diagnostic sensor over that connection, and a press still plays its
+chime on the device itself.
 
 ## Scope
 
@@ -26,9 +31,8 @@ practical route to a rooted Dot, because its docs cover the amonet-biscuit
 unlock.
 
 [**echolocal**](https://github.com/ygelfand/echolocal) is the closest neighbour:
-the same Dot, also Go, describing itself as "a pure-Go replacement for Amazon's
-services", with local wake word detection, LED ring control, a media player and
-a Bluetooth proxy.
+the same Dot, also Go, also speaking the ESPHome native API, with local wake word
+detection, LED ring control, a media player and a Bluetooth proxy.
 
 [**EchoGo**](https://github.com/Binozo/EchoGo) sits lowest: "A Go SDK for your
 Echo Dot 2. Gen", giving programmatic control of the LEDs, microphone, speaker
@@ -39,8 +43,9 @@ toolkit.
 only thing taken, and if the daemon dies it goes straight back to her.
 
 For a local voice satellite with Amazon out of the picture, use one of those. To
-keep the Echo you have -- her voice, her music, her timers, the mute button --
-and gain a button of your own that can also talk back, use this one.
+keep the Echo you have, with her voice, her music, her timers and the mute
+button, and add a Home Assistant button and a handful of entities, use this
+one.
 
 ## Requirements
 
@@ -52,6 +57,7 @@ and gain a button of your own that can also talk back, use this one.
   the boot script to, and it fails there rather than guessing. A Magisk that
   uses `/data/adb/service.d` needs that path changed first
 * Go 1.25 or later, and `adb`, on a development machine
+* Home Assistant on the same subnet as the Dot
 
 The buttons on this hardware:
 
@@ -102,7 +108,7 @@ event: `internal/evdev` asserts the 32-bit `timeval` this device has.
 ## Install
 
 ```sh
-deploy/install.sh
+deploy/install.sh kitchen                                      # binary and boot script
 ```
 
 More than one Dot on `adb` means telling it which. `install.sh` uses plain
@@ -110,7 +116,7 @@ More than one Dot on `adb` means telling it which. `install.sh` uses plain
 
 ```sh
 adb devices                                   # serials
-ANDROID_SERIAL=<serial> deploy/install.sh
+ANDROID_SERIAL=<serial> deploy/install.sh kitchen
 ```
 
 | File | Where |
@@ -118,22 +124,38 @@ ANDROID_SERIAL=<serial> deploy/install.sh
 | `overdub` | `/data/local/bin/` |
 | `overdub.sh` | Magisk `service.d`, inside `magisk.img` on Magisk 17.3 |
 
+**The name is required, and must be unique on your network.** Every entity id
+Home Assistant creates is prefixed with it, so a duplicate collides there, and
+adding a second Dot under a name already in use stops the flow with a conflict
+menu rather than completing. Lowercase letters, digits, `-` and `_`, at most 63
+characters, and not starting or ending with `-`. Those are ESPHome's own naming
+rules, and `install.sh` rejects anything else.
+
+Changing it later is allowed. Home Assistant identifies the device by its MAC
+rather than its name, so a rename is accepted on the next connection and the
+stored name is updated in place; the entity ids keep the prefix they were
+created with. The display name is separate, and you set it in Home Assistant
+afterwards.
+
 Reboot to start the daemon. It is supervised, and failure is fail-open: if it
 dies the grab is released and the action button goes back to Alexa.
 
 ## Usage
 
-The boot script runs the daemon. To run it by hand -- as root, and by full path,
+The boot script runs the daemon. To run it by hand, as root and by full path,
 because `/data/local/bin` is on nobody's `PATH`:
 
 ```sh
-adb shell 'su -c "/data/local/bin/overdub"'
+adb shell 'su -c "/data/local/bin/overdub -name kitchen"'
 ```
 
-There are no flags. Everything is fixed in the binary, because none of it has a
-second sensible value on this hardware: `event1` and keycode 138 for the action
-button, and `mtk-kpd` for the passthrough clone, which Android needs in order to
-apply the same keylayout so mute keeps working.
+| Flag | | |
+|---|---|---|
+| `-name` | **required** | unique device name Home Assistant identifies the Dot by |
+
+Everything else is fixed in the binary, none of it having a second sensible
+value here: `event1` and keycode 138, `mtk-kpd` for the clone, `wlan0` and
+tcp/6053.
 
 ## Uninstall
 
@@ -143,24 +165,63 @@ deploy/uninstall.sh
 
 The order matters if you interrupt it: the boot script goes first, so a reboot
 part way through leaves a Dot with nothing running rather than a supervisor
-respawning a half-deleted install. The daemon gets `SIGTERM`, so it releases the
-grab and destroys its uinput clone itself. The kernel would do both anyway when
-the descriptors close.
+respawning a half-deleted install. The daemon gets `SIGTERM` rather than being
+killed outright, so it gives the button back and destroys its uinput clones on
+the way out.
 
 Everything goes: the boot script, the binary, and the log the boot script
 writes. `/data/local/bin` goes with them if nothing else is left in it.
 
-Amazon's stack is untouched, because installing never touched it.
+The tcp/6053 rule the daemon opened goes too, once the daemon is confirmed
+gone, so no reboot is needed. An uninstall that reports trouble stops before
+that step and leaves the rule in the chain.
+
+Amazon's stack is untouched, because installing never touched it. Home Assistant
+will show the device as unavailable; delete it there when you are done.
+
+## Home Assistant
+
+Add the Dot by hand, at **Settings -> Devices & Services -> Add integration ->
+ESPHome**, with the Dot's address and port `6053`. Nothing announces it on the
+network yet, so Home Assistant will not offer it on its own.
+`adb shell ip -4 addr show wlan0` gives the address.
+
+> **Nothing authenticates tcp/6053.** ESPHome has no peer allowlist, so the
+> port is open exactly as a keyless ESPHome node is. The rule matches the
+> interface rather than a source range, so the reach is anything that can route
+> to the Dot on `wlan0`, which is wider than the local subnet; SECURITY.md has
+> the measurement. Put the Dot on a network you trust.
+
+**Set a DHCP reservation.** Home Assistant stores the address you gave it, and
+nothing here announces a new one.
+
+The device is the server and Home Assistant dials in, the reverse of most
+integrations. It needs inbound reach to tcp/6053, which the daemon opens on the
+Dot's own firewall.
+
+### What it exposes
+
+| Entity | Kind | Notes |
+|---|---|---|
+| `sensor.<name>_uptime` | diagnostic | seconds since boot |
+
+One sensor, and it is read-only: this is the connection, proved end to end. The
+button still chimes on the device, and Home Assistant is not told about it.
 
 ## Troubleshooting
 
 ```sh
 adb shell 'su -c "cat /data/local/tmp/overdub.log"'      # truncated per boot
-adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
+adb shell 'su -c "iptables -L INPUT -n -v | grep 6053"'  # packet counter
+adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on playback
 ```
 
 | Symptom | Look at |
 |---|---|
+| you need the Dot's address to add it | `adb shell ip -4 addr show wlan0` |
+| Home Assistant times out adding the Dot | the tcp/6053 packet counter. Zero means the traffic never arrived |
+| Home Assistant logs `Unexpected device found` | the stored address now answers with a different MAC, so it is a different device: set a DHCP reservation |
+| nothing starts, and the log says `NAME is unset` | the boot script was installed by hand; rerun `deploy/install.sh <name>` |
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |
 | nothing is spoken | the daemon log. `Error: Not found; no service started.` means the Alexa stack is still suppressed: run `deploy/restore-amazon.sh` and reboot |
@@ -170,13 +231,13 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
 `docs/` is the engineering record: what was measured on the hardware, and what
 each decision is defending against.
 
-* [Hardware](docs/hardware.md) -- the input nodes and keycodes, and how to test
+* [Hardware](docs/hardware.md): the input nodes and keycodes, and how to test
   against a live Dot
-* [Hard constraints](docs/constraints.md) -- what cannot change, and why
-* [Architecture](docs/architecture.md) -- the subsystems, one at a time
-* [Things that fail silently](docs/pitfalls.md) -- the failures that report
+* [Hard constraints](docs/constraints.md): what cannot change, and why
+* [Architecture](docs/architecture.md): the subsystems, one at a time
+* [Things that fail silently](docs/pitfalls.md): the failures that report
   success
-* [Deployment](docs/deployment.md) -- installing and removing it
+* [Deployment](docs/deployment.md): installing and removing it
 
 ## Licence
 
