@@ -28,7 +28,7 @@ const (
 	macWait    = 60 * time.Second
 	macRetry   = 30 * time.Second
 	sensorTick = 60 * time.Second
-	liveTick   = 2500 * time.Millisecond
+	liveTick   = 500 * time.Millisecond
 	firewallRe = 30 * time.Second
 )
 

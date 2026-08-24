@@ -119,12 +119,21 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 	if liveTick <= 0 {
 		t.Errorf("liveTick is %v, and time.NewTicker panics on that", liveTick)
 	}
-	// The read has to finish inside the tick that made it: the poll is serial,
-	// so a read outlasting its tick delays every reading behind it. The budget
-	// rather than the deadline, because a killed child is waited on after it.
-	if liveTick <= device.VolumeReadBudget() {
-		t.Errorf("liveTick is %v and a read may take %v, so a slow read delays the next tick",
-			liveTick, device.VolumeReadBudget())
+	// The read has to finish inside the interval that made it: the poll is
+	// serial, so a read outlasting it delays every reading behind it. Against
+	// the heavy interval rather than the tick, because the fork happens on one
+	// tick in HeavyEvery and not on the others. The budget rather than the
+	// deadline, because a killed child is waited on after it.
+	heavy := liveTick * esphome.HeavyEvery
+	if heavy <= device.VolumeReadBudget() {
+		t.Errorf("the expensive readings run every %v and one may take %v, so a slow read "+
+			"delays the readings behind it", heavy, device.VolumeReadBudget())
+	}
+	// The split only means anything while there are ticks the heavy readings
+	// skip. At one it is the old single cadence wearing a multiplier.
+	if esphome.HeavyEvery < 2 {
+		t.Errorf("HeavyEvery is %d, so every tick is a heavy one and the tick buys nothing",
+			esphome.HeavyEvery)
 	}
 	if liveTick >= sensorTick {
 		t.Errorf("liveTick is %v against a sensor tick of %v, so a poll of its own buys nothing",

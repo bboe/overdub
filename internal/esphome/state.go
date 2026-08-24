@@ -27,7 +27,7 @@ func (s *Server) readTicked() []reading {
 	}
 }
 
-// The short tick's readings, taken together because they are published
+// The heavy tick's readings, taken together because they are published
 // together. Measured on the Dot: 118us for the temperature, 111us for the
 // memory, 113us for the jack, and 11.7ms for the volume, which is the one that
 // forks and so is the whole of the tick's cost.
@@ -177,10 +177,17 @@ func (s *Server) PollLive(every time.Duration) {
 	defer tick.Stop()
 	var last time.Time
 	woken := false
+	ticks := 0
 	for {
 		if s.anyStateSubscriber() && (!woken || time.Since(last) >= s.liveGap) {
 			last = time.Now()
-			s.publish("live", s.readLive())
+			// Every HeavyEvery-th tick, and on a subscriber that has just
+			// arrived rather than making it wait out the count. The ticks
+			// between are where a reading cheap enough to take every time goes.
+			if woken || ticks%HeavyEvery == 0 {
+				s.publish("live", s.readLive())
+			}
+			ticks++
 		}
 		select {
 		case <-tick.C:

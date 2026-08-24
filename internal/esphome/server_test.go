@@ -1682,6 +1682,64 @@ func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 	}
 }
 
+// The expensive readings ride one tick in HeavyEvery, not every tick. Without
+// the split this reads on all of them, which is the fork this separation exists
+// to stop paying for: the count is compared against the ticks that actually
+// elapsed rather than a fixed number, because a loaded runner delivers fewer.
+func TestTheExpensiveReadingsSkipMostTicks(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	want := stubSensors(s)
+
+	var mu sync.Mutex
+	reads := 0
+	s.volumes = speakerReads(func() (float32, bool) {
+		mu.Lock()
+		reads++
+		mu.Unlock()
+		return 40, true
+	})
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollAll(s)
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < len(want); n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the snapshot did not arrive: %v", err)
+		}
+	}
+
+	mu.Lock()
+	before := reads
+	mu.Unlock()
+
+	const tick = 10 * time.Millisecond
+	start := time.Now()
+	go s.PollLive(tick)
+	time.Sleep(600 * time.Millisecond)
+	ticks := int(time.Since(start) / tick)
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := reads - before
+	if got == 0 {
+		t.Fatal("the poll never read; the tick is not reaching the expensive readings at all")
+	}
+	if got > ticks/2 {
+		t.Errorf("the expensive readings ran %d times in %d ticks, which is more than half of "+
+			"them; HeavyEvery is %d, so about a third is what it should be",
+			got, ticks, HeavyEvery)
+	}
+}
+
 // A subscriber is answered from the published state, so something has to have
 // published before the first tick comes round: a Dot whose sensor tick is a
 // minute would otherwise answer its first subscriber with nothing at all.

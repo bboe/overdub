@@ -220,6 +220,19 @@ anybody would look for it sooner. Measured on the Dot, per reading:
 | `/proc/net/wireless` | 1.8ms |
 | `dumpsys audio` | 11.7ms |
 
+The poll wakes on one interval and reads on another. `liveTick` is half a
+second and `HeavyEvery` is five, so the expensive readings are taken every fifth
+tick -- the same two and a half seconds this poll has always read on -- and the
+ticks between are free. They are two numbers rather than one because a reading
+cheap enough to be worth taking oftener should be able to say so without
+dragging a fork along with it: with one number the only way to sample anything
+faster was to pay for `dumpsys audio` that often too. A later reading can take a
+divisor of its own against the same tick.
+
+Nothing rides the cheap ticks yet, so today the split costs the wakeups it adds
+and nothing else: a select and a look at whether anybody is subscribed, twice a
+second, and only while somebody is.
+
 So the short tick carries the volume, the temperature and the memory, and the
 minute tick carries the uptime and the signal. The uptime is on the minute
 because it changes on every read whatever the cadence, so a short tick would

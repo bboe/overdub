@@ -36,6 +36,14 @@ const (
 	// under a tick that is not positive. The volume's fork is what it is for.
 	minLiveReadGap = time.Second
 
+	// How many of PollLive's ticks pass between one reading of the expensive
+	// sensors and the next. The tick is what the poll wakes on; this is what it
+	// reads on, and they are separate numbers so that a reading cheap enough to
+	// want oftener than a fork can have a divisor of its own rather than
+	// dragging the fork along with it. Five half-seconds is the two and a half
+	// second interval this poll has always read on.
+	HeavyEvery = 5
+
 	// MinSensorTick is the floor under PollSensors' ticker; PollLive has none.
 	// It bounds that ticker rather than the push rate, which a subscriber's wake
 	// can exceed, and rather than the connection's life, which the ping keeps.
