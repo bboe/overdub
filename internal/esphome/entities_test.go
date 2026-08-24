@@ -45,13 +45,14 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		unit        string
 		deviceClass string
 		stateClass  uint64
+		icon        string
 	}{
-		"uptime":           {s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing},
-		"wifi_signal":      {s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement},
-		"volume":           {s.keyVolume, "Volume", "%", "", stateClassMeasurement},
-		"cpu_temperature":  {s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement},
-		"memory_available": {s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement},
-		"jack_volume":      {s.keyJack, "Jack volume", "%", "", stateClassMeasurement},
+		"uptime":           {s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing, ""},
+		"wifi_signal":      {s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement, ""},
+		"volume":           {s.keyVolume, "Volume", "%", "", stateClassMeasurement, volumeIcon},
+		"cpu_temperature":  {s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement, ""},
+		"memory_available": {s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement, ""},
+		"jack_volume":      {s.keyJack, "Jack volume", "%", "", stateClassMeasurement, volumeIcon},
 	}
 
 	seen := map[string]bool{}
@@ -87,6 +88,17 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		}
 		if got := string(entity[6].data); got != expect.unit {
 			t.Errorf("%s has unit %q, want %q", objectID, got, expect.unit)
+		}
+		// A sensor with neither a device_class nor an icon is drawn as mdi:eye,
+		// so the two volumes carry one. The rest take the icon their class
+		// implies, which is why an icon set on them would be a regression
+		// rather than a decoration.
+		if got := string(entity[5].data); got != expect.icon {
+			t.Errorf("%s has icon %q, want %q", objectID, got, expect.icon)
+		}
+		if expect.deviceClass == "" && expect.icon == "" {
+			t.Errorf("%s has neither a device_class nor an icon, so Home Assistant draws it "+
+				"as mdi:eye", objectID)
 		}
 		if got := string(entity[9].data); got != expect.deviceClass {
 			t.Errorf("%s has device_class %q, want %q", objectID, got, expect.deviceClass)
@@ -195,6 +207,15 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 		if _, ok := entity[13]; ok {
 			t.Error("audio_jack sets field 13, which is a sensor's entity_category and " +
 				"unassigned on a binary sensor")
+		}
+		// Home Assistant draws a binary sensor's two states with two icons of
+		// the device_class's own -- mdi:power-plug-off unplugged and
+		// mdi:power-plug plugged in. An icon of ours is used for both states
+		// instead, so setting one here trades that pair for a picture that
+		// never changes. Field 8, not the 5 the sensor message keeps it in.
+		if got := string(entity[8].data); got != "" {
+			t.Errorf("audio_jack carries icon %q, which replaces the plugged and unplugged "+
+				"icons with one that never changes", got)
 		}
 	}
 	if found != 1 {

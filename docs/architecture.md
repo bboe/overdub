@@ -290,6 +290,18 @@ reads fields by number. It goes through the same published state as everything
 else, so a plug or an unplug is one state change and a poll that finds no
 change sends nothing.
 
+It carries no icon, and that is the decision rather than an omission. Home
+Assistant draws a binary sensor from its `device_class` as a *pair*, one icon
+per state -- `mdi:power-plug-off` unplugged and `mdi:power-plug` plugged in,
+labelled "Unplugged" and "Plugged in" -- and an icon sent by the device
+replaces both with one that never changes. So an icon here would cost the state
+it is there to show. The sensors are the other way round: a sensor with neither
+a device_class nor an icon is drawn as `mdi:eye`, and there is no class for a
+volume percentage, since Home Assistant's `volume` measures litres. Both
+volumes therefore carry `mdi:volume-high` and the other four take the icon their
+class implies. The icon fields are not the same number either, 5 on a sensor and
+8 on a binary sensor, which is the field-numbers-are-per-message rule once more.
+
 The volume comes out of `dumpsys audio`, which carries both the numbers it
 takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
 each output device appears as `<hex mask> (<name>): <level>`. Only the ratio

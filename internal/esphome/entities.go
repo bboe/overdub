@@ -7,6 +7,11 @@ const (
 	stateClassTotalIncreasing = 2
 
 	sensorAccuracyDecimals = 0
+
+	// Home Assistant draws a sensor with no device_class as mdi:eye, and there
+	// is no class for a volume percentage. Both volumes carry the same icon
+	// because their names already say which is which.
+	volumeIcon = "mdi:volume-high"
 )
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
@@ -34,18 +39,20 @@ func (s *Server) listEntities(conn *conn) error {
 		unit        string
 		deviceClass string
 		stateClass  uint32
+		icon        string
 	}{
-		{"uptime", s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing},
-		{"wifi_signal", s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement},
-		{"volume", s.keyVolume, "Volume", "%", "", stateClassMeasurement},
-		{"cpu_temperature", s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement},
-		{"memory_available", s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement},
-		{"jack_volume", s.keyJack, "Jack volume", "%", "", stateClassMeasurement},
+		{"uptime", s.keyUptime, "Uptime", "s", "duration", stateClassTotalIncreasing, ""},
+		{"wifi_signal", s.keyWifi, "WiFi signal", "dBm", "signal_strength", stateClassMeasurement, ""},
+		{"volume", s.keyVolume, "Volume", "%", "", stateClassMeasurement, volumeIcon},
+		{"cpu_temperature", s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement, ""},
+		{"memory_available", s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement, ""},
+		{"jack_volume", s.keyJack, "Jack volume", "%", "", stateClassMeasurement, volumeIcon},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)
 		entity.fixed32(2, sensor.key)
 		entity.str(3, sensor.name)
+		entity.str(5, sensor.icon)
 		entity.str(6, sensor.unit)
 		entity.u32(7, sensorAccuracyDecimals)
 		entity.boolean(8, false)
