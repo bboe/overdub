@@ -12,6 +12,8 @@ const (
 	// is no class for a volume percentage. Both volumes carry the same icon
 	// because their names already say which is which.
 	volumeIcon = "mdi:volume-high"
+
+	speakerIcon = "mdi:speaker"
 )
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
@@ -70,11 +72,13 @@ func (s *Server) listEntities(conn *conn) error {
 		key         uint32
 		name        string
 		deviceClass string
+		icon        string
 	}{
 		// plug is Home Assistant's own class for this: on is plugged in, off is
 		// unplugged. The field numbers are ESPHome's ListEntitiesBinarySensor,
 		// which is not the sensor message with a different name.
-		{"audio_jack", s.keyJackOn, "Audio jack", "plug"},
+		{"audio_jack", s.keyJackOn, "Audio jack", "plug", ""},
+		{"speaker_playing", s.keySound, "Speaker playing", "", speakerIcon},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)
@@ -83,6 +87,7 @@ func (s *Server) listEntities(conn *conn) error {
 		entity.str(5, sensor.deviceClass)
 		entity.boolean(6, false)
 		entity.boolean(7, false)
+		entity.str(8, sensor.icon)
 		entity.u32(9, entityCategoryDiagnostic)
 		if err := s.send(conn, msgListBinarySensor, entity.b); err != nil {
 			return err

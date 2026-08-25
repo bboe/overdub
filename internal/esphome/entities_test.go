@@ -128,6 +128,49 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	}
 }
 
+// The second binary sensor. running rather than sound because sound's own
+// words are "Detected" and "Clear", which on a device with microphones reads as
+// the mic having heard something.
+func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+
+	found := 0
+	for _, entity := range listed(t, s) {
+		if entity[0].num != uint64(msgListBinarySensor) || string(entity[1].data) != "speaker_playing" {
+			continue
+		}
+		found++
+		if uint32(entity[2].num) != s.keySound {
+			t.Errorf("speaker_playing has key %d, want %d", entity[2].num, s.keySound)
+		}
+		if entity[2].wire != wireFixed32 {
+			t.Errorf("speaker_playing sent its key as wire type %d, want fixed32 (%d)",
+				entity[2].wire, wireFixed32)
+		}
+		if got := string(entity[3].data); got != "Speaker playing" {
+			t.Errorf("speaker_playing is named %q", got)
+		}
+		// Deliberately none: every device_class renames the states, and this
+		// one is meant to read "On" and "Off".
+		if got := string(entity[5].data); got != "" {
+			t.Errorf("speaker_playing has device_class %q, which renames its states away "+
+				"from On and Off", got)
+		}
+		if entity[9].num != entityCategoryDiagnostic {
+			t.Error("speaker_playing is not diagnostic; it would sit among the device's controls")
+		}
+		// Static, unlike the jack's, and only because the pair it replaces is
+		// Home Assistant's generic one rather than anything about audio. The
+		// literal rather than the constant, which would assert nothing.
+		if got := string(entity[8].data); got != "mdi:speaker" {
+			t.Errorf("speaker_playing has icon %q, want mdi:speaker", got)
+		}
+	}
+	if found != 1 {
+		t.Errorf("%d speaker_playing entities were listed, want 1", found)
+	}
+}
+
 // Numbers on the wire are ESPHome's, not ours. A test that compares one against
 // the constant it was built from asserts nothing, and every one of these is
 // silent when wrong: the entity is filed under the wrong heading, or Home
@@ -166,10 +209,10 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 		if entity[0].num != uint64(msgListBinarySensor) {
 			continue
 		}
-		found++
-		if got := string(entity[1].data); got != "audio_jack" {
-			t.Errorf("binary sensor object_id is %q, want audio_jack", got)
+		if string(entity[1].data) != "audio_jack" {
+			continue
 		}
+		found++
 		if uint32(entity[2].num) != s.keyJackOn {
 			t.Errorf("audio_jack has key %d, want %d", entity[2].num, s.keyJackOn)
 		}
@@ -219,6 +262,6 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 		}
 	}
 	if found != 1 {
-		t.Errorf("%d binary sensors were listed, want 1", found)
+		t.Errorf("%d audio_jack entities were listed, want 1", found)
 	}
 }

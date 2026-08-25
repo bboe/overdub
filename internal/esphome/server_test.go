@@ -8,6 +8,8 @@ import (
 	"log"
 	"math"
 	"net"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -367,6 +369,10 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		occupied, _ := watch(1)()
 		return occupied != 0, true
 	}
+	s.sound = func() (bool, bool) {
+		playing, _ := watch(0)()
+		return playing != 0, true
+	}
 
 	// Ticks far enough away that every read below is either the sensor poll's
 	// startup publish or one a subscriber woke.
@@ -419,7 +425,7 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	// startup publish had run when it was taken, so the ceiling is that again
 	// plus one cycle of the live poll. Written out rather than asked of the
 	// server, because the stubs take this same lock and would deadlock.
-	const liveReaders = 4 // cpu, memory, volumes, jack
+	const liveReaders = 5 // cpu, memory, volumes, jack, sound
 	mu.Lock()
 	defer mu.Unlock()
 	if underLock {
@@ -684,9 +690,11 @@ func stubSensors(s *Server) map[uint32]float32 {
 		return device.MusicVolume{Speaker: 40, SpeakerOK: true, Jack: 70, JackOK: true}
 	}
 	s.jack = func() (bool, bool) { return true, true }
+	s.sound = func() (bool, bool) { return false, true }
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
+		s.keySound: 0,
 	}
 }
 
@@ -695,13 +703,14 @@ func stubSensors(s *Server) map[uint32]float32 {
 // the readers, so anything that asks the server how many sensors it has would
 // be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
 // honest.
-const sensorCount = 7
+const sensorCount = 8
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
 func pollAll(s *Server) []reading {
 	changed := s.publish("sensors", s.readTicked())
-	return append(changed, s.publish("live", s.readLive())...)
+	changed = append(changed, s.publish("live", s.readLive())...)
+	return append(changed, s.publish("live", []reading{s.readSound()})...)
 }
 
 func TestSubscribingGetsEverySensor(t *testing.T) {
@@ -760,7 +769,7 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 // protocol has for exactly this.
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
-		"cpu_temperature", "memory_available", "audio_jack"} {
+		"cpu_temperature", "memory_available", "audio_jack", "speaker_playing"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -786,6 +795,9 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 			case "audio_jack":
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn
+			case "speaker_playing":
+				s.sound = func() (bool, bool) { return false, false }
+				failedKey = s.keySound
 			case "cpu_temperature":
 				fail(&s.cpu)
 				failedKey = s.keyCPU
@@ -1740,6 +1752,195 @@ func TestTheExpensiveReadingsSkipMostTicks(t *testing.T) {
 	}
 }
 
+// Sound rides its own divisor: oftener than the fork, and not on every tick
+// either. Both counts come from the one run, so a slow runner moves them
+// together and the ratio between them is what is asserted.
+func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	want := stubSensors(s)
+
+	var mu sync.Mutex
+	sound, heavy := 0, 0
+	s.sound = func() (bool, bool) {
+		mu.Lock()
+		sound++
+		mu.Unlock()
+		return false, true
+	}
+	s.volumes = speakerReads(func() (float32, bool) {
+		mu.Lock()
+		heavy++
+		mu.Unlock()
+		return 40, true
+	})
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollAll(s)
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < len(want); n++ {
+		if _, _, err := c.recv(); err != nil {
+			t.Fatalf("the snapshot did not arrive: %v", err)
+		}
+	}
+
+	mu.Lock()
+	sound, heavy = 0, 0
+	mu.Unlock()
+
+	const tick = 10 * time.Millisecond
+	start := time.Now()
+	go s.PollLive(tick)
+	time.Sleep(600 * time.Millisecond)
+	ticks := int(time.Since(start) / tick)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if sound == 0 || heavy == 0 {
+		t.Fatalf("sound read %d times and the expensive readings %d; neither should be zero",
+			sound, heavy)
+	}
+	// Equal counts mean the divisors are not being applied separately.
+	if sound <= heavy {
+		t.Errorf("sound read %d times and the expensive readings %d in %d ticks; sound is on "+
+			"every %d ticks and they are on every %d, so it should be the larger",
+			sound, heavy, ticks, SoundEvery, HeavyEvery)
+	}
+	// HeavyEvery over SoundEvery is how much oftener sound should run. Half of
+	// that is the floor, so a slow runner does not fail it and a divisor that
+	// stopped being applied does.
+	if ratio := HeavyEvery / SoundEvery; sound < heavy*ratio/2 {
+		t.Errorf("sound read %d times and the expensive readings %d; sound is on every %d "+
+			"ticks against their %d, so it should be about %d times as many",
+			sound, heavy, SoundEvery, HeavyEvery, ratio)
+	}
+}
+
+// Which message a state goes out as is not a detail: Home Assistant registers
+// audio_jack and speaker_playing from ListEntitiesBinarySensor, and a state
+// arriving as SensorStateResponse carries a float under a key it filed as a
+// binary sensor. The entity lists and then never moves, which is silent. The
+// tests that receive every state accept either message, so this is the one that
+// says which key must arrive as which.
+func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
+	// readSound returns from two places and only one is on the happy path, so a
+	// missing state can go out under the wrong message while every good one is
+	// right. Both are driven, and the snapshot a subscriber gets is what
+	// carries them, so the reader is set before the poll.
+	for _, tt := range []struct {
+		name  string
+		sound func() (bool, bool)
+	}{
+		{"every reading taken", func() (bool, bool) { return true, true }},
+		{"the speaker unreadable", func() (bool, bool) { return false, false }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out lockedBuffer
+			defer restoreLog(t, &out)()
+
+			psk := testPSK(t)
+			s := testServer(t, psk)
+			want := stubSensors(s)
+			binary := map[uint32]string{s.keyJackOn: "audio_jack", s.keySound: "speaker_playing"}
+
+			s.sound = tt.sound
+			pollAll(s)
+			c, err := dial(t, s, psk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.send(msgSubscribeStates, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			seen := map[uint32]bool{}
+			for n := 0; n < len(want); n++ {
+				msgType, payload, err := c.recv()
+				if err != nil {
+					t.Fatalf("only %d of the %d states arrived: %v", n, len(want), err)
+				}
+				key, _, _ := sensorReading(t, msgType, payload)
+				seen[key] = true
+				if name, isBinary := binary[key]; isBinary {
+					if msgType != msgBinarySensorState {
+						t.Errorf("%s went out as message %d, want BinarySensorStateResponse "+
+							"(%d): Home Assistant listed it as a binary sensor and will not "+
+							"read a float", name, msgType, msgBinarySensorState)
+					}
+					continue
+				}
+				if msgType != msgSensorState {
+					t.Errorf("the sensor with key %d went out as message %d, want "+
+						"SensorStateResponse (%d)", key, msgType, msgSensorState)
+				}
+			}
+			for key, name := range binary {
+				if !seen[key] {
+					t.Errorf("%s never arrived at all", name)
+				}
+			}
+		})
+	}
+}
+
+// PollLive arms the gap guard, and that assignment is the only place it is ever
+// set. Nothing else observes it, so a wrong value is silent in both directions:
+// too small and every ordinary sample looks late, which zeroes the on clock on
+// every reading and means the entity can never report playing at all; absent
+// and the guard is dead code. Both are states the rest of the suite is happy
+// with, so this checks the wiring and then checks it still reports.
+func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+	s.sound = func() (bool, bool) { return true, true }
+
+	const tick = 20 * time.Millisecond
+	s.onDelay, s.offDelay = 40*time.Millisecond, 40*time.Millisecond
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The poll sleeps while nothing is subscribed, so without this it publishes
+	// nothing and the test would blame the guard for the gate.
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	go s.PollLive(tick)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		gap, on := s.soundGap, s.published[s.keySound]
+		s.mu.Unlock()
+		if gap == tick*SoundEvery*2 && on.value == 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	s.mu.Lock()
+	gap := s.soundGap
+	s.mu.Unlock()
+	if want := tick * SoundEvery * 2; gap != want {
+		t.Errorf("PollLive left soundGap at %v, want %v (twice the sample interval)", gap, want)
+	}
+	t.Errorf("continuous sound was never reported: soundGap is %v against a sample every %v, "+
+		"so every reading looks late and the on clock never accumulates", gap, tick*SoundEvery)
+}
+
 // A subscriber is answered from the published state, so something has to have
 // published before the first tick comes round: a Dot whose sensor tick is a
 // minute would otherwise answer its first subscriber with nothing at all.
@@ -2165,4 +2366,131 @@ func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
 		return
 	}
 	t.Error("the live poll carries no jack reading at all")
+}
+
+// The reading a subscriber is answered from is not the one the poll is holding,
+// and the gap between them is where this went wrong. A subscriber is sent the
+// published state before anything fresh is read, so a value left there by the
+// last subscriber is the first thing a returning Home Assistant is told. For
+// this entity that is a speaker reported as playing and then corrected, which
+// fires whatever was triggered on it turning on. Driven through real
+// connections because neither half shows it alone: the hysteresis is reset
+// either way, and the published state is only wrong once somebody reads it.
+func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	stubSensors(s)
+	shortSoundDelays(s)
+	s.sound = func() (bool, bool) { return true, true }
+
+	go s.PollLive(5 * time.Millisecond)
+
+	// Waits for the speaker to be reported as playing, and answers with the
+	// first reading of it this client was sent.
+	firstSound := func(c *client, want float32, what string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			c.conn.SetReadDeadline(time.Now().Add(time.Second))
+			msgType, payload, err := c.recv()
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			if msgType != msgBinarySensorState {
+				continue
+			}
+			key, v, _ := sensorReading(t, msgType, payload)
+			if key != s.keySound {
+				continue
+			}
+			if v != want {
+				t.Fatalf("%s: the first speaker reading was %v, want %v", what, v, want)
+			}
+			return
+		}
+		t.Fatalf("%s: no speaker reading arrived at all", what)
+	}
+
+	gone, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gone.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	// It starts off and turns on once the sound has lasted, which is the state
+	// that must not outlive this connection.
+	firstSound(gone, 0, "the first subscriber")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("the speaker was never reported as playing, so nothing was left to carry over")
+		}
+		gone.conn.SetReadDeadline(time.Now().Add(time.Second))
+		msgType, payload, err := gone.recv()
+		if err != nil {
+			t.Fatalf("waiting for the speaker to turn on: %v", err)
+		}
+		if msgType != msgBinarySensorState {
+			continue
+		}
+		if key, v, _ := sensorReading(t, msgType, payload); key == s.keySound && v == 1 {
+			break
+		}
+	}
+
+	// Home Assistant goes away. The speaker never stops.
+	gone.conn.Close()
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		_, held := s.published[s.keySound]
+		s.mu.Unlock()
+		if !held {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	back, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := back.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Off, and then on again a delay later once this connection has watched the
+	// sound last. Being told it was already playing is the failure.
+	firstSound(back, 0, "the subscriber that came back")
+}
+
+// Every test in this package replaces these before it runs, so the wiring
+// itself is the one thing none of them sees: a server that reads the wrong
+// device passes the whole suite and ships an entity reporting somebody else's
+// reading under this one's name. sound and jack are the pair that makes this
+// worth holding -- the same signature, two lines apart, and a swap between them
+// is a plausible edit that nothing else here would notice.
+func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	for _, tt := range []struct {
+		name      string
+		got, want any
+	}{
+		{"uptime", s.uptime, device.UptimeSeconds},
+		{"wifi", s.wifi, device.WifiSignal},
+		{"volumes", s.volumes, device.MusicVolumes},
+		{"jack", s.jack, device.JackOccupied},
+		{"sound", s.sound, device.SpeakerPlaying},
+		{"cpu", s.cpu, device.CPUTemperature},
+		{"memory", s.memory, device.AvailableMemory},
+	} {
+		got := reflect.ValueOf(tt.got).Pointer()
+		want := reflect.ValueOf(tt.want).Pointer()
+		if got != want {
+			t.Errorf("%s is wired to %s, not to the reader of that name",
+				tt.name, runtime.FuncForPC(got).Name())
+		}
+	}
 }

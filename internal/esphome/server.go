@@ -44,6 +44,9 @@ const (
 	// second interval this poll has always read on.
 	HeavyEvery = 5
 
+	// The sound reading's own divisor against the same tick.
+	SoundEvery = 1
+
 	// MinSensorTick is the floor under PollSensors' ticker; PollLive has none.
 	// It bounds that ticker rather than the push rate, which a subscriber's wake
 	// can exceed, and rather than the connection's life, which the ping keeps.
@@ -123,6 +126,18 @@ type Server struct {
 	keyMemory uint32
 	keyJack   uint32
 	keyJackOn uint32
+	keySound  uint32
+
+	// PollLive's alone, and unlocked because of it.
+	soundOn  bool
+	soundGap time.Duration
+	// The delays, per server rather than per package, so a test that shrinks
+	// them cannot reach another test's poll.
+	onDelay     time.Duration
+	offDelay    time.Duration
+	soundSince  time.Time
+	soundLastOn time.Time
+	soundSeen   time.Time
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
@@ -130,6 +145,7 @@ type Server struct {
 	wifi    func() (float32, bool)
 	volumes func() device.MusicVolume
 	jack    func() (bool, bool)
+	sound   func() (bool, bool)
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
 
@@ -173,15 +189,19 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyMemory:     entityKey("memory_available"),
 		keyJack:       entityKey("jack_volume"),
 		keyJackOn:     entityKey("audio_jack"),
+		keySound:      entityKey("speaker_playing"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		volumes:       device.MusicVolumes,
 		jack:          device.JackOccupied,
+		sound:         device.SpeakerPlaying,
 		cpu:           device.CPUTemperature,
 		memory:        device.AvailableMemory,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		liveGap:       minLiveReadGap,
+		onDelay:       SoundOnDelay,
+		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
 		published:     map[uint32]reading{},
 		liveWake:      make(chan struct{}, 1),

@@ -219,10 +219,12 @@ Dot's own firewall.
 | `sensor.<name>_memory_available` | diagnostic | MiB the kernel says an allocation could get, which is not the same as free |
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
+| `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
 
 Uptime and signal are read once a minute, and again when Home Assistant
 subscribes. Both volumes, the jack, the temperature and the memory are read
-every two and a half seconds, and only while something is subscribed.
+every two and a half seconds, whether the speaker is playing every half second, and
+all of it only while something is subscribed.
 Everything is sent only when it changes, so the uptime arrives every minute,
 the others when they move, and a quiet short tick costs the reads and no
 traffic at all.

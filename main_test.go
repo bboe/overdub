@@ -135,6 +135,33 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 		t.Errorf("HeavyEvery is %d, so every tick is a heavy one and the tick buys nothing",
 			esphome.HeavyEvery)
 	}
+	// The sound read forks too, on a divisor of its own, so it needs the same
+	// check against the interval that takes it.
+	if soundEvery := liveTick * esphome.SoundEvery; soundEvery <= device.SpeakerReadBudget() {
+		t.Errorf("sound is read every %v and one may take %v, so a slow read delays the "+
+			"readings behind it", soundEvery, device.SpeakerReadBudget())
+	}
+	// Reading sound no oftener than the rest would be the old single cadence
+	// again, and the delay it applies could not be measured any finer than
+	// them.
+	if esphome.SoundEvery >= esphome.HeavyEvery {
+		t.Errorf("SoundEvery is %d against HeavyEvery's %d, so sound is read no oftener than "+
+			"the fork it was separated from", esphome.SoundEvery, esphome.HeavyEvery)
+	}
+	// A delay only takes effect at a sample, so one that does not outlast the
+	// interval is decided by a single reading and a single bad read moves the
+	// entity. The interval here is the nominal one; PollLive is serial, so a
+	// heavy tick whose fork runs long delays the next sample past it, and the
+	// gap guard in readSound is what stops that lone sample deciding an edge.
+	sound := liveTick * esphome.SoundEvery
+	if esphome.SoundOnDelay <= sound {
+		t.Errorf("SoundOnDelay is %v against a sample every %v, so one reading turns it on",
+			esphome.SoundOnDelay, sound)
+	}
+	if esphome.SoundOffDelay <= sound {
+		t.Errorf("SoundOffDelay is %v against a sample every %v, so one reading turns it off",
+			esphome.SoundOffDelay, sound)
+	}
 	if liveTick >= sensorTick {
 		t.Errorf("liveTick is %v against a sensor tick of %v, so a poll of its own buys nothing",
 			liveTick, sensorTick)

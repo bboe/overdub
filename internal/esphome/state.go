@@ -27,6 +27,81 @@ func (s *Server) readTicked() []reading {
 	}
 }
 
+// SoundOnDelay and SoundOffDelay are how long sound has to last before it is
+// reported, and how long it has to be gone before that is withdrawn. Exported
+// so main_test.go can hold them against the interval they are sampled on.
+const (
+	SoundOnDelay  = time.Second
+	SoundOffDelay = time.Second
+)
+
+// Unlike the other readers this one remembers, so only PollLive may call it.
+// Called on the first tick that finds nobody subscribed, because the stretch
+// that follows has no bound -- Home Assistant can be away for an hour -- so
+// nothing measured before it means anything. Nothing wakes the poll on a
+// disconnect, so a Home Assistant back inside that tick keeps the reading, which
+// is half a second old rather than stale. The sampling gap guard inside readSound is the bounded
+// case and deliberately keeps the reading.
+//
+// The published reading goes with the hysteresis, and that is the half that
+// reaches Home Assistant: a subscriber is answered from the published state
+// before the poll has read anything, so a value left there is one a returning
+// Home Assistant is told before the first fresh reading can correct it, which
+// fires anything triggered on the speaker turning on. Dropping it is only safe
+// here, with nobody subscribed: published is otherwise exactly what every
+// subscriber holds.
+func (s *Server) forgetSound() {
+	s.soundOn = false
+	s.soundSince, s.soundLastOn, s.soundSeen = time.Time{}, time.Time{}, time.Time{}
+	s.mu.Lock()
+	delete(s.published, s.keySound)
+	s.mu.Unlock()
+}
+
+func (s *Server) readSound() reading {
+	playing, ok := s.sound()
+	now := time.Now()
+	// A delay is only two readings if the readings were taken when they were
+	// meant to be. PollLive is serial, so a heavy tick whose fork runs long
+	// pushes the next sample out, and one sample either side of that gap would
+	// otherwise decide an edge on its own.
+	gapped := s.soundGap > 0 && !s.soundSeen.IsZero() && now.Sub(s.soundSeen) > s.soundGap
+	s.soundSeen = now
+	if !ok {
+		// soundLastOn is the last time sound was seen, and a read that failed
+		// is not a sighting of silence. Zeroing it made the off test measure
+		// against the zero time, which is past any delay; moving it forward,
+		// which is what the gap guard does, held the entity on across the
+		// failure and reported it as playing again afterwards.
+		s.soundSince = time.Time{}
+		return reading{key: s.keySound, binary: true}
+	}
+	// Only once there is a reading to hang them on. Carrying the withdrawal's
+	// clock forward says sound was seen at a moment nothing was looking, so it
+	// is only done while that claim is smaller than the withdrawal itself. A
+	// longer gap is the poll having been asleep -- nothing subscribed, and no
+	// bound on how long -- and holding the reading on across that reports the
+	// speaker as playing for a delay after Home Assistant returns.
+	if gapped {
+		s.soundSince, s.soundLastOn = time.Time{}, now
+	}
+	if playing {
+		s.soundLastOn = now
+		if s.soundSince.IsZero() {
+			s.soundSince = now
+		}
+		if now.Sub(s.soundSince) >= s.onDelay {
+			s.soundOn = true
+		}
+	} else {
+		s.soundSince = time.Time{}
+		if s.soundOn && now.Sub(s.soundLastOn) >= s.offDelay {
+			s.soundOn = false
+		}
+	}
+	return reading{key: s.keySound, value: boolValue(s.soundOn), ok: true, binary: true}
+}
+
 // The heavy tick's readings, taken together because they are published
 // together. Measured on the Dot: 118us for the temperature, 111us for the
 // memory, 113us for the jack, and 11.7ms for the volume, which is the one that
@@ -173,19 +248,43 @@ func (s *Server) PollLive(every time.Duration) {
 		log.Printf("esphome api: live tick of %v raised to %v", every, minLiveReadGap)
 		every = minLiveReadGap
 	}
+	// Twice the interval sound is sampled on: a sample that late means one was
+	// missed, and anything less is the jitter of an ordinary tick. Written
+	// under the lock because a test reads it from outside this goroutine. What
+	// makes readSound's own read of it safe is not the lock: this goroutine is
+	// its only writer, and readSound runs on it.
+	s.mu.Lock()
+	s.soundGap = 2 * every * SoundEvery
+	s.mu.Unlock()
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	var last time.Time
 	woken := false
 	ticks := 0
+	watched := false
 	for {
-		if s.anyStateSubscriber() && (!woken || time.Since(last) >= s.liveGap) {
+		// One locked look, used by both the edge below and the gate under it,
+		// so the two cannot disagree about the same iteration.
+		listening := s.anyStateSubscriber()
+		if listening != watched {
+			if !listening {
+				s.forgetSound()
+			}
+			watched = listening
+		}
+		if listening && (!woken || time.Since(last) >= s.liveGap) {
 			last = time.Now()
-			// Every HeavyEvery-th tick, and on a subscriber that has just
-			// arrived rather than making it wait out the count. The ticks
-			// between are where a reading cheap enough to take every time goes.
+			// All of them for a subscriber that has just arrived, rather than
+			// making it wait out the counts.
+			var readings []reading
+			if woken || ticks%SoundEvery == 0 {
+				readings = append(readings, s.readSound())
+			}
 			if woken || ticks%HeavyEvery == 0 {
-				s.publish("live", s.readLive())
+				readings = append(readings, s.readLive()...)
+			}
+			if len(readings) > 0 {
+				s.publish("live", readings)
 			}
 			ticks++
 		}

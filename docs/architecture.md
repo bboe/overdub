@@ -315,6 +315,126 @@ volumes therefore carry `mdi:volume-high` and the other four take the icon their
 class implies. The icon fields are not the same number either, 5 on a sensor and
 8 on a binary sensor, which is the field-numbers-are-per-message rule once more.
 
+Whether the speaker is playing is two signals, and needs both. ALSA says whether
+a PCM substream is open -- `state: RUNNING` in
+`/proc/asound/card*/pcm*p/sub*/status`, always `pcm23p` here, the same device
+`mediaserver` holds. `dumpsys media.audio_flinger` says whether an output thread
+has an active track, which is true only while sound is coming out. ALSA alone
+would report a Dot that has been quiet for ten seconds as playing; the fork
+alone would cost 18.7ms on every sample. So the cheap signal is tested first and
+the fork is paid for only when something might be playing.
+
+Measured on the Dot, with the same chime played twice:
+
+| | jack empty | jack occupied |
+|---|---|---|
+| PCM device | `pcm23p` | `pcm23p` |
+| active track | 0.595s | 0.582s |
+| substream closes, after opening | 10.555s | 10.565s |
+
+Neither route moves the substream, because the codec routes downstream of it.
+The ten and a half seconds is why the track is consulted at all.
+
+Bluetooth is the route this cannot answer for, and it fails quietly rather than
+loudly. A2DP does not go through the MTK PCM device at all, so no substream
+runs, and the cheap gate below answers "not playing" without ever reading the
+track that would have said otherwise. It is the same hole the volume has for a
+paired speaker, and it is not measured here: nothing was paired to this Dot.
+
+Nothing that could not be read is reported as silence. An empty glob, a
+`dumpsys` that failed, and an output thread whose track lines no longer parse
+are all `missing_state`, and so is a status file that will not open -- unless
+another substream was already running, which is an answer rather than a gap. Silence is a plausible
+value at the moment we know least and Home Assistant draws it as a measurement,
+which is the `p2p0` argument again. The paths are globbed and kept, since the
+glob costs 5.6ms against 2.0ms for reading all nineteen files it finds and
+substreams do not move while the kernel is up. Three things reconsider the set:
+an empty result, a path that has gone, and a minute passing. The last is there
+because the first two cannot see the case that matters -- a set resolved while
+ALSA is still registering is readable and non-empty, so it would be kept for
+good, and one that happened to miss `pcm23p` would report confident silence for
+the rest of the boot. That is the same mistake as reporting silence from a file
+we could not read, in its permanent form, and a glob a minute costs 0.01% of a
+core to rule out.
+
+The reading is not the sample. Sound has to last `SoundOnDelay`, a second,
+before it is reported, and be gone `SoundOffDelay`, another, before that is
+withdrawn. The first is the point of the entity: a press plays a chime of six
+tenths of a second, and reporting that would make this flicker on every press
+rather than say whether the Dot is speaking. The second keeps the gaps inside a
+sentence from reading as the end of it -- measured, two of Alexa's own playbacks
+in one answer arrive 56ms apart.
+
+A delay only takes effect at a sample, so what it names is a number of readings.
+At half-second sampling the withdrawal takes two and the report takes three,
+because the clocks are set at different ends: the report's at the first sample
+that saw sound, the withdrawal's at the last. What matters is that neither is
+one, since then a single bad read moves the entity and the on delay wants its
+own sequence to bring it back. `SoundEvery` is one against `HeavyEvery`'s five
+for this reason, and `main_test.go` holds both delays against the interval.
+
+Two things take a sample out of its place. A read that failed leaves the
+withdrawal's clock alone, because that clock records the last time sound was
+*seen* and a failure is not a sighting of silence: zeroing it made the
+withdrawal measure against 1970 and fire on the next sample, and moving it
+forward -- which is what the gap guard below does -- held the entity on across
+the failure and then reported it playing again, which reads as the speaker
+resuming. And `PollLive` is serial, so on one tick in five the volume's
+two-second budget can push the next sample out, measured at 2.0016s with that
+read stubbed to spend it, which `soundGap` catches at twice the interval and
+starts both clocks from. That one applies only where there is a reading to hang
+it on, which is the first rule again: a clock is only moved by a sample that saw
+something. Neither changes what is reported, only when it can next change.
+
+A third case does change it. With nothing subscribed the poll does not sample at
+all, and nothing bounds how long that lasts -- Home Assistant restarting is one
+stretch, and it can be an hour. Carrying a reading across that reported the
+speaker as playing for a delay after Home Assistant came back, and fired
+anything triggered on it turning on. So the poll forgets the reading outright,
+where the sampling gap keeps it: the difference is that one is bounded by a
+fork's budget and the other is not bounded at all.
+
+It forgets once nobody is subscribed rather than when the next subscriber
+arrives, and the reason is that the hysteresis is only half of what carries
+across. A subscriber is answered from the published state before the poll has
+read anything, so forgetting on arrival is too late: the stale reading has
+already gone out, and an entity that reports the speaker playing and then
+corrects itself fires the same automation the forgetting was there to prevent.
+The published reading therefore goes with the clocks.
+
+What that buys is bounded rather than immediate, and the bound is a tick.
+Nothing wakes the poll when a subscriber leaves -- `liveWake` is only sent on
+subscribe -- so the poll learns that nobody is listening at its next tick, and a
+Home Assistant that reconnects inside that tick is still answered from the
+published reading. That is the case this does not cover and does not need to:
+the value it is handed is half a second old, which is a reading rather than a
+memory. What the forgetting is for is the hour, and an hour is many ticks. For
+the same reason the drop is not simultaneous with the last subscriber going, so
+`published` is momentarily a reading nobody holds; the next tick publishes over
+it, because a key that is absent always counts as changed.
+
+The fork is conditional, and the condition is the ten and a half seconds. Every
+sound therefore costs about twenty-one forks in its wake, roughly 400ms of a
+core spread over that tail, and a chime the entity is designed never to report
+costs the same. That, rather than the 18.7ms, is what the reading actually
+costs, and it is why the substream is tested first: the alternative is paying it
+twice a second for ever.
+
+It carries no `device_class`, which is the only way Home Assistant says "On" and
+"Off": all twenty-eight of its binary sensor classes rename the two states and
+none of them names this one -- `running` says "Running", `sound` says
+"Detected", which on a device with three microphones reads as the mic having
+heard something. The class would have supplied a pair of icons, one per state,
+so without one it takes a static `mdi:speaker`. The jack keeps none for the same
+rule read the other way: there the pair being given up is a plugged and an
+unplugged icon rather than two generic circles.
+
+What can be missed is anything shorter than the delay plus the interval, so
+about a second and a half -- and about three seconds for sound that begins just
+after a stalled tick, since the guard starts the delay again there. Riding the
+fork's two and a half seconds instead of sampling every half would make the
+ordinary case three and a half and take most of Alexa's replies with it.
+
 The volume comes out of `dumpsys audio`, which carries both the numbers it
 takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
 each output device appears as `<hex mask> (<name>): <level>`. Only the ratio
