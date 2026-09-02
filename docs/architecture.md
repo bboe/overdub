@@ -10,6 +10,45 @@ clone up by inotify. Read the bitmap with `EVIOCGBIT`, never from sysfs: that
 file's word size differs from `/proc/bus/input/devices` here, and guessing wrong
 silently breaks mute.
 
+The clone copies the original's `struct input_id` too, read with `EVIOCGID` for
+the reason the bitmap is read with `EVIOCGBIT`: it is what the device says
+rather than what this end believes about one model of Dot. All four fields
+matter, and the name is only the last resort among them. Android resolves a
+keylayout by `Vendor_XXXX_Product_XXXX_Version_XXXX.kl`, then
+`Vendor_XXXX_Product_XXXX.kl`, then the device name, then `Generic.kl`. Measured
+on biscuit, neither `Vendor_2454_Product_6500.kl` nor the clone's old
+`Vendor_0001_Product_0001.kl` exists, so both fell through to `mtk-kpd.kl` and
+the name alone was carrying it. Copying the ids means the clone would keep
+matching on a Dot that did ship a vendor keylayout, where the name would not.
+
+The bus is the field that was measurably wrong. `EventHub::isExternalDeviceLocked`
+looks first for `device.internal` in the device's `.idc` and answers from that
+when it is there; with no such property, which is this Dot's case for both
+nodes, it calls a device external when its bus is `BUS_USB` or `BUS_BLUETOOTH`. The
+clone hardcoded `BUS_USB` while biscuit's keypad is `BUS_HOST`. Measured before
+the change, `dumpsys input` agreed on everything else -- both devices
+`Sources: 0x00000501`, `KeyboardType: 1`, identical mapper parameters -- and
+disagreed on `IsExternal`, false for the real node and true for the clone. That
+is the one thing Android could have treated differently about a key arriving
+from a passed-through press, so it is the one thing worth removing.
+
+Copying the ids makes the clone's `InputDeviceIdentifier` byte-identical to the
+keypad's, and Android disambiguates them anyway. Measured after the change, the
+two report the same `bus=0x0019, vendor=0x2454, product=0x6500, version=0x0010`
+and different descriptors, `f0d2e427...:24546500` against `d3f110579...:24546500`,
+so the per-device settings that key on a descriptor do not collide. That is the
+answer to the obvious objection rather than an incidental reading.
+
+What no test holds is the wiring: the id reaching `uinput` is the one read from
+the node. `userDev` is tested against an id a test hands it and `idFromBytes`
+against bytes a test hands it, and the two are held together by a round trip,
+but putting the old invented id back in `NewUinput`'s caller leaves the whole
+suite green. Closing that needs `/dev/uinput` and root, which CI has neither of,
+so it is verified on the device instead -- the daemon logs the id it cloned, and
+`dumpsys input` reports what Android made of it. That is the rule CLAUDE.md
+already states, said out loud here because the failure would reach the Dot
+before anything else noticed.
+
 The wait for `wlan0` does not give up. Nothing restarts a daemon that has not
 exited, so a bounded wait that expired would cost the API for the rest of the
 boot on a Dot whose access point came back a minute late. It polls quietly after

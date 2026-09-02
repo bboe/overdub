@@ -48,9 +48,17 @@ func Open(path string, consume uint16, uiName string, wait time.Duration) (*Inte
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("%s declares no keycodes", path)
 	}
-	log.Printf("cloning %d keycodes from %s", len(keys), path)
+	// Fatal rather than defaulted, for the reason a wrong key bitmap is: an id
+	// this end made up is one Android resolves a different keylayout from, and
+	// it would go wrong silently.
+	id, err := evdev.DeviceID(file)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("cloning %d keycodes from %s (bus %#04x vendor %#04x product %#04x version %#04x)",
+		len(keys), path, id.Bus, id.Vendor, id.Product, id.Version)
 
-	uinput, err = evdev.NewUinput(uiName, keys)
+	uinput, err = evdev.NewUinput(uiName, id, keys)
 	if err != nil {
 		return nil, fmt.Errorf("uinput: %w (is CONFIG_UINPUT present, and are you root?)", err)
 	}

@@ -31,6 +31,13 @@ const (
 	//   (2<<30) | (96<<16) | ('E'<<8) | 0x21
 	eviocgbitKey = 0x80604521
 
+	// struct input_id is four u16: bustype, vendor, product, version.
+	idBytes = 8
+
+	// EVIOCGID = _IOR('E', 0x02, struct input_id)
+	//   (2<<30) | (8<<16) | ('E'<<8) | 0x02
+	eviocgid = 0x80084502
+
 	uinputNode = "/dev/uinput"
 
 	uiSetEvbit   = 0x40045564 // _IOW(UINPUT_IOCTL_BASE, 100, int)
@@ -81,6 +88,38 @@ func ioctl(fd uintptr, req uint, arg uintptr) error {
 	return nil
 }
 
+// InputID is struct input_id: what a device tells the kernel it is. Android
+// reads all four, so the clone copies the original's rather than inventing one.
+// docs/architecture.md says what each field decides.
+type InputID struct {
+	Bus     uint16
+	Vendor  uint16
+	Product uint16
+	Version uint16
+}
+
+// Read from the node for the reason the key bitmap is: it is what the device
+// actually says, rather than what this end believes about one model of Dot.
+func DeviceID(f *os.File) (InputID, error) {
+	buf := make([]byte, idBytes)
+	if err := ioctl(f.Fd(), eviocgid, uintptr(unsafe.Pointer(&buf[0]))); err != nil {
+		return InputID{}, fmt.Errorf("EVIOCGID: %w", err)
+	}
+	return idFromBytes(buf), nil
+}
+
+// Split from the ioctl for the reason keysFromBitmap is split from EVIOCGBIT:
+// the decode is the half that can be got wrong and the half a test can reach,
+// since the other needs a real node open.
+func idFromBytes(buf []byte) InputID {
+	return InputID{
+		Bus:     binary.LittleEndian.Uint16(buf[0:]),
+		Vendor:  binary.LittleEndian.Uint16(buf[2:]),
+		Product: binary.LittleEndian.Uint16(buf[4:]),
+		Version: binary.LittleEndian.Uint16(buf[6:]),
+	}
+}
+
 func DeviceKeys(f *os.File) ([]uint16, error) {
 	buf := make([]byte, keyBytes)
 	if err := ioctl(f.Fd(), eviocgbitKey, uintptr(unsafe.Pointer(&buf[0]))); err != nil {
@@ -112,7 +151,7 @@ func Grab(f *os.File, on bool) error {
 
 type Uinput struct{ f *os.File }
 
-func NewUinput(name string, keys []uint16) (*Uinput, error) {
+func NewUinput(name string, id InputID, keys []uint16) (*Uinput, error) {
 	file, err := os.OpenFile(uinputNode, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", uinputNode, err)
@@ -128,7 +167,7 @@ func NewUinput(name string, keys []uint16) (*Uinput, error) {
 		}
 	}
 
-	if _, err := file.Write(userDev(name)); err != nil {
+	if _, err := file.Write(userDev(name, id)); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("write uinput_user_dev: %w", err)
 	}
@@ -139,17 +178,17 @@ func NewUinput(name string, keys []uint16) (*Uinput, error) {
 	return &Uinput{f: file}, nil
 }
 
-func userDev(name string) []byte {
+func userDev(name string, id InputID) []byte {
 	// struct uinput_user_dev, 32-bit layout:
 	//   char name[80]; struct input_id{u16 x4}; int ff_effects_max;
 	//   int absmax[64]; absmin[64]; absfuzz[64]; absflat[64]
 	const devSize = 80 + 8 + 4 + 4*64*4
 	buf := make([]byte, devSize)
-	copy(buf[:79], name)                            // 79, so the name is always NUL-terminated
-	binary.LittleEndian.PutUint16(buf[80:], 0x0003) // bustype BUS_USB
-	binary.LittleEndian.PutUint16(buf[82:], 0x0001) // vendor
-	binary.LittleEndian.PutUint16(buf[84:], 0x0001) // product
-	binary.LittleEndian.PutUint16(buf[86:], 0x0001) // version
+	copy(buf[:79], name) // 79, so the name is always NUL-terminated
+	binary.LittleEndian.PutUint16(buf[80:], id.Bus)
+	binary.LittleEndian.PutUint16(buf[82:], id.Vendor)
+	binary.LittleEndian.PutUint16(buf[84:], id.Product)
+	binary.LittleEndian.PutUint16(buf[86:], id.Version)
 	return buf
 }
 

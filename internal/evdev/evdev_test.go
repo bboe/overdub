@@ -46,6 +46,7 @@ func TestIoctlRequestsMatchTheKernelMacros(t *testing.T) {
 		{"_IOW('E', 0x90, int)", eviocgrab, ioc(iocWrite, sizeofInt, 'E', 0x90)},
 		{"_IOC(_IOC_READ, 'E', 0x20+EV_KEY, keyBytes)", eviocgbitKey,
 			ioc(iocRead, keyBytes, 'E', 0x20+EvKey)},
+		{"_IOR('E', 0x02, struct input_id)", eviocgid, ioc(iocRead, idBytes, 'E', 0x02)},
 		{"_IOW('U', 100, int)", uiSetEvbit, ioc(iocWrite, sizeofInt, 'U', 100)},
 		{"_IOW('U', 101, int)", uiSetKeybit, ioc(iocWrite, sizeofInt, 'U', 101)},
 		{"_IO('U', 1)", uiDevCreate, ioc(iocNone, 0, 'U', 1)},
@@ -171,13 +172,19 @@ func TestUserDevMatchesTheKernelStruct(t *testing.T) {
 		absArrays         = 4  // absmax, absmin, absfuzz, absflat
 	)
 	want := uinputMaxNameSize + inputIDSize + ffEffectsMaxSize + absArrays*absCnt*4
-	if got := len(userDev("mtk-kpd")); got != want {
+	if got := len(userDev("mtk-kpd", InputID{})); got != want {
 		t.Fatalf("uinput_user_dev is %d bytes, want %d", got, want)
 	}
 }
 
-func TestUserDevPlacesTheNameAndTheBusID(t *testing.T) {
-	buf := userDev("mtk-kpd")
+// Each field lands where the kernel struct says, and each carries what the real
+// node reported rather than a constant. Android reads all four: the bus decides
+// IsExternal, and vendor and product are what a keylayout is looked up by
+// before the name is tried. Biscuit's own values, so a field written to the
+// wrong offset is visible as a number that belongs somewhere else.
+func TestUserDevPlacesTheNameAndTheIDItWasGiven(t *testing.T) {
+	id := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
+	buf := userDev("mtk-kpd", id)
 	if got := string(buf[:7]); got != "mtk-kpd" {
 		t.Errorf("name is %q, want %q at offset 0", got, "mtk-kpd")
 	}
@@ -189,10 +196,10 @@ func TestUserDevPlacesTheNameAndTheBusID(t *testing.T) {
 		at    int
 		want  uint16
 	}{
-		{"bustype", 80, 0x0003}, // BUS_USB
-		{"vendor", 82, 0x0001},
-		{"product", 84, 0x0001},
-		{"version", 86, 0x0001},
+		{"bustype", 80, 0x0019}, // BUS_HOST, which is what makes it internal
+		{"vendor", 82, 0x2454},
+		{"product", 84, 0x6500},
+		{"version", 86, 0x0010},
 	} {
 		if got := binary.LittleEndian.Uint16(buf[tt.at:]); got != tt.want {
 			t.Errorf("%s at offset %d is 0x%04x, want 0x%04x", tt.field, tt.at, got, tt.want)
@@ -203,12 +210,34 @@ func TestUserDevPlacesTheNameAndTheBusID(t *testing.T) {
 	}
 }
 
+// Each field is read from its own offset, in the kernel's order. Biscuit's own
+// values, so a field read from the wrong one shows up as a number belonging to
+// another field rather than as a plausible one.
+func TestIDFromBytesReadsTheKernelOrder(t *testing.T) {
+	buf := []byte{0x19, 0x00, 0x54, 0x24, 0x00, 0x65, 0x10, 0x00}
+	want := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
+	if got := idFromBytes(buf); got != want {
+		t.Errorf("idFromBytes = %+v, want %+v", got, want)
+	}
+}
+
+// The decode and the encode are the same four fields in the same order, so a
+// change to one and not the other lands here rather than on the device, where
+// it would surface as Android resolving a different keylayout and nothing
+// saying so.
+func TestTheIDSurvivesTheRoundTrip(t *testing.T) {
+	want := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
+	if got := idFromBytes(userDev("mtk-kpd", want)[80:88]); got != want {
+		t.Errorf("the id came back as %+v, want %+v", got, want)
+	}
+}
+
 func TestUserDevTruncatesALongName(t *testing.T) {
-	buf := userDev(strings.Repeat("x", 200))
+	buf := userDev(strings.Repeat("x", 200), InputID{Bus: 0x0019})
 	if got := bytes.IndexByte(buf[:80], 0); got != 79 {
 		t.Errorf("a 200-byte name leaves the first NUL at %d, want 79", got)
 	}
-	if got := binary.LittleEndian.Uint16(buf[80:]); got != 0x0003 {
+	if got := binary.LittleEndian.Uint16(buf[80:]); got != 0x0019 {
 		t.Errorf("a long name overwrote bustype: 0x%04x", got)
 	}
 }
