@@ -218,3 +218,168 @@ func TestOpenGivesUpAfterTheWaitItIsGiven(t *testing.T) {
 		t.Fatal("Open was still waiting well past the limit it was given")
 	}
 }
+
+// The whole of what "not captured" means: the key reaches the clone, named
+// mtk-kpd and carrying the same keylayout, so Android sees the press it would
+// have seen with no daemon running. The grab is untouched -- releasing it would
+// put a live original beside a live clone -- so this is the only route back.
+func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
+	var got []emitted
+	presses := 0
+	i := &Interceptor{consume: testKey}
+	i.SetCaptured(false)
+	err := i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
+		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+	)), func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}, func(time.Duration) { presses++ })
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("route returned %v, want io.EOF", err)
+	}
+	if presses != 0 {
+		t.Errorf("a released button reported %d presses, want 0", presses)
+	}
+	if want := []emitted{{testKey, 1}, {testKey, 0}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("emitted %v, want %v: a key nobody is holding has to reach Android", got, want)
+	}
+}
+
+// The zero value is a captured button, so an Interceptor built without a word
+// about capture keeps the key. The alternative fails the wrong way round: a
+// daemon that gave the button back because a field was never set.
+func TestTheZeroValueHoldsTheButton(t *testing.T) {
+	if !(&Interceptor{}).Captured() {
+		t.Error("a fresh Interceptor is not capturing, so it hands the action button to Alexa")
+	}
+}
+
+func TestSetCapturedIsReadBack(t *testing.T) {
+	i := &Interceptor{consume: testKey}
+	for _, want := range []bool{false, true, false} {
+		i.SetCaptured(want)
+		if got := i.Captured(); got != want {
+			t.Errorf("SetCaptured(%v) reads back as %v", want, got)
+		}
+	}
+}
+
+// A reader that flips the capture flag as it hands over the nth event, so the
+// toggle lands after the event before it has been acted on and before this one
+// is: route reads exactly one event and then processes it. Flipping on the
+// first read would land before the press was latched at all, which is the
+// unlatched behaviour rather than the latched one.
+type flipAfter struct {
+	r    io.Reader
+	n    int
+	at   int
+	flip func()
+}
+
+func (f *flipAfter) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if f.n++; f.n == f.at {
+		f.flip()
+	}
+	return n, err
+}
+
+// A press is decided at its key-down and stays decided until the key-up. Both
+// halves of one press have to take the same route, and the two ways of getting
+// that wrong are not symmetric: a release with no press is a key Android shrugs
+// at, while a press with no release is BUTTON_MODE held down for ever.
+func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		start   bool
+		want    []emitted
+		presses int
+	}{
+		// Latched captured: the release still reports the press, and nothing
+		// of it reaches Android, which was never told it began.
+		{"let go while held", true, nil, 1},
+		// Latched passing: Android already has the key-down, so it gets the
+		// key-up too rather than being left holding BUTTON_MODE.
+		{"taken while held", false, []emitted{{testKey, 1}, {testKey, 0}}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []emitted
+			presses := 0
+			i := &Interceptor{consume: testKey}
+			i.SetCaptured(tt.start)
+			r := &flipAfter{
+				r: bytes.NewReader(events(
+					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
+					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+				)),
+				at:   2,
+				flip: func() { i.SetCaptured(!tt.start) },
+			}
+			err := i.route(r, func(code uint16, value int32) error {
+				got = append(got, emitted{code, value})
+				return nil
+			}, func(time.Duration) { presses++ })
+
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("route returned %v, want io.EOF", err)
+			}
+			if i.Captured() == tt.start {
+				t.Fatal("the flag never flipped, so this test proves nothing")
+			}
+			if presses != tt.presses {
+				t.Errorf("reported %d presses, want %d", presses, tt.presses)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("emitted %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Autorepeat, which nothing else in the tree emits. It belongs to the press in
+// flight: dropped while that press is being consumed, re-emitted while it is
+// passing through, and dropped entirely when there is no press of ours, since
+// then Android was never told the key went down.
+func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
+	const repeat = 2
+	for _, tt := range []struct {
+		name     string
+		captured bool
+		send     []evdev.Event
+		want     []emitted
+	}{
+		{"consumed press swallows its repeats", true, []evdev.Event{
+			{Type: evdev.EvKey, Code: testKey, Value: 1},
+			{Type: evdev.EvKey, Code: testKey, Value: repeat},
+			{Type: evdev.EvKey, Code: testKey, Value: 0},
+		}, nil},
+		{"passed-through press carries its repeats", false, []evdev.Event{
+			{Type: evdev.EvKey, Code: testKey, Value: 1},
+			{Type: evdev.EvKey, Code: testKey, Value: repeat},
+			{Type: evdev.EvKey, Code: testKey, Value: 0},
+		}, []emitted{{testKey, 1}, {testKey, repeat}, {testKey, 0}}},
+		// The key was down before the grab took it, so Android has no press of
+		// ours to hang a repeat on.
+		{"a repeat with no press of ours is dropped", false, []evdev.Event{
+			{Type: evdev.EvKey, Code: testKey, Value: repeat},
+		}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []emitted
+			i := &Interceptor{consume: testKey}
+			i.SetCaptured(tt.captured)
+			err := i.route(bytes.NewReader(events(tt.send...)), func(code uint16, value int32) error {
+				got = append(got, emitted{code, value})
+				return nil
+			}, func(time.Duration) {})
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("route returned %v, want io.EOF", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("emitted %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

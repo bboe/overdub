@@ -186,3 +186,18 @@ func TestTheReadmeQuotesTheMissingKeyError(t *testing.T) {
 		t.Errorf("README.md quotes an error serve.go does not write")
 	}
 }
+
+// The one line that hands the button to the API, and nothing else reaches it:
+// serveAPI dials no test and the switch lists either way, so deleting the call
+// leaves a switch that reports the button captured for ever and moves nothing,
+// with the whole suite green. Asserted over the source for the reason the port
+// and the key path are: it is the only thing that can see a wiring line go.
+func TestServeWiresTheButtonToTheSwitch(t *testing.T) {
+	source, err := os.ReadFile("serve.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(source), "server.UseButton(") {
+		t.Error("serve.go never calls UseButton, so button_capture moves nothing and says so to nobody")
+	}
+}

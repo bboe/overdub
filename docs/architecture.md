@@ -114,9 +114,11 @@ guarded.
 
 A `HelloRequest` that does not parse is not answered. `pbWalk` visits the fields
 it read before it failed, so replying would mean replying to whatever was
-scraped out of a message we could not understand. It is the only message whose
-payload is read at all: the rest carry nothing this daemon needs, so their
-bodies are never looked at.
+scraped out of a message we could not understand. `SwitchCommandRequest` is
+under the same rule and for a sharper reason -- acting on it means acting on a
+key and a state that may both be halves of something else -- and the two are
+the only messages whose payloads are read at all: the rest carry nothing this
+daemon needs, so their bodies are never looked at.
 
 Every line a peer can cause goes through the rate limit: the accept loop's,
 each connection's, and the sensor push's. Three lines in the package are
@@ -351,8 +353,15 @@ it is there to show. The sensors are the other way round: a sensor with neither
 a device_class nor an icon is drawn as `mdi:eye`, and there is no class for a
 volume percentage, since Home Assistant's `volume` measures litres. Both
 volumes therefore carry `mdi:volume-high` and the other four take the icon their
-class implies. The icon fields are not the same number either, 5 on a sensor and
-8 on a binary sensor, which is the field-numbers-are-per-message rule once more.
+class implies. The button switch looks like the jack's case and is not. Home
+Assistant does draw a switch from a pair, `mdi:toggle-switch-variant` and
+`-off`, but it also renders a toggle control beside it, so the icon is not what
+shows the state there and the pair an icon replaces was redundant. What it
+costs to keep is identification: a generic toggle says nothing about which of
+nine entities it is. So `button_capture` carries `mdi:gesture-tap-button` and
+the jack still carries none. The icon fields are not the same number either, 5
+on a sensor and a switch, 8 on a binary sensor, which is the
+field-numbers-are-per-message rule once more.
 
 Whether the speaker is playing is two signals, and needs both. ALSA says whether
 a PCM substream is open -- `state: RUNNING` in
@@ -634,7 +643,12 @@ rather than one that may block. A bare send would deadlock the server outright:
 channel takes that same lock to publish.
 
 `MinSensorTick` bounds `PollSensors`' ticker rather than the push rate, which a
-wake exceeds by a read per connection that subscribes.
+wake exceeds. Both polls therefore hold a wake to `wakeGap`, a second, because
+everything that wakes either of them is something a peer asked for. They differ
+in what they do with one that arrives too soon: `PollLive` drops it, since its
+own tick comes round in half a second, and `PollSensors` waits the remainder out
+and then serves it, since dropping one there would leave the value it was going
+to correct wrong until the minute tick.
 
 The pollers are the only things that read the device, which is the cost of there
 being one reader rather than two: a poll that wedged would leave every
@@ -678,6 +692,120 @@ flight each, and the product has to fit a device with 512 MiB of RAM, of which
 `/proc/meminfo` reports 472 MiB usable. Every memory figure here is binary, and
 so is the file they come from: the kernel writes `kB` and means KiB, which is
 why a reading of it is divided by 1024 rather than by 1000.
+
+## The button switch
+
+`button_capture` is the one entity Home Assistant writes to, and everything
+else here is read-only. Off, the action button is Alexa's again; on, it is this
+daemon's and a press does what it did before. It is a switch rather than a
+diagnostic reading of whether the grab took, because what somebody looking at
+that reading almost always wants is to change it.
+
+**The grab is untouched either way.** Releasing it is the obvious reading of
+"pass the button through" and it is the wrong one: the real node still delivers
+to `EventHub`, so a released grab beside a live clone lands every key twice, and
+mute would toggle on and straight back off. What "not captured" means instead is
+that keycode 138 is re-emitted through the clone like every other key. The clone
+is named `mtk-kpd` so Android applies the same keylayout, and that is the route
+mute has always taken here, which is the reason the clone carries the whole key
+bitmap in the first place.
+
+How far that is measured is worth being exact about. Android's input layer
+treats the two devices identically: the same keylayout, the same
+`Sources: 0x00000501`, the same `KeyboardType`, and since the ids are copied the
+same `IsExternal`. `mtk-kpd.kl` maps `key 138 BUTTON_MODE` and both devices
+resolve to it.
+
+The app layer was the open question and it is now answered. Measured on the Dot
+with capture off and 138 injected into `event1`, which reaches the daemon and
+not `EventHub` because `EVIOCGRAB` gates reading rather than writing:
+
+```
+HeadlessKeyPolicyManager: KEYCODE_BUTTON_MODE, scanCode=138, deviceId=24, source=0x501
+KeyEventObserver:         Received uber, keyCode=110, state=0
+KeyListener:              STATE_DOWN -> STATE_UP -> STATE_SHORT
+SPCH-SIM_StartSpeechCommand: mInitiator=SHORT_BUTTON_PRESS
+SPCH-SIM_SimStateMachine:    ReadyState -> ListenState
+```
+
+`deviceId=24` is the clone, so Alexa's handlers do not care which device the
+`KeyEvent` came from; the daemon logged no interception for that press and did
+for the same injection with capture on, which is the control. "uber" is the
+Dot's own name for the action button, and is what to grep for.
+
+What that measures exactly is press-to-talk. Stopping a timer and entering setup
+mode were not separately exercised, and they are the same `uber` key reaching
+the same `KeyListener`: `STATE_SHORT` is what press-to-talk and a timer stop
+both hang off, and setup mode hangs off the long press instead. So they follow
+from the same evidence rather than resting on it, which is a weaker claim than
+the one above and worth keeping apart from it.
+
+Releasing the grab instead, so the real node delivers to `EventHub` directly, is
+the obvious alternative and is rejected. It would give exact fidelity and cost a
+worse property: two paths to Android rather than one. Toggling between them
+inside a press desynchronises Android's key state, and one direction is bad
+rather than untidy. Taking the button back while the key is held means Android
+already has the key-down natively and never receives the up: `EVIOCGRAB` makes
+the kernel synthesize no release, and a synthetic one through the clone cannot
+clear it, because `dumpsys input` tracks `KeyDowns` per device. A `BUTTON_MODE`
+stuck past six hundred milliseconds is Alexa's long press, which is setup mode.
+With the clone as the only path there is nothing to desynchronise: a press is
+either delivered whole or not at all, which is what latching at the key-down
+buys.
+
+**A press is latched at its key-down and stays latched until the key-up.** A
+toggle can arrive between the two, and the two halves of one press must not take
+different routes. The failures are not symmetric. Consuming the down and passing
+the up gives Android a release for a key it was never told was pressed, which it
+shrugs at. Passing the down and consuming the up leaves it holding `BUTTON_MODE`
+for ever. So the flag is read once, at the down, and the release follows it.
+
+**The button owns the flag and the server reads it**, rather than the server
+owning it and the button being told. The read loop consults it on every event
+and cannot take the server lock to do it, so it needs its own copy whichever way
+round this goes; one authority means there is only ever the one. The zero value
+is a captured button, so a construction path that never mentions capture keeps
+the key rather than quietly handing it to Alexa.
+
+Nothing is published from `handle`, and that is a hard rule rather than a
+preference: `publish` takes the server lock, `handle` holds it for its whole
+body, and a `sync.Mutex` is not reentrant, so publishing there deadlocks that
+goroutine with the lock held and wedges the accept path and every other
+connection behind it. So a toggle wakes `PollSensors` instead and the state goes
+out on that poll's next turn -- which is also why the reading rides `readTicked` rather than
+having a path of its own. That poll publishes once before its first wait, so the
+switch has a state before any connection exists.
+
+That wake is the one thing here a peer can ask for repeatedly on a connection it
+already holds, and it is why `PollSensors` has a `wakeGap` at all. Subscribing
+wakes the polls only on a connection's first request, so a peer spamming that
+needs a new connection each time and the eight slots bound it; a switch command
+needs neither. The no-op guard turns away a command asking for the state the
+button is already in, and that is all it does: a peer alternating on and off
+changes the state every time and so passes it every time. What bounds that is
+the gap on the poll, which is where the bound belongs, since the guard can only
+ever recognise the case a peer would not bother sending.
+
+The log line saying which way the button went is carried out of `handle` on the
+connection, the way the hello line is, because the log is a file on `/data` and
+the lock gates the accept path and every other connection. It is the only record
+that separates a button nobody is answering from one Home Assistant let go of,
+and it is not a guarantee: it goes through `peerLogf` like every other line a
+peer causes, so a peer that has already spent the run's ceiling on connection
+churn moves the button unrecorded.
+
+Exempting it from that budget is the obvious fix and is wrong. `conn.noted` is
+set once per state *change*, which is once per message a peer sends, not once
+per wake -- the gap bounds the poll, not the toggles. So an exempt line is an
+unbounded write to `/data` by an unauthenticated-until-the-key peer, which is
+the hazard docs/pitfalls.md exists for. A budget of its own would work; sharing
+the general one and saying so is what is done.
+
+`SwitchStateResponse` has no `missing_state` field, unlike the other two state
+messages: a switch is what this end last set it to, and there is no read of the
+device to have failed. Its listing numbers are its own as usual -- 17, 26 and 33
+against the sensor's 16 and 25 -- and `entity_category` is field 8 there,
+carrying `config` rather than the `diagnostic` every other entity here carries.
 
 ## Discovery
 

@@ -57,14 +57,16 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, entity := range listed(t, s) {
-		// Binary sensors are listed under their own message type and checked by
-		// TestTheJackIsListedAsABinarySensor: their fields are not these ones,
-		// and reading them with this table would compare the wrong numbers.
-		if entity[0].num == uint64(msgListBinarySensor) {
+		// Binary sensors and the switch are listed under their own message
+		// types and checked by their own tests: their fields are not these
+		// ones, and reading them with this table would compare the wrong
+		// numbers.
+		if entity[0].num == uint64(msgListBinarySensor) || entity[0].num == uint64(msgListSwitch) {
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
-			t.Errorf("an entity of type %d is listed, and it is neither sensor nor binary sensor", entity[0].num)
+			t.Errorf("an entity of type %d is listed, and it is none of the three kinds this "+
+				"device has", entity[0].num)
 			continue
 		}
 		objectID := string(entity[1].data)
@@ -183,10 +185,14 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	}{
 		{"ListEntitiesSensorResponse", msgListSensor, 16},
 		{"ListEntitiesBinarySensorResponse", msgListBinarySensor, 12},
+		{"ListEntitiesSwitchResponse", msgListSwitch, 17},
 		{"ListEntitiesDoneResponse", msgListEntitiesDone, 19},
 		{"SensorStateResponse", msgSensorState, 25},
 		{"BinarySensorStateResponse", msgBinarySensorState, 21},
+		{"SwitchStateResponse", msgSwitchState, 26},
+		{"SwitchCommandRequest", msgSwitchCommand, 33},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
+		{"ENTITY_CATEGORY_CONFIG", entityCategoryConfig, 1},
 		{"ENTITY_CATEGORY_DIAGNOSTIC", entityCategoryDiagnostic, 2},
 		{"STATE_CLASS_MEASUREMENT", stateClassMeasurement, 1},
 		{"STATE_CLASS_TOTAL_INCREASING", stateClassTotalIncreasing, 2},

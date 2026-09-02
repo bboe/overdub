@@ -32,8 +32,10 @@ const (
 	// clientKeepalive is aioesphomeapi's KEEP_ALIVE_FREQUENCY.
 	clientKeepalive = 20 * time.Second
 
-	// The shortest gap between two live reads a wake can ask for, and the floor
-	// under a tick that is not positive. The volume's fork is what it is for.
+	// The shortest gap between two reads a wake can ask for, on either poll,
+	// and the floor under a PollLive tick that is not positive. The volume's
+	// fork is what the length of it is for; what it bounds is a peer, since
+	// both wakes are things a peer can ask for as fast as it can send.
 	minLiveReadGap = time.Second
 
 	// How many of PollLive's ticks pass between one reading of the expensive
@@ -82,13 +84,20 @@ const (
 	msgListEntitiesReq   = 11
 	msgListBinarySensor  = 12
 	msgListSensor        = 16
+	msgListSwitch        = 17
 	msgListEntitiesDone  = 19
 	msgSubscribeStates   = 20
 	msgBinarySensorState = 21
 	msgSensorState       = 25
+	msgSwitchState       = 26
 	msgSubscribeLogs     = 28
+	msgSwitchCommand     = 33
 	msgSubscribeHAStates = 38
 )
+
+// What the daemon starts as, so a server with no button wired reports the state
+// a Dot with one would be in rather than the zero value.
+func capturedByDefault() bool { return true }
 
 func entityKey(objectID string) uint32 {
 	h := fnv.New32a()
@@ -110,6 +119,9 @@ type conn struct {
 	// Written by handle and read by serveConn, both on this connection's own
 	// goroutine, so that the log write happens with no lock held.
 	said string
+
+	// A whole line handle wants in the log, carried out for the same reason.
+	noted string
 }
 
 type Server struct {
@@ -127,6 +139,9 @@ type Server struct {
 	keyJack   uint32
 	keyJackOn uint32
 	keySound  uint32
+
+	// The one entity a peer can write to rather than only read.
+	keyCapture uint32
 
 	// PollLive's alone, and unlocked because of it.
 	soundOn  bool
@@ -149,10 +164,23 @@ type Server struct {
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
 
+	// Whether the action button is ours, and the ask to change it. The button
+	// owns the flag, so there is one copy of it rather than two that could
+	// disagree: its read loop consults its own field on every event and cannot
+	// take the server lock to do it. capture is called with the server lock
+	// held and captured is called from readTicked without it, so the rule for
+	// both is the stricter one: neither may block, whichever holds what. Set
+	// together by UseButton and never apart, because
+	// either alone is a switch that lies. capture is nil on a server built
+	// without a button, which is a test rather than a state a Dot can be in,
+	// and the switch then reports the shipped default and moves nothing.
+	captured func() bool
+	capture  func(bool)
+
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
 	pingWait      time.Duration
-	liveGap       time.Duration
+	wakeGap       time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -190,6 +218,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyJack:       entityKey("jack_volume"),
 		keyJackOn:     entityKey("audio_jack"),
 		keySound:      entityKey("speaker_playing"),
+		keyCapture:    entityKey("button_capture"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		volumes:       device.MusicVolumes,
@@ -197,9 +226,10 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		sound:         device.SpeakerPlaying,
 		cpu:           device.CPUTemperature,
 		memory:        device.AvailableMemory,
+		captured:      capturedByDefault,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
-		liveGap:       minLiveReadGap,
+		wakeGap:       minLiveReadGap,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
@@ -207,6 +237,15 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		liveWake:      make(chan struct{}, 1),
 		sensorWake:    make(chan struct{}, 1),
 	}
+}
+
+// UseButton wires the switch to the button, reader and writer in one call.
+// Two exported fields let a caller set the writer and leave the reader at the
+// default, which is a switch that really moves the button and reports it
+// captured for ever: Home Assistant's toggle snaps back on every poll and
+// nothing says why.
+func (s *Server) UseButton(captured func() bool, capture func(bool)) {
+	s.captured, s.capture = captured, capture
 }
 
 func (s *Server) Listen(addr string) error {
@@ -380,6 +419,10 @@ func (s *Server) serveConn(netConn net.Conn) {
 			s.peerLogf("esphome api: %s hello from %q", netConn.RemoteAddr(), conn.said)
 			conn.said = ""
 		}
+		if conn.noted != "" {
+			s.peerLogf("%s", conn.noted)
+			conn.noted = ""
+		}
 	}
 }
 
@@ -490,10 +533,62 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		s.send(conn, msgDisconnectResp, nil)
 		return fmt.Errorf("home assistant asked to disconnect")
 
+	case msgSwitchCommand:
+		var key uint32
+		var on bool
+		// The second message whose payload is read, and read for the same
+		// reason the first is: acting on one that did not parse means acting on
+		// whatever pbWalk scraped out before it stopped.
+		if err := walk("SwitchCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				on = f.num != 0
+			}
+		}); err != nil {
+			return err
+		}
+		if key != s.keyCapture {
+			return nil
+		}
+		s.setCapturedLocked(conn, on)
+		return nil
+
 	case msgSubscribeLogs, msgSubscribeHAStates:
 		return nil
 
 	default:
 		return nil
+	}
+}
+
+// The button is told and the poll is woken; nothing is published from here,
+// because publish takes the server lock and this runs under it. Caller holds mu.
+func (s *Server) setCapturedLocked(conn *conn, on bool) {
+	// No button to hand over, or it is already where it is being asked to go.
+	// This turns away a repeat and nothing else: a peer alternating on and off
+	// changes the state every time and so passes it every time. What bounds
+	// that is the wake gap on the poll below, not this.
+	if s.capture == nil || s.captured() == on {
+		return
+	}
+	s.capture(on)
+	moved := "took the action button"
+	if !on {
+		moved = "handed the action button back to Alexa"
+	}
+	// Which way the button went is the most consequential thing a peer can ask
+	// for here, and the only record separating a button nobody is answering
+	// from one Home Assistant let go of. Carried out of the lock like the hello
+	// line, because the log is a file on /data.
+	conn.noted = fmt.Sprintf("esphome api: %s %s", conn.sock.RemoteAddr(), moved)
+	// The state Home Assistant is waiting for goes out on the next turn of the
+	// sensor poll, which is what publishes this reading at all. That turn is
+	// gated by the wake gap, so a peer toggling as fast as it can send does not
+	// drive a procfs read and a push per message.
+	select {
+	case s.sensorWake <- struct{}{}:
+	default:
 	}
 }

@@ -6,14 +6,22 @@ import (
 	"time"
 )
 
+// Which of the three state messages carries a reading. ESPHome reads fields by
+// number and the numbers are per message, so this picks an encoding rather than
+// labelling one.
+const (
+	kindSensor = iota
+	kindBinary
+	kindSwitch
+)
+
 type reading struct {
 	key   uint32
 	value float32
 	ok    bool
-	// Sent as a binary sensor state rather than a sensor state. A field here
-	// rather than a second published map, because one published state is what
-	// makes a subscriber and the polls agree.
-	binary bool
+	// A field here rather than a published map per kind, because one published
+	// state is what makes a subscriber and the polls agree.
+	kind int
 }
 
 // The minute's readings: an uptime that changes on every read whatever the
@@ -24,6 +32,13 @@ func (s *Server) readTicked() []reading {
 	return []reading{
 		{key: s.keyUptime, value: up, ok: upOK},
 		{key: s.keyWifi, value: signal, ok: signalOK},
+		// Not a reading of the device -- this end owns it -- and it rides this
+		// poll for two things the other paths cannot give it. It is published
+		// before any connection exists, because PollSensors publishes once
+		// before its first wait; and a toggle reaches Home Assistant by waking
+		// this poll, which is what handle can do with the server lock held and
+		// publishing is not.
+		{key: s.keyCapture, value: boolValue(s.captured()), ok: true, kind: kindSwitch},
 	}
 }
 
@@ -74,7 +89,7 @@ func (s *Server) readSound() reading {
 		// which is what the gap guard does, held the entity on across the
 		// failure and reported it as playing again afterwards.
 		s.soundSince = time.Time{}
-		return reading{key: s.keySound, binary: true}
+		return reading{key: s.keySound, kind: kindBinary}
 	}
 	// Only once there is a reading to hang them on. Carrying the withdrawal's
 	// clock forward says sound was seen at a moment nothing was looking, so it
@@ -99,7 +114,7 @@ func (s *Server) readSound() reading {
 			s.soundOn = false
 		}
 	}
-	return reading{key: s.keySound, value: boolValue(s.soundOn), ok: true, binary: true}
+	return reading{key: s.keySound, value: boolValue(s.soundOn), ok: true, kind: kindBinary}
 }
 
 // The heavy tick's readings, taken together because they are published
@@ -116,7 +131,7 @@ func (s *Server) readLive() []reading {
 		{key: s.keyMemory, value: memory, ok: memoryOK},
 		{key: s.keyVolume, value: volumes.Speaker, ok: volumes.SpeakerOK},
 		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
-		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, binary: true},
+		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
 }
 
@@ -140,8 +155,11 @@ func (s *Server) snapshot() []reading {
 func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 	for _, r := range readings {
 		msgType, payload := msgSensorState, floatState(r.key, r.value, !r.ok)
-		if r.binary {
+		switch r.kind {
+		case kindBinary:
 			msgType, payload = msgBinarySensorState, binaryState(r.key, r.value != 0, !r.ok)
+		case kindSwitch:
+			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err
@@ -155,6 +173,15 @@ func binaryState(key uint32, on, missing bool) []byte {
 	p.fixed32(1, key)
 	p.boolean(2, on)
 	p.boolean(3, missing)
+	return p.b
+}
+
+// SwitchStateResponse has no missing_state field: a switch is what this end
+// last set it to, and there is no read of the device to have failed.
+func switchState(key uint32, on bool) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(2, on)
 	return p.b
 }
 
@@ -234,9 +261,24 @@ func (s *Server) PollSensors(every time.Duration) {
 	defer tick.Stop()
 	for {
 		s.publish("sensors", s.readTicked())
+		read := time.Now()
 		select {
 		case <-tick.C:
 		case <-s.sensorWake:
+			// Both things that wake this poll are things a peer asks for:
+			// subscribing, which needs a new connection each time and so is
+			// bounded by the eight slots, and moving the button switch, which
+			// needs neither. Without this wait one peer sets this poll's rate,
+			// buying a procfs read and a push to every subscriber per message.
+			//
+			// Waited out rather than skipped, which is where this differs from
+			// PollLive. There a dropped wake costs half a second, because the
+			// tick comes round again; here the tick is a minute away, so
+			// dropping one leaves the value it was going to correct wrong for
+			// that long.
+			if left := s.wakeGap - time.Since(read); left > 0 {
+				time.Sleep(left)
+			}
 		}
 	}
 }
@@ -272,7 +314,7 @@ func (s *Server) PollLive(every time.Duration) {
 			}
 			watched = listening
 		}
-		if listening && (!woken || time.Since(last) >= s.liveGap) {
+		if listening && (!woken || time.Since(last) >= s.wakeGap) {
 			last = time.Now()
 			// All of them for a subscriber that has just arrived, rather than
 			// making it wait out the counts.

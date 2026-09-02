@@ -1,6 +1,7 @@
 package esphome
 
 const (
+	entityCategoryConfig     = 1
 	entityCategoryDiagnostic = 2
 
 	stateClassMeasurement     = 1
@@ -14,6 +15,11 @@ const (
 	volumeIcon = "mdi:volume-high"
 
 	speakerIcon = "mdi:speaker"
+
+	// A switch renders a toggle control, so unlike a binary sensor its icon is
+	// not what shows the state. That frees it to say which entity this is,
+	// which is the job an icon has among a device's nine.
+	captureIcon = "mdi:gesture-tap-button"
 )
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
@@ -92,6 +98,20 @@ func (s *Server) listEntities(conn *conn) error {
 		if err := s.send(conn, msgListBinarySensor, entity.b); err != nil {
 			return err
 		}
+	}
+
+	// The one entity Home Assistant writes to. Config rather than diagnostic:
+	// it changes what the device does rather than reporting what it is doing.
+	var capture pb
+	capture.str(1, "button_capture")
+	capture.fixed32(2, s.keyCapture)
+	capture.str(3, "Button capture")
+	capture.str(5, captureIcon)
+	capture.boolean(6, false) // assumed_state: this end knows, and is asked
+	capture.boolean(7, false)
+	capture.u32(8, entityCategoryConfig)
+	if err := s.send(conn, msgListSwitch, capture.b); err != nil {
+		return err
 	}
 
 	return s.send(conn, msgListEntitiesDone, nil)

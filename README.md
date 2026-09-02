@@ -6,8 +6,9 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports seven diagnostic entities over that connection, and a press still plays
-its chime on the device itself.
+reports eight diagnostic entities over that connection, takes the action button
+back from Home Assistant and hands it over again, and a press still plays its
+chime on the device itself.
 
 ## Scope
 
@@ -18,7 +19,9 @@ behind you before anything here runs.
 
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
-daemon runs. Mute and the volume keys are untouched.
+daemon holds it. The `Button capture` switch gives it back without stopping
+anything else, so the Dot keeps reporting and keeps its entities while Alexa
+has her button. Mute and the volume keys are untouched throughout.
 
 ## How this differs from EchoMuse, echolocal and EchoGo
 
@@ -220,6 +223,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
+| `switch.<name>_button_capture` | config | whether the action button is the daemon's or Alexa's |
 
 Uptime and signal are read once a minute, and again when Home Assistant
 subscribes. Both volumes, the jack, the temperature and the memory are read
@@ -243,13 +247,28 @@ A bluetooth speaker is a third route and is not reported at all. Pair one and
 Android tracks its level separately again, so neither of these readings is what
 you are hearing and `audio_jack` does not say so.
 
+`button_capture` is the one entity Home Assistant writes to. Turn it off and the
+action button is Alexa's again -- press-to-talk is measured, and timers and
+setup mode follow the same key path -- while the daemon keeps running and keeps
+reporting. Turn it back on and the button
+is the daemon's, with no reboot and no reinstall. A press arriving mid-toggle
+belongs to whichever side owned the button when it went down, so nothing is ever
+half-delivered.
+
+The daemon starts with the button captured, and the switch is not remembered
+across a restart: a Dot that reboots comes back holding its button whatever the
+switch said before. Home Assistant will restore it if you ask it to, with an
+automation on `homeassistant_start` or on the device becoming available.
+
 `audio_jack` is on whenever the socket is occupied and nothing more. The
 detection is electrical and stops at the contacts: a bare cable with nothing on
 the far end reads the same as headphones, and unplugging the far end of a
 connected cable is invisible to it.
 
-All seven are read-only, and they are the connection proved end to end. The
-button still chimes on the device, and Home Assistant is not told about it.
+The eight readings are read-only and `button_capture` is not, and together they
+are the connection proved end to end in both directions. What is still missing
+is the press itself: it chimes on the device, and Home Assistant is not told
+about it.
 
 ### Encryption
 
@@ -296,6 +315,8 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on p
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |
 | nothing is spoken | the daemon log. `Error: Not found; no service started.` means the Alexa stack is still suppressed: run `deploy/restore-amazon.sh` and reboot |
+| the button does nothing, and the device is otherwise online | the `Button capture` switch, then the daemon log, which names the address that turned it off |
+| the button rings Alexa rather than chiming | the same switch: it is off, which is what off means |
 
 ## How it works
 

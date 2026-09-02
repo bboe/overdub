@@ -17,7 +17,9 @@ const (
 
 	synReport = 0x00
 
-	// EV_KEY values. 2 is autorepeat, which the read loop ignores.
+	// EV_KEY values. 2 is autorepeat, which the read loop drops only for a
+	// press it is consuming: every other key's repeats are re-emitted, and so
+	// are the consumed key's while it is being passed through.
 	KeyRelease = 0
 	KeyPress   = 1
 

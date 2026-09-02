@@ -84,7 +84,7 @@ func serve(flags config) error {
 	// Off the read loop, because the button is not the network's to wait for: a
 	// Dot with no wlan0 keeps its button rather than restarting every five
 	// seconds, and mute passes through while this is still waiting.
-	go serveAPI(flags.Name, psk)
+	go serveAPI(flags.Name, psk, i)
 
 	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
 		inputNode, actionKey, uinputName)
@@ -104,7 +104,7 @@ func serve(flags config) error {
 	})
 }
 
-func serveAPI(name string, psk []byte) {
+func serveAPI(name string, psk []byte, i *button.Interceptor) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		// Kept waiting rather than given up on: nothing restarts a daemon that
@@ -119,6 +119,10 @@ func serveAPI(name string, psk []byte) {
 		log.Printf("%s appeared", wifiIface)
 	}
 	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac, psk)
+	// The button owns whether it is captured; the server reads it and asks for
+	// it to change. Wired here rather than passed to NewServer because a server
+	// is testable without a button and a Dot never runs without one.
+	server.UseButton(i.Captured, i.SetCaptured)
 
 	responder := &esphome.Responder{Instance: name, MAC: mac, Iface: wifiIface, Port: apiPort}
 	advertised.Store(responder)

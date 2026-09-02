@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bboe/overdub/internal/evdev"
@@ -18,6 +19,13 @@ type Interceptor struct {
 	clone   *evdev.Uinput
 	consume uint16
 	once    sync.Once
+
+	// Whether the consumed key is being handed to the clone rather than acted
+	// on. Stated this way round so that the zero value is a captured button:
+	// a construction path that never sets it keeps the key, which is what this
+	// daemon is for, rather than quietly giving it back. Read by the read loop
+	// and written from whichever goroutine calls SetCaptured.
+	passing atomic.Bool
 }
 
 func Open(path string, consume uint16, uiName string, wait time.Duration) (*Interceptor, error) {
@@ -71,6 +79,17 @@ func Open(path string, consume uint16, uiName string, wait time.Duration) (*Inte
 	return &Interceptor{node: file, clone: uinput, consume: consume}, nil
 }
 
+func (i *Interceptor) Captured() bool { return !i.passing.Load() }
+
+// Hands the key to Alexa and takes it back. The grab is untouched either way --
+// it is what stops the real node reaching EventHub at all, so releasing it
+// would leave the clone echoing a live original and land every key twice.
+// Letting the key go means re-emitting it through the clone instead.
+//
+// It takes effect at the next press rather than at the next event, so a toggle
+// arriving mid-press cannot split one between the two paths.
+func (i *Interceptor) SetCaptured(on bool) { i.passing.Store(!on) }
+
 // The caller's signal handler and its defer can both reach this, so it has to
 // be idempotent. A second pass would be inert rather than harmful -- an
 // os.File remembers that it is closed -- but once is what the caller expects.
@@ -88,6 +107,7 @@ func (i *Interceptor) Run(onPress func(held time.Duration)) error {
 
 func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onPress func(held time.Duration)) error {
 	var pressedAt time.Time
+	consuming := false
 	buf := make([]byte, evdev.EventSize)
 	for {
 		if _, err := io.ReadFull(r, buf); err != nil {
@@ -98,15 +118,32 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onPress
 		if event.Type == evdev.EvKey && event.Code == i.consume {
 			switch event.Value {
 			case evdev.KeyPress:
-				pressedAt = time.Now()
+				// Latched here and held to the release, so a toggle inside one
+				// press cannot send its halves different ways: a release
+				// Android was never given a press for, or a press it is never
+				// told ended.
+				consuming, pressedAt = i.Captured(), time.Now()
 			case evdev.KeyRelease:
+				// No press of ours: the key was down before the grab took it,
+				// so neither path has a whole event to act on.
 				if pressedAt.IsZero() {
 					continue
 				}
-				onPress(time.Since(pressedAt))
+				held := time.Since(pressedAt)
 				pressedAt = time.Time{}
+				if consuming {
+					onPress(held)
+				}
+			default:
+				// Autorepeat, which belongs to the press in flight if there is
+				// one and to nothing at all if there is not.
+				if pressedAt.IsZero() {
+					continue
+				}
 			}
-			continue
+			if consuming {
+				continue
+			}
 		}
 
 		if event.Type == evdev.EvKey {

@@ -33,7 +33,8 @@ instead.
 main.go, serve.go  the flag, the constants, and the wiring
 internal/alexa     speech through Alexa: the intent, the clip, and the server
                    that serves it to her
-internal/button    the exclusive grab, the clone, and the read loop
+internal/button    the exclusive grab, the clone, the read loop, and whether
+                   the action key is ours or Alexa's
 internal/device    the Dot itself: its network, and the firewall rule
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
                    the mDNS responder Home Assistant finds the Dot by

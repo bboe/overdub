@@ -640,7 +640,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 		case 1:
 			key = uint32(f.num)
 		case 2:
-			if msgType == msgBinarySensorState {
+			if msgType == msgBinarySensorState || msgType == msgSwitchState {
 				if f.num != 0 {
 					value = 1
 				}
@@ -660,7 +660,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 		t.Errorf("the key went out as wire type %d, want fixed32 (%d)", seen[1], wireFixed32)
 	}
 	want := wireFixed32
-	if msgType == msgBinarySensorState {
+	if msgType == msgBinarySensorState || msgType == msgSwitchState {
 		want = wireVarint
 	}
 	if seen[2] != want {
@@ -691,10 +691,12 @@ func stubSensors(s *Server) map[uint32]float32 {
 	}
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
+	// Not a reader of the device, so it is left at the shipped default rather
+	// than stubbed: what the tests below count is reads, and this is not one.
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0,
+		s.keySound: 0, s.keyCapture: 1,
 	}
 }
 
@@ -703,7 +705,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 // the readers, so anything that asks the server how many sensors it has would
 // be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
 // honest.
-const sensorCount = 8
+const sensorCount = 9
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -738,9 +740,9 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a reading did not arrive: %v", err)
 		}
-		if msgType != msgSensorState && msgType != msgBinarySensorState {
-			t.Fatalf("got message type %d, want a sensor (%d) or binary sensor (%d) state",
-				msgType, msgSensorState, msgBinarySensorState)
+		if msgType != msgSensorState && msgType != msgBinarySensorState && msgType != msgSwitchState {
+			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d) or switch (%d) state",
+				msgType, msgSensorState, msgBinarySensorState, msgSwitchState)
 		}
 		key, value, missing := sensorReading(t, msgType, payload)
 		expected, known := want[key]
@@ -870,7 +872,9 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	}
 
 	// Every reading moves, so anything the tick carries arrives and anything it
-	// does not carry is visibly absent.
+	// does not carry is visibly absent. button_capture is on this tick too and
+	// deliberately stands still: it is not a reading of the device, and what
+	// this is measuring is which reads the tick repeats.
 	s.uptime = func() (float32, bool) { return 5678, true }
 	s.wifi = func() (float32, bool) { return -70, true }
 	s.volumes = speakerReads(func() (float32, bool) { return 90, true })
@@ -1589,6 +1593,10 @@ func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
+	// The wake this is about is gated by the same gap PollLive's is, so a
+	// subscribe arriving a moment after the poll's own first read would be
+	// skipped at the shipped second.
+	s.wakeGap = 10 * time.Millisecond
 	want := stubSensors(s)
 
 	// The reading moves, not the function: PollSensors calls this from its own
@@ -1849,7 +1857,18 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 			psk := testPSK(t)
 			s := testServer(t, psk)
 			want := stubSensors(s)
-			binary := map[uint32]string{s.keyJackOn: "audio_jack", s.keySound: "speaker_playing"}
+			// Everything not named here is a plain sensor. Home Assistant
+			// files a state by the key inside it and reads that key's fields
+			// by number, so one sent under the wrong message is read as
+			// whatever those numbers mean there.
+			elsewhere := map[uint32]struct {
+				name    string
+				msgType int
+			}{
+				s.keyJackOn:  {"audio_jack", msgBinarySensorState},
+				s.keySound:   {"speaker_playing", msgBinarySensorState},
+				s.keyCapture: {"button_capture", msgSwitchState},
+			}
 
 			s.sound = tt.sound
 			pollAll(s)
@@ -1869,11 +1888,11 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				}
 				key, _, _ := sensorReading(t, msgType, payload)
 				seen[key] = true
-				if name, isBinary := binary[key]; isBinary {
-					if msgType != msgBinarySensorState {
-						t.Errorf("%s went out as message %d, want BinarySensorStateResponse "+
-							"(%d): Home Assistant listed it as a binary sensor and will not "+
-							"read a float", name, msgType, msgBinarySensorState)
+				if want, special := elsewhere[key]; special {
+					if msgType != want.msgType {
+						t.Errorf("%s went out as message %d, want %d: that is not the "+
+							"message Home Assistant listed it under, and it will not read "+
+							"the fields it finds", want.name, msgType, want.msgType)
 					}
 					continue
 				}
@@ -1882,9 +1901,9 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 						"SensorStateResponse (%d)", key, msgType, msgSensorState)
 				}
 			}
-			for key, name := range binary {
+			for key, want := range elsewhere {
 				if !seen[key] {
-					t.Errorf("%s never arrived at all", name)
+					t.Errorf("%s never arrived at all", want.name)
 				}
 			}
 		})
@@ -2037,7 +2056,7 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 
 	// A tick far away, so a read here is one a connection asked for; and a gap
 	// short enough that it is the idle check, not the gap, deciding.
-	s.liveGap = 10 * time.Millisecond
+	s.wakeGap = 10 * time.Millisecond
 	go s.PollLive(time.Hour)
 	time.Sleep(100 * time.Millisecond)
 
@@ -2100,7 +2119,7 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 	})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return reads }
 
-	s.liveGap = 2 * time.Second
+	s.wakeGap = 2 * time.Second
 	go s.PollLive(time.Hour)
 	time.Sleep(100 * time.Millisecond)
 
@@ -2142,7 +2161,7 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 
 	if got := count() - before; got != first {
 		t.Errorf("three idle-to-active cycles inside a %v gap drew %d readings, want the %d of the first",
-			s.liveGap, got, first)
+			s.wakeGap, got, first)
 	}
 }
 
@@ -2360,7 +2379,7 @@ func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
 		if r.ok {
 			t.Error("a jack that could not be read was reported as a state")
 		}
-		if !r.binary {
+		if r.kind != kindBinary {
 			t.Error("the jack went out as a sensor rather than a binary sensor")
 		}
 		return
