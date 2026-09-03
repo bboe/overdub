@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -16,8 +18,12 @@ import (
 )
 
 const (
-	inputNode  = "/dev/input/event1"
-	actionKey  = 138
+	inputNode = "/dev/input/event1"
+	actionKey = 138
+	// The microphone mute, on the same node as the action button. Alexa answers
+	// it, so it ships in monitor: taking it by default would leave a Dot that
+	// cannot be muted by the button that says mute on it.
+	muteKey    = 113
 	uinputName = "mtk-kpd"
 	wifiIface  = device.WifiInterface
 	apiPort    = 6053
@@ -73,7 +79,7 @@ func serve(flags config) error {
 		return err
 	}
 
-	i, err := button.Open(inputNode, actionKey, uinputName, nodeWait)
+	i, err := button.Open(inputNode, uinputName, nodeWait, buttonStart())
 	if err != nil {
 		return err
 	}
@@ -104,44 +110,60 @@ func serve(flags config) error {
 	// seconds, and mute passes through while this is still waiting.
 	go serveAPI(flags.Name, psk, i)
 
-	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
-		inputNode, actionKey, uinputName)
+	// What the daemon is holding, and in which mode, because the modes move
+	// afterwards and this is the only startup record of where they began.
+	var held []string
+	for code, b := range buttons {
+		held = append(held, fmt.Sprintf("%d %s (%v)", code, b.objectID, b.start))
+	}
+	sort.Strings(held)
+	log.Printf("watching %s: %s, passing the rest to %q",
+		inputNode, strings.Join(held, ", "), uinputName)
 
-	// Called from whichever goroutine recognised the gesture. MultiPress orders
-	// them, so two cannot reach Home Assistant the wrong way round.
+	// One chain per button, because a run belongs to the key it was pressed on:
+	// sharing one would make a press of each look like a double press of
+	// either. Called from whichever goroutine recognised the gesture, and
+	// MultiPress orders them per chain, so two gestures of one button cannot
+	// reach Home Assistant the wrong way round.
 	//
 	// The line does not say which mode the press was in, and the word is not
 	// "intercepted": monitor reports a press it also handed to Alexa. Which
 	// mode is in force is logged where it changes, which is once rather than
 	// once a press.
-	chain := button.NewMultiPress(multiGap, holdTime, func(g button.Gesture, count int, holdFor time.Duration) {
-		event, ok := pressEvent(g)
-		if !ok {
-			log.Printf("action button %d: gesture %v has no esphome name; not reported", actionKey, g)
-			return
-		}
-		switch {
-		case holdFor > 0:
-			log.Printf("action button %d: %s (held %v)", actionKey, event, holdFor.Round(time.Millisecond))
-		case count > 0:
-			log.Printf("action button %d: %s (%d)", actionKey, event, count)
-		default:
-			log.Printf("action button %d: %s", actionKey, event)
-		}
-		// Sent from here rather than through a queue: FirePress holds the
-		// server lock only long enough to queue a frame per subscriber. A queue
-		// that dropped what it could not take would lose presses to report.
-		if server := api.Load(); server != nil {
-			server.FirePress(event, count, holdFor)
-		}
-	})
+	chains := map[uint16]*button.MultiPress{}
+	for code, b := range buttons {
+		objectID := b.objectID
+		chains[code] = button.NewMultiPress(multiGap, holdTime,
+			func(g button.Gesture, count int, holdFor time.Duration) {
+				event, ok := pressEvent(g)
+				if !ok {
+					log.Printf("%s %d: gesture %v has no esphome name; not reported", objectID, code, g)
+					return
+				}
+				switch {
+				case holdFor > 0:
+					log.Printf("%s %d: %s (held %v)", objectID, code, event, holdFor.Round(time.Millisecond))
+				case count > 0:
+					log.Printf("%s %d: %s (%d)", objectID, code, event, count)
+				default:
+					log.Printf("%s %d: %s", objectID, code, event)
+				}
+				// Sent from here rather than through a queue: FirePress holds
+				// the server lock only long enough to queue a frame per
+				// subscriber. A queue that dropped what it could not take would
+				// lose presses to report.
+				if server := api.Load(); server != nil {
+					server.FirePress(objectID, event, count, holdFor)
+				}
+			})
+	}
 
 	// The chime is at the key-down, before anything knows what the run will be,
 	// so it sounds once per press rather than once per gesture.
 	return i.Run(
-		func(mode button.Mode) {
-			chain.Down()
-			if chime == nil || !chimes(mode) {
+		func(code uint16, mode button.Mode) {
+			chains[code].Down()
+			if chime == nil || !chimes(code, mode) {
 				return
 			}
 			// Off the read loop, which mute passes through. Play only queues the
@@ -154,13 +176,45 @@ func serve(flags config) error {
 				}
 			}()
 		},
-		func(_ button.Mode, held time.Duration) { chain.Up(held) })
+		func(code uint16, _ button.Mode, held time.Duration) { chains[code].Up(held) })
 }
 
-// Only a key the daemon is keeping gets a chime. In monitor mode Alexa answers
-// the same press herself, and two acknowledgements for one press is worse than
-// none; in pass through there is nothing of ours to acknowledge.
-func chimes(mode button.Mode) bool { return mode == button.ModeIntercept }
+// The keys this daemon acts on: what each reports as, and what it starts in.
+// One map rather than two, so a key cannot be watched without an entity to
+// report it, or given an entity nothing watches. The object ids are
+// internal/esphome's, and a name here it does not have reports nothing.
+var buttons = map[uint16]struct {
+	objectID string
+	start    button.Mode
+	// Whether an intercepted press of this key sounds the chime. Only the
+	// action button does. The chime reads as an acknowledgement, and on a key
+	// whose job is to cut the microphone that is the one thing it must not
+	// say: an intercepted mute leaves the mic live and the ring dark, so a
+	// sound there tells somebody they are muted when they are not. Silence is
+	// the honest signal -- the absence of Alexa's own tone is what says the
+	// key did not do what is written on it.
+	chime bool
+}{
+	actionKey: {"action_button", button.ModeIntercept, true},
+	muteKey:   {"mute_button", button.ModeMonitor, false},
+}
+
+func buttonStart() map[uint16]button.Mode {
+	out := map[uint16]button.Mode{}
+	for code, b := range buttons {
+		out[code] = b.start
+	}
+	return out
+}
+
+// Whether a press sounds the chime. Two things have to hold. The daemon must be
+// keeping the key: in monitor Alexa answers the same press herself and two
+// acknowledgements for one press is worse than none, and in pass through there
+// is nothing of ours to acknowledge. And the key must be one an acknowledgement
+// is true of, which is the action button and not the mute -- see buttons.
+func chimes(code uint16, mode button.Mode) bool {
+	return mode == button.ModeIntercept && buttons[code].chime
+}
 
 // The modes the button has, under the names Home Assistant is offered. Two
 // functions rather than one map so that a mode with no name fails to compile
@@ -215,13 +269,15 @@ func serveAPI(name string, psk []byte, i *button.Interceptor) {
 	// The names cross here rather than in either package, the way pressEvent
 	// does. Wired here rather than passed to NewServer because a server is
 	// testable without a button and a Dot never runs without one.
-	server.UseButton(
-		func() string { return i.Mode().String() },
-		func(choice string) {
-			if m, ok := parseButtonMode(choice); ok {
-				i.SetMode(m)
-			}
-		})
+	for code, b := range buttons {
+		server.UseButton(b.objectID,
+			func() string { return i.Mode(code).String() },
+			func(choice string) {
+				if m, ok := parseButtonMode(choice); ok {
+					i.SetMode(code, m)
+				}
+			})
+	}
 	// Found rather than handed over: the read loop has been running since before
 	// there was an address to build this server with.
 	api.Store(server)

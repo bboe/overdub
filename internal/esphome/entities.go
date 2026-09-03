@@ -71,22 +71,24 @@ func (s *Server) deviceInfo() []byte {
 }
 
 func (s *Server) listEntities(conn *conn) error {
-	// The button itself, and the only entity here that is not a reading or a
-	// control: it reports a moment rather than a value, so it has no state and
-	// no category. Home Assistant draws an event entity from its device_class,
-	// so this carries no icon for the reason the jack does not.
-	var action pb
-	action.str(1, "action_button")
-	action.fixed32(2, s.keyAction)
-	action.str(3, "Action button")
-	action.boolean(6, false) // disabled_by_default
-	action.u32(7, entityCategoryNone)
-	action.str(8, "button") // device_class
-	for _, eventType := range actionEvents {
-		action.str(9, string(eventType))
-	}
-	if err := s.send(conn, msgListEvent, action.b); err != nil {
-		return err
+	// The buttons themselves, and the only entities here that are not readings
+	// or controls: each reports a moment rather than a value, so it has no
+	// state and no category. Home Assistant draws an event entity from its
+	// device_class, so it carries no icon, for the reason the jack does not.
+	for _, b := range s.buttons {
+		var action pb
+		action.str(1, b.objectID)
+		action.fixed32(2, b.keyEvent)
+		action.str(3, b.name)
+		action.boolean(6, false) // disabled_by_default
+		action.u32(7, entityCategoryNone)
+		action.str(8, "button") // device_class
+		for _, eventType := range actionEvents {
+			action.str(9, string(eventType))
+		}
+		if err := s.send(conn, msgListEvent, action.b); err != nil {
+			return err
+		}
 	}
 
 	for _, sensor := range []struct {
@@ -149,28 +151,29 @@ func (s *Server) listEntities(conn *conn) error {
 		}
 	}
 
-	// The one entity Home Assistant writes to. Config rather than diagnostic:
-	// it changes what the device does rather than reporting what it is doing.
-	// Its field numbers are a select's own -- options is 6, where 6 on a switch
-	// is assumed_state and on a sensor is the unit.
-	var mode pb
-	mode.str(1, "action_button_mode")
-	mode.fixed32(2, s.keyMode)
-	// "Action button mode" rather than "Action button": Home Assistant sets
+	// The only entities Home Assistant writes to. Config rather than
+	// diagnostic: they change what the device does rather than reporting what
+	// it is doing. Their field numbers are a select's own -- options is 6,
+	// where 6 on a switch is assumed_state and on a sensor is the unit.
+	//
+	// Each is named for its button with "mode" on the end. Home Assistant sets
 	// has_entity_name and builds the entity id from the device name and this,
-	// so the bare name would show twice on the device page -- once here and
-	// once on the event entity -- and read as two controls for one button. It
-	// also keeps object_id equal to the slug of the name, as every other entity
-	// here does.
-	mode.str(3, "Action button mode")
-	mode.str(5, buttonModeIcon)
-	for _, option := range buttonModes {
-		mode.str(6, option)
-	}
-	mode.boolean(7, false) // disabled_by_default
-	mode.u32(8, entityCategoryConfig)
-	if err := s.send(conn, msgListSelect, mode.b); err != nil {
-		return err
+	// so the bare name would put two entities of that name on the device page:
+	// this one and the event entity it belongs to.
+	for _, b := range s.buttons {
+		var mode pb
+		mode.str(1, b.objectID+"_mode")
+		mode.fixed32(2, b.keyMode)
+		mode.str(3, b.name+" mode")
+		mode.str(5, buttonModeIcon)
+		for _, option := range buttonModes {
+			mode.str(6, option)
+		}
+		mode.boolean(7, false) // disabled_by_default
+		mode.u32(8, entityCategoryConfig)
+		if err := s.send(conn, msgListSelect, mode.b); err != nil {
+			return err
+		}
 	}
 
 	return s.send(conn, msgListEntitiesDone, nil)

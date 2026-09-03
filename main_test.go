@@ -340,8 +340,19 @@ func TestOnlyAnInterceptedPressChimes(t *testing.T) {
 		{button.ModeMonitor, false},
 		{button.ModePassThrough, false},
 	} {
-		if got := chimes(tt.mode); got != tt.want {
-			t.Errorf("a press in %v chimes=%v, want %v", tt.mode, got, tt.want)
+		if got := chimes(138, tt.mode); got != tt.want {
+			t.Errorf("an action-button press in %v chimes=%v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// The mute key never chimes, in any mode. Intercepting it leaves the microphone
+// live and the ring dark, so an acknowledgement there tells somebody they are
+// muted when they are not -- the one thing a sound on that key must not say.
+func TestAnInterceptedMuteIsSilent(t *testing.T) {
+	for _, mode := range []button.Mode{button.ModeIntercept, button.ModeMonitor, button.ModePassThrough} {
+		if chimes(113, mode) {
+			t.Errorf("a mute press in %v chimes, which sounds like the mic was cut", mode)
 		}
 	}
 }
@@ -362,5 +373,73 @@ func TestEveryOfferedModeParsesBackToAMode(t *testing.T) {
 	}
 	if _, ok := parseButtonMode("captured"); ok {
 		t.Error("a name the button has no mode for parsed anyway")
+	}
+}
+
+// The keys the daemon watches and the entities that report them are one map, so
+// they cannot drift. What can still drift is this map against the entities
+// internal/esphome actually builds: a name here it does not have is a key whose
+// presses reach nobody, and a button there with no key here is an entity that
+// never fires. Both are silent.
+func TestEveryWatchedKeyHasAnEntityAndEveryEntityAKey(t *testing.T) {
+	s := esphome.NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+
+	// Spelled out rather than read from the map under test.
+	for code, want := range map[uint16]string{138: "action_button", 113: "mute_button"} {
+		b, ok := buttons[code]
+		if !ok {
+			t.Errorf("keycode %d is not watched, so %s reports nothing", code, want)
+			continue
+		}
+		if b.objectID != want {
+			t.Errorf("keycode %d reports as %q, want %q", code, b.objectID, want)
+		}
+	}
+	if len(buttons) != 2 {
+		t.Errorf("the daemon watches %d keys, want 2", len(buttons))
+	}
+	// Both directions, which is what the name promises. A key with no entity
+	// reaches nobody; an entity with no key never fires. Both are silent.
+	for code, b := range buttons {
+		if !s.HasButton(b.objectID) {
+			t.Errorf("keycode %d reports as %q, which internal/esphome has no entity for",
+				code, b.objectID)
+		}
+	}
+	for _, objectID := range s.Buttons() {
+		watched := false
+		for _, b := range buttons {
+			if b.objectID == objectID {
+				watched = true
+			}
+		}
+		if !watched {
+			t.Errorf("internal/esphome lists %q, which no keycode here reports", objectID)
+		}
+	}
+	// Mute ships in monitor: intercepting it by default leaves a Dot that
+	// cannot be muted by the button that says mute on it.
+	if got := buttons[113].start; got != button.ModeMonitor {
+		t.Errorf("the mute key ships in %v, want %v", got, button.ModeMonitor)
+	}
+	if got := buttons[138].start; got != button.ModeIntercept {
+		t.Errorf("the action key ships in %v, want %v", got, button.ModeIntercept)
+	}
+}
+
+// Every button fires one service name, so an automation filtering on the device
+// alone runs for all of them. The blueprint is exactly such an automation, and
+// nothing compiles it: without the discriminator in its trigger a mute press
+// runs the single-press action.
+func TestTheBlueprintFiltersToOneButton(t *testing.T) {
+	body, err := os.ReadFile("ha/dot-action-button.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "button: action_button") {
+		t.Error("the blueprint does not filter on a button, so every button on the Dot runs it")
+	}
+	if !strings.Contains(string(body), "trigger.event.data.event_type") {
+		t.Error("the blueprint no longer reads event_type")
 	}
 }

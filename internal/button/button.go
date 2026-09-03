@@ -15,14 +15,27 @@ import (
 )
 
 type Interceptor struct {
-	node    *os.File
-	clone   *evdev.Uinput
-	consume uint16
-	once    sync.Once
+	node  *os.File
+	clone *evdev.Uinput
+	once  sync.Once
 
-	// What the daemon does with the consumed key. Read by the read loop and
-	// written from whichever goroutine calls SetMode.
+	// The keys this end acts on, by keycode. Every other key the node carries
+	// is re-emitted untouched, which is what the clone is for. Written once by
+	// Open and only read afterwards, so the read loop needs no lock to find a
+	// key -- and each watch carries its own mode, so two keys can be in
+	// different modes at once.
+	watched map[uint16]*watch
+}
+
+type watch struct {
+	// Written from whichever goroutine calls SetMode, read by the read loop.
 	mode atomic.Int32
+
+	// The read loop's alone. A key is latched at its down and held to its up,
+	// and each key has its own pair because one can be held while another is
+	// pressed.
+	pressedAt time.Time
+	latched   Mode
 }
 
 // What the daemon does with a key it was given.
@@ -57,7 +70,16 @@ func (m Mode) String() string {
 	return ""
 }
 
-func Open(path string, consume uint16, uiName string, wait time.Duration) (*Interceptor, error) {
+// Opens the node, grabs it, and stands a clone in its place. start says which
+// keycodes this end acts on and what it does with each: a key absent from it is
+// re-emitted like any other. The modes are given here rather than set
+// afterwards because the caller is the only thing that knows which key is which,
+// and a key that spent its first moments in the wrong mode would be one Alexa
+// answered or did not.
+func Open(path, uiName string, wait time.Duration, start map[uint16]Mode) (*Interceptor, error) {
+	if len(start) == 0 {
+		return nil, fmt.Errorf("%s: no keycodes to act on", path)
+	}
 	if err := waitForNode(path, wait); err != nil {
 		return nil, err
 	}
@@ -105,10 +127,24 @@ func Open(path string, consume uint16, uiName string, wait time.Duration) (*Inte
 	}
 
 	started = true
-	return &Interceptor{node: file, clone: uinput, consume: consume}, nil
+	i := &Interceptor{node: file, clone: uinput, watched: map[uint16]*watch{}}
+	for code, mode := range start {
+		w := &watch{}
+		w.mode.Store(int32(mode))
+		i.watched[code] = w
+	}
+	return i, nil
 }
 
-func (i *Interceptor) Mode() Mode { return Mode(i.mode.Load()) }
+// The mode of a key this end acts on. A key it does not is ModePassThrough,
+// which is what the clone does with it anyway.
+func (i *Interceptor) Mode(code uint16) Mode {
+	w, ok := i.watched[code]
+	if !ok {
+		return ModePassThrough
+	}
+	return Mode(w.mode.Load())
+}
 
 // The grab is untouched by any of the modes -- it is what stops the real node
 // reaching EventHub at all, so releasing it would leave the clone echoing a
@@ -117,7 +153,11 @@ func (i *Interceptor) Mode() Mode { return Mode(i.mode.Load()) }
 //
 // It takes effect at the next press rather than at the next event, so a change
 // arriving mid-press cannot split one between two paths.
-func (i *Interceptor) SetMode(m Mode) { i.mode.Store(int32(m)) }
+func (i *Interceptor) SetMode(code uint16, m Mode) {
+	if w, ok := i.watched[code]; ok {
+		w.mode.Store(int32(m))
+	}
+}
 
 // The caller's signal handler and its defer can both reach this, so it has to
 // be idempotent. A second pass would be inert rather than harmful -- an
@@ -130,24 +170,30 @@ func (i *Interceptor) Close() {
 	})
 }
 
-// The key is reported twice, because the two halves answer different questions.
+// A key is reported twice, because the two halves answer different questions.
 // onDown is the acknowledgement and has to sound before anybody knows what the
-// press will be; onPress carries how long it lasted. Neither runs in
+// press will be; onPress carries how long it lasted. Both are given the keycode
+// and the mode latched at its down, so one caller can serve several keys and
+// tell a key it owns from one Alexa is answering too. Neither runs in
 // ModePassThrough, where reporting nothing is the whole of what the mode means.
-// Both are given the mode latched at the key-down, so the caller can tell a key
-// it owns from one Alexa is answering too.
 //
-// Both run on the read loop, which mute passes through, so neither may block for
-// long. onPress may wait: MultiPress orders its reports under one lock, and a
-// timer goroutine can hold it across the caller's own callback. That callback
-// therefore bounds how long mute can be delayed, whichever goroutine runs it.
-func (i *Interceptor) Run(onDown func(Mode), onPress func(Mode, time.Duration)) error {
+// Both run on the read loop, which every key passes through, so neither may
+// block for long. onPress may wait: MultiPress orders its reports under one
+// lock, and a timer goroutine can hold it across the caller's own callback.
+// That callback therefore bounds how long every other key can be delayed,
+// whichever goroutine runs it.
+//
+// The report happens before the re-emission, so on a monitored key the wait
+// above is spent before Android sees the release rather than after. Emitting
+// first would fix that and costs a second pass over the event kinds in the
+// hottest loop here; the wait is a log write and a lock this end holds
+// briefly, so it is measured in milliseconds and this is left as it is
+// deliberately rather than by oversight.
+func (i *Interceptor) Run(onDown func(uint16, Mode), onPress func(uint16, Mode, time.Duration)) error {
 	return i.route(i.node, i.clone.Emit, onDown, onPress)
 }
 
-func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(Mode), onPress func(Mode, time.Duration)) error {
-	var pressedAt time.Time
-	mode := ModePassThrough
+func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(uint16, Mode), onPress func(uint16, Mode, time.Duration)) error {
 	buf := make([]byte, evdev.EventSize)
 	for {
 		if _, err := io.ReadFull(r, buf); err != nil {
@@ -155,38 +201,48 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown 
 		}
 		event := evdev.Unmarshal(buf)
 
-		if event.Type == evdev.EvKey && event.Code == i.consume {
+		if w, ours := i.watched[event.Code]; ours && event.Type == evdev.EvKey {
 			switch event.Value {
 			case evdev.KeyPress:
 				// Latched here and held to the release, so a change inside one
 				// press cannot send its halves different ways: a release
 				// Android was never given a press for, or a press it is never
 				// told ended.
-				mode, pressedAt = i.Mode(), time.Now()
-				if mode != ModePassThrough {
-					onDown(mode)
+				w.latched, w.pressedAt = i.Mode(event.Code), time.Now()
+				if w.latched != ModePassThrough {
+					onDown(event.Code, w.latched)
 				}
 			case evdev.KeyRelease:
 				// No press of ours: the key was down before the grab took it,
-				// so neither path has a whole event to act on.
-				if pressedAt.IsZero() {
-					continue
+				// so there is nothing to report. Android took that key-down
+				// from the real node and no release of ours reaches it, since
+				// KeyDowns are tracked per device -- but the app layer does not
+				// look at the device, so a key Android is allowed to see still
+				// gets its release. The latch is stale here, since no press set
+				// it, so the live mode decides.
+				if w.pressedAt.IsZero() {
+					w.latched = i.Mode(event.Code)
+					break
 				}
-				held := time.Since(pressedAt)
-				pressedAt = time.Time{}
-				if mode != ModePassThrough {
-					onPress(mode, held)
+				held := time.Since(w.pressedAt)
+				w.pressedAt = time.Time{}
+				if w.latched != ModePassThrough {
+					onPress(event.Code, w.latched, held)
 				}
 			default:
 				// Autorepeat, which belongs to the press in flight if there is
-				// one and to nothing at all if there is not.
-				if pressedAt.IsZero() {
+				// one. One with no press is dropped rather than passed on like
+				// the release above: EventHub reads any non-zero value as a
+				// down, so emitting it puts a fresh key-down on the clone, and
+				// a mode change before the release would then swallow the only
+				// thing that could end it.
+				if w.pressedAt.IsZero() {
 					continue
 				}
 			}
 			// Only intercept keeps the key. The other two hand it to the clone
 			// like every other key, which is the route mute has always taken.
-			if mode == ModeIntercept {
+			if w.latched == ModeIntercept {
 				continue
 			}
 		}

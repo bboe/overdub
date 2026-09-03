@@ -63,7 +63,15 @@ func TestWaitForNodeReturnsOnceTheNodeAppears(t *testing.T) {
 
 // Most of these tests are about which key reaches which end, and the chime the
 // key-down callback stands for is neither.
-func noDown(Mode) {}
+func noDown(uint16, Mode) {}
+
+// An Interceptor watching one key in one mode, which is what most of these
+// tests need. Built by hand rather than through Open, which wants a real node.
+func watching(code uint16, m Mode) *Interceptor {
+	w := &watch{}
+	w.mode.Store(int32(m))
+	return &Interceptor{watched: map[uint16]*watch{code: w}}
+}
 
 // The mode a latch test flips to. Any other mode will do: what is under test is
 // that the halves of one press do not take different routes, not which route.
@@ -95,7 +103,7 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	var got []emitted
 	var held []time.Duration
 	var order []string
-	i := &Interceptor{consume: testKey}
+	i := watching(testKey, ModeIntercept)
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
@@ -105,8 +113,8 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func(Mode) { order = append(order, "down") },
-		func(_ Mode, h time.Duration) {
+	}, func(uint16, Mode) { order = append(order, "down") },
+		func(_ uint16, _ Mode, h time.Duration) {
 			order = append(order, "press")
 			held = append(held, h)
 		})
@@ -134,13 +142,13 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 func TestRouteIgnoresAReleaseWithNoPress(t *testing.T) {
 	var got []emitted
 	presses := 0
-	i := &Interceptor{consume: testKey}
+	i := watching(testKey, ModeIntercept)
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, noDown, func(Mode, time.Duration) { presses++ })
+	}, noDown, func(uint16, Mode, time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -156,14 +164,14 @@ func TestRouteIgnoresAReleaseWithNoPress(t *testing.T) {
 func TestRouteStopsOnAFailedEmit(t *testing.T) {
 	var got []emitted
 	boom := errors.New("no such device")
-	i := &Interceptor{consume: testKey}
+	i := watching(testKey, ModeIntercept)
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: 114, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: 115, Value: 1},
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return boom
-	}, noDown, func(Mode, time.Duration) {})
+	}, noDown, func(uint16, Mode, time.Duration) {})
 
 	if !errors.Is(err, boom) {
 		t.Fatalf("route returned %v, want %v: a dead clone holds the grab", err, boom)
@@ -174,14 +182,14 @@ func TestRouteStopsOnAFailedEmit(t *testing.T) {
 }
 
 func TestRouteIgnoresASecondReleaseAfterAPress(t *testing.T) {
-	i := &Interceptor{consume: testKey}
+	i := watching(testKey, ModeIntercept)
 	var held []time.Duration
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0}, // a second release
 	)), func(uint16, int32) error { return nil }, noDown,
-		func(_ Mode, h time.Duration) { held = append(held, h) })
+		func(_ uint16, _ Mode, h time.Duration) { held = append(held, h) })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -209,7 +217,7 @@ func TestOpenClosesTheNodeItCannotUse(t *testing.T) {
 	}
 	fails := func() {
 		t.Helper()
-		if _, err := Open(p, 138, "mtk-kpd", time.Second); err == nil {
+		if _, err := Open(p, "mtk-kpd", time.Second, map[uint16]Mode{138: ModeIntercept}); err == nil {
 			t.Fatal("Open accepted a regular file as an input node")
 		}
 	}
@@ -229,7 +237,7 @@ func TestOpenGivesUpAfterTheWaitItIsGiven(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "never")
 	done := make(chan error, 1)
 	go func() {
-		_, err := Open(p, testKey, "mtk-kpd", 200*time.Millisecond)
+		_, err := Open(p, "mtk-kpd", 200*time.Millisecond, map[uint16]Mode{testKey: ModeIntercept})
 		done <- err
 	}()
 	select {
@@ -250,15 +258,15 @@ func TestOpenGivesUpAfterTheWaitItIsGiven(t *testing.T) {
 func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 	var got []emitted
 	presses, downs := 0, 0
-	i := &Interceptor{consume: testKey}
-	i.SetMode(ModePassThrough)
+	i := watching(testKey, ModeIntercept)
+	i.SetMode(testKey, ModePassThrough)
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func(Mode) { downs++ }, func(Mode, time.Duration) { presses++ })
+	}, func(uint16, Mode) { downs++ }, func(uint16, Mode, time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -276,20 +284,71 @@ func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 	}
 }
 
-// The zero value is a captured button, so an Interceptor built without a word
-// about capture keeps the key. The alternative fails the wrong way round: a
-// daemon that gave the button back because a field was never set.
-func TestTheZeroValueHoldsTheButton(t *testing.T) {
-	if (&Interceptor{}).Mode() != ModeIntercept {
-		t.Error("a fresh Interceptor is not capturing, so it hands the action button to Alexa")
+// The zero value is a held key, so a watch built without a word about its mode
+// keeps it. The alternative fails the wrong way round: a daemon that gave a
+// button back because a field was never set.
+func TestTheZeroValueHoldsTheKey(t *testing.T) {
+	if Mode((&watch{}).mode.Load()) != ModeIntercept {
+		t.Error("a fresh watch is not intercepting, so it hands its key to Alexa")
+	}
+}
+
+// A key nobody asked to watch is one the clone re-emits, which is pass through
+// by another name. Reporting it as intercept would say the daemon holds a key
+// it has never looked at.
+func TestAnUnwatchedKeyPassesThrough(t *testing.T) {
+	i := watching(testKey, ModeIntercept)
+	if got := i.Mode(testKey + 1); got != ModePassThrough {
+		t.Errorf("an unwatched key is in %v, want %v", got, ModePassThrough)
+	}
+	// And setting it is a no-op rather than a panic on a nil watch.
+	i.SetMode(testKey+1, ModeIntercept)
+	if got := i.Mode(testKey + 1); got != ModePassThrough {
+		t.Errorf("an unwatched key was set to %v", got)
+	}
+}
+
+// Two keys on one node, each with its own mode: the whole reason a watch holds
+// the mode rather than the Interceptor. Mute ships in monitor while the action
+// button is intercepted, so this is the shipped arrangement rather than a
+// contrived one.
+func TestTwoKeysHoldSeparateModes(t *testing.T) {
+	const otherKey = testKey + 7
+	aw, bw := &watch{}, &watch{}
+	aw.mode.Store(int32(ModeIntercept))
+	bw.mode.Store(int32(ModeMonitor))
+	i := &Interceptor{watched: map[uint16]*watch{testKey: aw, otherKey: bw}}
+
+	var got []emitted
+	reported := map[uint16]int{}
+	err := i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
+		evdev.Event{Type: evdev.EvKey, Code: otherKey, Value: 1},
+		evdev.Event{Type: evdev.EvKey, Code: otherKey, Value: 0},
+		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+	)), func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}, func(uint16, Mode) {}, func(code uint16, _ Mode, _ time.Duration) { reported[code]++ })
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("route returned %v, want io.EOF", err)
+	}
+	// The intercepted key reaches Android not at all; the monitored one does,
+	// interleaved with it, and both are reported.
+	if want := []emitted{{otherKey, 1}, {otherKey, 0}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("emitted %v, want %v", got, want)
+	}
+	if reported[testKey] != 1 || reported[otherKey] != 1 {
+		t.Errorf("reported %v, want one press of each", reported)
 	}
 }
 
 func TestSetModeIsReadBack(t *testing.T) {
-	i := &Interceptor{consume: testKey}
+	i := watching(testKey, ModeIntercept)
 	for _, want := range []Mode{ModePassThrough, ModeMonitor, ModeIntercept, ModePassThrough} {
-		i.SetMode(want)
-		if got := i.Mode(); got != want {
+		i.SetMode(testKey, want)
+		if got := i.Mode(testKey); got != want {
 			t.Errorf("SetMode(%v) reads back as %v", want, got)
 		}
 	}
@@ -336,25 +395,25 @@ func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []emitted
 			presses := 0
-			i := &Interceptor{consume: testKey}
-			i.SetMode(tt.start)
+			i := watching(testKey, ModeIntercept)
+			i.SetMode(testKey, tt.start)
 			r := &flipAfter{
 				r: bytes.NewReader(events(
 					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 				)),
 				at:   2,
-				flip: func() { i.SetMode(other(tt.start)) },
+				flip: func() { i.SetMode(testKey, other(tt.start)) },
 			}
 			err := i.route(r, func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, noDown, func(Mode, time.Duration) { presses++ })
+			}, noDown, func(uint16, Mode, time.Duration) { presses++ })
 
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
 			}
-			if i.Mode() == tt.start {
+			if i.Mode(testKey) == tt.start {
 				t.Fatal("the mode never changed, so this test proves nothing")
 			}
 			if presses != tt.presses {
@@ -369,8 +428,7 @@ func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
 
 // Autorepeat, which nothing else in the tree emits. It belongs to the press in
 // flight: dropped while that press is being consumed, re-emitted while it is
-// passing through, and dropped entirely when there is no press of ours, since
-// then Android was never told the key went down.
+// passing through, and dropped in every mode when there is no press of ours.
 func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
 	const repeat = 2
 	for _, tt := range []struct {
@@ -389,20 +447,25 @@ func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
 			{Type: evdev.EvKey, Code: testKey, Value: repeat},
 			{Type: evdev.EvKey, Code: testKey, Value: 0},
 		}, []emitted{{testKey, 1}, {testKey, repeat}, {testKey, 0}}},
-		// The key was down before the grab took it, so Android has no press of
-		// ours to hang a repeat on.
+		// The key was down before the grab took it, so this end has no press to
+		// hang the repeat on. Passing it on would give the clone a key-down of
+		// its own, which is what the release cannot be relied on to end, so it
+		// is dropped whatever the mode says.
 		{"a repeat with no press of ours is dropped", ModePassThrough, []evdev.Event{
+			{Type: evdev.EvKey, Code: testKey, Value: repeat},
+		}, nil},
+		{"an intercepted repeat with no press of ours is dropped", ModeIntercept, []evdev.Event{
 			{Type: evdev.EvKey, Code: testKey, Value: repeat},
 		}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []emitted
-			i := &Interceptor{consume: testKey}
-			i.SetMode(tt.mode)
+			i := watching(testKey, ModeIntercept)
+			i.SetMode(testKey, tt.mode)
 			err := i.route(bytes.NewReader(events(tt.send...)), func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, noDown, func(Mode, time.Duration) {})
+			}, noDown, func(uint16, Mode, time.Duration) {})
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
 			}
@@ -433,15 +496,15 @@ func TestEachModeEmitsAndReportsOrDoesNot(t *testing.T) {
 		t.Run(tt.mode.String(), func(t *testing.T) {
 			var got []emitted
 			downs, presses := 0, 0
-			i := &Interceptor{consume: testKey}
-			i.SetMode(tt.mode)
+			i := watching(testKey, ModeIntercept)
+			i.SetMode(testKey, tt.mode)
 			err := i.route(bytes.NewReader(events(
 				evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 				evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 			)), func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, func(Mode) { downs++ }, func(Mode, time.Duration) { presses++ })
+			}, func(uint16, Mode) { downs++ }, func(uint16, Mode, time.Duration) { presses++ })
 
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
@@ -489,4 +552,95 @@ func TestAModeWithNoNameHasNoName(t *testing.T) {
 			t.Errorf("mode %d has no name", m)
 		}
 	}
+}
+
+// A key held across the daemon starting: Android took the key-down from the
+// real node before the grab, and only the release reaches here. There is no
+// press of ours to report, and no release of ours clears that key-down either,
+// since KeyDowns are tracked per device -- but the app layer does not look at
+// the device, so a key Android is allowed to see still gets its release.
+func TestAReleaseWithNoPressStillReachesAndroidUnlessIntercepted(t *testing.T) {
+	for _, tt := range []struct {
+		mode Mode
+		want []emitted
+	}{
+		{ModeIntercept, nil},
+		{ModeMonitor, []emitted{{testKey, 0}}},
+		{ModePassThrough, []emitted{{testKey, 0}}},
+	} {
+		t.Run(tt.mode.String(), func(t *testing.T) {
+			var got []emitted
+			presses := 0
+			i := watching(testKey, tt.mode)
+			err := i.route(bytes.NewReader(events(
+				evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+			)), func(code uint16, value int32) error {
+				got = append(got, emitted{code, value})
+				return nil
+			}, noDown, func(uint16, Mode, time.Duration) { presses++ })
+
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("route returned %v, want io.EOF", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("%v emitted %v, want %v", tt.mode, got, tt.want)
+			}
+			// Nothing is reported either way: there was no press of ours.
+			if presses != 0 {
+				t.Errorf("%v reported %d presses for a release with no press", tt.mode, presses)
+			}
+		})
+	}
+}
+
+// The mode is read live for a stale event, since no press latched one, so two
+// of them can read it differently. A repeat is a key-down as far as EventHub is
+// concerned -- it reads any non-zero value as one -- so a repeat emitted and
+// then a release swallowed leaves Android holding the key, which
+// docs/architecture.md names as the bad direction: past six hundred
+// milliseconds it is Alexa's setup mode. Dropping the stale repeat is what
+// makes the pair impossible to split.
+func TestAStaleRepeatCannotStrandAKeyDownOnTheClone(t *testing.T) {
+	i := watching(testKey, ModeMonitor)
+	// Home Assistant flips the key once the repeat has been routed and before
+	// the release arrives, which is the window between the two halves of a
+	// press this end never saw begin.
+	r := &flipsBeforeTheRelease{
+		r: bytes.NewReader(events(
+			evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 2},
+			evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+		)),
+		flip: func() { i.SetMode(testKey, ModeIntercept) },
+	}
+
+	var got []emitted
+	err := i.route(r, func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}, noDown, func(uint16, Mode, time.Duration) {})
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("route returned %v, want io.EOF", err)
+	}
+	if got != nil {
+		t.Errorf("emitted %v, want nothing: a key-down the release cannot end", got)
+	}
+}
+
+// The flip runs at the start of the second read rather than the end of the
+// first: route reads an event and then acts on it, so flipping when the first
+// read returns lands before the repeat has been routed at all, and both events
+// then read the new mode. That is the version of this test that cannot fail.
+type flipsBeforeTheRelease struct {
+	r     io.Reader
+	flip  func()
+	reads int
+}
+
+func (f *flipsBeforeTheRelease) Read(p []byte) (int, error) {
+	f.reads++
+	if f.reads == 2 {
+		f.flip()
+	}
+	return f.r.Read(p)
 }

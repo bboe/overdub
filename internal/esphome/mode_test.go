@@ -1,7 +1,9 @@
 package esphome
 
 import (
+	"bytes"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,10 @@ func listedSelect(t *testing.T, s *Server) (map[int]pbField, []string) {
 		if f.msgType != msgListSelect {
 			continue
 		}
+		// Only the action button's; the listing now carries one per button.
+		if !bytes.Contains(f.payload, []byte("action_button_mode")) {
+			continue
+		}
 		found++
 		if err := pbWalk(f.payload, func(field pbField) {
 			if field.field == 6 {
@@ -53,8 +59,8 @@ func TestTheButtonModeIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	if got := string(entity[1].data); got != "action_button_mode" {
 		t.Errorf("the select has object_id %q, want action_button_mode", got)
 	}
-	if uint32(entity[2].num) != s.keyMode {
-		t.Errorf("action_button_mode has key %d, want %d", entity[2].num, s.keyMode)
+	if uint32(entity[2].num) != s.button("action_button").keyMode {
+		t.Errorf("action_button_mode has key %d, want %d", entity[2].num, s.button("action_button").keyMode)
 	}
 	// A key sent as a varint decodes to the same number here and to nothing in
 	// Home Assistant, which files every entity under key zero.
@@ -141,7 +147,7 @@ type fakeButton struct {
 
 func wireFakeButton(s *Server) *fakeButton {
 	b := &fakeButton{mode: buttonModes[0], changed: make(chan string, 8)}
-	s.UseButton(func() string {
+	s.UseButton("action_button", func() string {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		return b.mode
@@ -201,7 +207,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 			continue
 		}
 		key, choice := selectReading(t, payload)
-		if key != s.keyMode {
+		if key != s.button("action_button").keyMode {
 			continue
 		}
 		if choice != "intercept" {
@@ -215,7 +221,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 	// without this, deleting that wake entirely leaves this test green.
 	time.Sleep(20 * s.wakeGap)
 
-	if err := c.send(msgSelectCommand, selectCommand(s.keyMode, "pass through")); err != nil {
+	if err := c.send(msgSelectCommand, selectCommand(s.button("action_button").keyMode, "pass through")); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -235,7 +241,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 			continue
 		}
 		key, choice := selectReading(t, payload)
-		if key != s.keyMode {
+		if key != s.button("action_button").keyMode {
 			continue
 		}
 		if choice != "pass through" {
@@ -247,7 +253,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 	// writes it. Without this, deleting that drain leaves the suite green and
 	// the only record of who moved the button is silently lost.
 	for deadline := time.Now().Add(3 * time.Second); ; {
-		if strings.Contains(out.String(), "set the action button to pass through") {
+		if strings.Contains(out.String(), "set action_button to pass through") {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -258,7 +264,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 }
 
 // The key is how Home Assistant says which entity it means, and this device
-// has exactly one select. A command that ignored the key would take
+// has one select per button. A command that ignored the key would take
 // every select.select_option on the device as this one.
 func TestASelectCommandForAnotherEntityIsIgnored(t *testing.T) {
 	var out lockedBuffer
@@ -291,7 +297,7 @@ func TestAMalformedSelectCommandIsNotActedOn(t *testing.T) {
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
 	// A well-formed key and state, then a length that runs off the end.
-	payload := append(selectCommand(s.keyMode, "pass through"), 0x1a, 0x7f, 'x')
+	payload := append(selectCommand(s.button("action_button").keyMode, "pass through"), 0x1a, 0x7f, 'x')
 	if err := s.handle(c, msgSelectCommand, payload); err == nil {
 		t.Error("a SelectCommandRequest that did not parse was accepted")
 	}
@@ -313,7 +319,7 @@ func TestASelectCommandThatChangesNothingCostsNothing(t *testing.T) {
 	button := wireFakeButton(s)
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
-	if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, "intercept")); err != nil {
+	if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, "intercept")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	select {
@@ -343,7 +349,7 @@ func TestTheHandoverIsCarriedOutOfTheLockToBeLogged(t *testing.T) {
 	wireFakeButton(s)
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
-	if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, "pass through")); err != nil {
+	if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, "pass through")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if c.noted == "" {
@@ -365,13 +371,13 @@ func TestAServerWithNoButtonMovesNothing(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
-	if s.buttonMode() != "intercept" {
-		t.Errorf("a server with no button reports mode %q, want intercept", s.buttonMode())
+	if s.button("action_button").mode() != "intercept" {
+		t.Errorf("a server with no button reports mode %q, want intercept", s.button("action_button").mode())
 	}
-	if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, "pass through")); err != nil {
+	if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, "pass through")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	if s.buttonMode() != "intercept" {
+	if s.button("action_button").mode() != "intercept" {
 		t.Error("a server with no button reported the mode changing anyway")
 	}
 	if c.noted != "" {
@@ -421,7 +427,7 @@ func TestTogglingCannotOutrunTheWakeGap(t *testing.T) {
 
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}}
 	for i := 0; i < 20; i++ {
-		if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, buttonModes[i%len(buttonModes)])); err != nil {
+		if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, buttonModes[i%len(buttonModes)])); err != nil {
 			t.Fatalf("command %d: %v", i, err)
 		}
 	}
@@ -434,8 +440,8 @@ func TestTogglingCannotOutrunTheWakeGap(t *testing.T) {
 			"the key sets the poll's rate", got-before)
 	}
 	// The commands did land, or this passes on a server that ignored them.
-	if want := buttonModes[19%len(buttonModes)]; s.buttonMode() != want {
-		t.Errorf("the last command asked for %q and the button is in %q", want, s.buttonMode())
+	if want := buttonModes[19%len(buttonModes)]; s.button("action_button").mode() != want {
+		t.Errorf("the last command asked for %q and the button is in %q", want, s.button("action_button").mode())
 	}
 }
 
@@ -445,28 +451,29 @@ func TestTogglingCannotOutrunTheWakeGap(t *testing.T) {
 // Home Assistant's dropdown snaps back on every poll, and nothing says why.
 func TestTheButtonIsWiredAsOnePiece(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	if s.buttonMode == nil {
+	if s.button("action_button").mode == nil {
 		t.Fatal("a server with no button has no reader, so readTicked panics")
 	}
-	if s.setMode != nil {
+	if s.button("action_button").setMode != nil {
 		t.Error("a server with no button carries a writer, so the select moves something")
 	}
 
 	held := "intercept"
-	s.UseButton(func() string { return held }, func(choice string) { held = choice })
-	if s.buttonMode == nil || s.setMode == nil {
+	s.UseButton("action_button", func() string { return held }, func(choice string) { held = choice })
+	b := s.button("action_button")
+	if b.mode == nil || b.setMode == nil {
 		t.Fatal("UseButton left half the wiring unset")
 	}
 	// The reader follows the writer, which is the whole point: the state
 	// readTicked publishes has to be the one the button is actually in.
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
-	if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, "pass through")); err != nil {
+	if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, "pass through")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if held != "pass through" {
 		t.Error("the writer was never called")
 	}
-	if s.buttonMode() != "pass through" {
+	if s.button("action_button").mode() != "pass through" {
 		t.Error("the reader still reports the old mode after the writer changed it")
 	}
 }
@@ -484,7 +491,7 @@ func TestAModeThatWasNeverOfferedIsRefused(t *testing.T) {
 		button := wireFakeButton(s)
 		c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
-		if err := s.handle(c, msgSelectCommand, selectCommand(s.keyMode, choice)); err != nil {
+		if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, choice)); err != nil {
 			t.Fatalf("handle(%q): %v", choice, err)
 		}
 		select {
@@ -502,5 +509,92 @@ func TestAModeThatWasNeverOfferedIsRefused(t *testing.T) {
 			t.Errorf("mode %q was refused and still woke the sensor poll", choice)
 		default:
 		}
+	}
+}
+
+// Every button gets both entities, or there is one that reports without being
+// configurable, or one configurable that reports nothing. The mute button is
+// the second, so this is also what says the listing stopped being singular.
+func TestEveryButtonIsListedAsAnEventAndASelect(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	c := &conn{out: make(chan frame, 64)}
+	if err := s.listEntities(c); err != nil {
+		t.Fatalf("listEntities: %v", err)
+	}
+	close(c.out)
+
+	events, selects := map[string]bool{}, map[string]bool{}
+	for f := range c.out {
+		var objectID string
+		if err := pbWalk(f.payload, func(field pbField) {
+			if field.field == 1 && objectID == "" {
+				objectID = string(field.data)
+			}
+		}); err != nil {
+			t.Fatalf("an entity did not parse: %v", err)
+		}
+		switch f.msgType {
+		case msgListEvent:
+			events[objectID] = true
+		case msgListSelect:
+			selects[objectID] = true
+		}
+	}
+	// Spelled out rather than read from s.buttons, which is what builds the
+	// listing: a test reading the same slice asserts nothing about the wire.
+	for _, objectID := range []string{"action_button", "mute_button"} {
+		if !events[objectID] {
+			t.Errorf("%s has no event entity, so its presses reach nobody", objectID)
+		}
+		if !selects[objectID+"_mode"] {
+			t.Errorf("%s has no mode select, so nothing can change what it does", objectID)
+		}
+	}
+	if len(events) != 2 || len(selects) != 2 {
+		t.Errorf("listed %d event entities and %d selects, want 2 of each", len(events), len(selects))
+	}
+}
+
+// A server nobody has wired reports a mode rather than an empty string, and it
+// is a placeholder rather than any button's shipped mode: the caller owns the
+// keys, so it owns what each starts in. main_test.go holds the real ones.
+func TestAnUnwiredButtonReportsAnOfferedMode(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	for _, objectID := range []string{"action_button", "mute_button"} {
+		b := s.button(objectID)
+		if b == nil {
+			t.Fatalf("%s is not a button on this server", objectID)
+		}
+		if !slices.Contains(buttonModes, b.mode()) {
+			t.Errorf("%s reports %q, which is not a mode the listing offers", objectID, b.mode())
+		}
+	}
+}
+
+// One button's select must not move another's. The keys are separate hashes and
+// setModeLocked picks by them, so a command naming mute cannot reach the action
+// button -- which is the whole of what keeps two selects from being one.
+func TestOneButtonsSelectDoesNotMoveAnother(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	moved := map[string]string{}
+	for _, objectID := range []string{"action_button", "mute_button"} {
+		s.UseButton(objectID,
+			func() string { return "intercept" },
+			func(choice string) { moved[objectID] = choice })
+	}
+	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
+
+	key := s.button("mute_button").keyMode
+	if err := s.handle(c, msgSelectCommand, selectCommand(key, "pass through")); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if moved["action_button"] != "" {
+		t.Errorf("a command for the mute button moved the action button to %q", moved["action_button"])
+	}
+	if moved["mute_button"] != "pass through" {
+		t.Errorf("the mute button was moved to %q, want pass through", moved["mute_button"])
 	}
 }

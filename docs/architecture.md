@@ -700,12 +700,37 @@ flight each, and the product has to fit a device with 512 MiB of RAM, of which
 so is the file they come from: the kernel writes `kB` and means KiB, which is
 why a reading of it is divided by 1024 rather than by 1000.
 
-## The button mode
+## The button modes
 
-`action_button_mode` is the one entity Home Assistant writes to, and everything
-else here is read-only. It is a select rather than a diagnostic reading of
-whether the grab took, because what somebody looking at that reading almost
-always wants is to change it.
+The selects are the only entities Home Assistant writes to, and everything else
+here is read-only. Each is a select rather than a diagnostic reading of whether
+the grab took, because what somebody looking at that reading almost always wants
+is to change it.
+
+**Two buttons, and each holds its own mode.** `event1` carries the action button
+and the microphone mute, the grab takes both, and until now mute was simply
+re-emitted. It is now a button in its own right: `mute_button` reports what it
+did and `mute_button_mode` says what the daemon does with it. That is why the
+mode lives on a `watch` per keycode rather than on the `Interceptor`: one key can
+be held while another is pressed, so each needs its own latch as well as its own
+mode.
+
+Mute ships in **monitor** where the action button ships in **intercept**, and
+that asymmetry is the point. Intercepting mute by default would leave a Dot that
+cannot be muted by the button that says mute on it; monitor is additive, so
+Alexa still mutes and Home Assistant is told. The zero value is still intercept,
+because a key nobody mentioned is one this daemon should keep -- so the shipped
+modes are named where the keys are, in `serve.go`, rather than left to the
+struct.
+
+`serve.go` holds one map of keycode to entity and shipped mode. One rather than
+two, so a key cannot be watched without an entity to report it, or given an
+entity nothing watches; `main_test.go` holds that map against the entities
+`internal/esphome` actually builds, which is the half a single map cannot make
+safe.
+
+A chain per button, too: a run belongs to the key it was pressed on, and one
+shared chain would read a press of each as a double press of either.
 
 Three modes, and they are two independent things rather than three points on a
 line: whether Android sees the key, and whether Home Assistant hears about it.
@@ -796,6 +821,25 @@ different routes. The failures are not symmetric. Consuming the down and passing
 the up gives Android a release for a key it was never told was pressed, which it
 shrugs at. Passing the down and consuming the up leaves it holding `BUTTON_MODE`
 for ever. So the flag is read once, at the down, and the release follows it.
+
+**A key held across the daemon starting has no latch of its own**, and that is
+the one case where the two halves of a press can still read the mode
+differently. Android took the key-down from the real node before the grab, so
+only the release arrives here. Nothing is reported for it, since there was no
+press of ours -- but the release is still passed on for a key Android is allowed
+to see. Not to clear that key-down: `dumpsys input` tracks `KeyDowns` per device,
+so a release on the clone never reaches the one the real node recorded. It is
+the app layer this is for, which does not look at the device at all -- measured,
+`deviceId=24` reaching Alexa's handlers -- and so has a state machine our
+release can end.
+
+The autorepeats before it are dropped instead, whatever the mode. `EventHub`
+reads any non-zero value as a down, so an emitted stale repeat is a fresh
+key-down on the clone -- and the release behind it reads the mode again, so a
+toggle in between swallows the only thing that could end it. That is Android
+holding `BUTTON_MODE` for ever, which is the failure the latch exists to
+prevent, arriving through the one pair the latch does not cover. Dropping the
+repeat leaves nothing to strand.
 
 **The button owns the flag and the server reads it**, rather than the server
 owning it and the button being told. The read loop consults it on every event
@@ -929,8 +973,10 @@ carries a key and a type and nothing else. The standard puts the count in a
 `multi_press_count` attribute, and Home Assistant's ESPHome platform passes only
 the type string to `_trigger_event`, so an attribute has nowhere to go. A
 `HomeassistantServiceResponse` carries them instead: `esphome.overdub_pressed`,
-`is_event` set, with `event_type` and `device` always, `multi_press_count` on
-`multi_press_end`, and `held_ms` on `long_press_end`. The key uses the
+`is_event` set, with `event_type`, `device` and `button` always,
+`multi_press_count` on `multi_press_end`, and `held_ms` on `long_press_end`.
+`button` is there because every button fires the same service name, so an
+automation filtering only on the device would run for all of them. The key uses the
 standard's name.
 
 Each extra key belongs to the gesture that has one. A count on a single press is

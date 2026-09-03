@@ -237,6 +237,8 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
+| `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
+| `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
 
 Uptime and signal are read once a minute, and again when Home Assistant
@@ -261,8 +263,9 @@ A bluetooth speaker is a third route and is not reported at all. Pair one and
 Android tracks its level separately again, so neither of these readings is what
 you are hearing and `audio_jack` does not say so.
 
-`action_button_mode` is the one entity Home Assistant writes to, and it has
-three settings:
+The mode selects are the only entities Home Assistant writes to. There is one
+per button -- the action button and the microphone mute -- and each has three
+settings:
 
 | mode | Alexa | Home Assistant |
 |---|---|---|
@@ -270,7 +273,10 @@ three settings:
 | `monitor` | answers the press as usual | events |
 | `pass through` | answers the press as usual | nothing |
 
-`intercept` is the default and what the daemon is for. `pass through` gives the
+The action button ships in `intercept`, which is what the daemon is for. **Mute
+ships in `monitor`**: taking it by default would leave a Dot that cannot be
+muted by the button that says mute on it, and monitor is additive -- Alexa still
+mutes, and your automation still fires. `pass through` gives the
 button back -- press-to-talk is measured, and timers and setup mode follow the
 same key path -- while the daemon keeps running and keeps reporting everything
 else. `monitor` is both at once: press-to-talk still works and your automation
@@ -314,10 +320,19 @@ four presses are four chimes and one `multi_press_end`.
 
 An `EventResponse` carries a type and nothing else, so the numbers arrive beside
 it as an `esphome.overdub_pressed` event on Home Assistant's bus. It always
-carries `event_type` and `device`; `multi_press_count` comes with
-`multi_press_end`, `held_ms` with `long_press_end`. Both are integers, so
+carries `event_type`, `device` and `button` -- every button fires the same bus
+event, so `button` is what tells them apart and an automation wants it in its
+trigger. `multi_press_count` comes with `multi_press_end`, `held_ms` with
+`long_press_end`. Both are integers, so
 `{{ trigger.event.data.multi_press_count == 7 }}` works without a cast. The
 blueprint in `ha/` wires the gestures up.
+
+**Every button fires the same bus event**, so an automation that filters only on
+`device_id` runs for all of them: with mute in `monitor`, a press of the mute key
+would run an action meant for the action button. Filter on `button` as well. The
+blueprint in `ha/` does, but **Home Assistant does not update a blueprint you
+have already imported** -- re-import it after upgrading, or the mute key will run
+your single-press action.
 
 `long_press_start` and `long_press_end` are not a guaranteed pair. Events carry
 no state, so if Home Assistant misses the release -- a restart, a reconnect --
@@ -332,7 +347,7 @@ is Alexa's and a press is unreported. The chime tells intercept from the other
 two rather than telling you the daemon is alive: `monitor` reports the press
 without chiming, so silence there is the mode working as asked.
 
-`action_button_mode` is still the only entity Home Assistant writes to. Everything
+The mode selects are still the only entities Home Assistant writes to. Everything
 else reports, the button included, and together they are the connection proved
 end to end in both directions.
 

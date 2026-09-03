@@ -716,7 +716,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0, s.keyMode: 0,
+		s.keySound: 0, s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
 	}
 }
 
@@ -727,7 +727,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 // honest. It counts the entities that carry a state, which is the listing less
 // the action button: an event is not replayed to a subscriber, so no snapshot
 // ever carries one.
-const sensorCount = 9
+const sensorCount = 10
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -1887,9 +1887,10 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				name    string
 				msgType int
 			}{
-				s.keyJackOn: {"audio_jack", msgBinarySensorState},
-				s.keySound:  {"speaker_playing", msgBinarySensorState},
-				s.keyMode:   {"action_button_mode", msgSelectState},
+				s.keyJackOn:                       {"audio_jack", msgBinarySensorState},
+				s.keySound:                        {"speaker_playing", msgBinarySensorState},
+				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
+				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
 			}
 
 			s.sound = tt.sound

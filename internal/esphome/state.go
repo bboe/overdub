@@ -34,17 +34,20 @@ type reading struct {
 func (s *Server) readTicked() []reading {
 	up, upOK := s.uptime()
 	signal, signalOK := s.wifi()
-	return []reading{
+	out := []reading{
 		{key: s.keyUptime, value: up, ok: upOK},
 		{key: s.keyWifi, value: signal, ok: signalOK},
-		// Not a reading of the device -- this end owns it -- and it rides this
-		// poll for two things the other paths cannot give it. It is published
-		// before any connection exists, because PollSensors publishes once
-		// before its first wait; and a toggle reaches Home Assistant by waking
-		// this poll, which is what handle can do with the server lock held and
-		// publishing is not.
-		{key: s.keyMode, text: s.buttonMode(), ok: true, kind: kindSelect},
 	}
+	// Not readings of the device -- this end owns them -- and they ride this
+	// poll for two things the other paths cannot give them. They are published
+	// before any connection exists, because PollSensors publishes once before
+	// its first wait; and a mode change reaches Home Assistant by waking this
+	// poll, which is what handle can do with the server lock held and
+	// publishing is not.
+	for _, b := range s.buttons {
+		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
+	}
+	return out
 }
 
 // SoundOnDelay and SoundOffDelay are how long sound has to last before it is
@@ -260,9 +263,13 @@ func (s *Server) publish(what string, readings []reading) []reading {
 // Called from the timers that recognise a gesture and from the read loop, which
 // mute passes through, so it does what publish does: the lock covers only the
 // queueing, and what could not be queued is logged after it is dropped.
-func (s *Server) FirePress(eventType EventType, count int, holdFor time.Duration) {
+func (s *Server) FirePress(objectID string, eventType EventType, count int, holdFor time.Duration) {
+	b := s.button(objectID)
+	if b == nil {
+		return
+	}
 	var event pb
-	event.fixed32(1, s.keyAction)
+	event.fixed32(1, b.keyEvent)
 	event.str(2, string(eventType))
 
 	// The same gesture again, carrying the numbers the event cannot. The
@@ -281,6 +288,9 @@ func (s *Server) FirePress(eventType EventType, count int, holdFor time.Duration
 	action.str(1, "esphome.overdub_pressed")
 	action.sub(2, kv("event_type", string(eventType)))
 	action.sub(2, kv("device", s.name))
+	// Which button, because one service name now carries several of them and an
+	// automation filtering only on device_id would fire for every one.
+	action.sub(2, kv("button", b.objectID))
 	// Named for the attribute Home Assistant would have used, had the transport
 	// had room for one. Only multi_press_end has a count.
 	if count > 0 {

@@ -1,7 +1,9 @@
 blueprint:
   name: Dot action button
   description: >-
-    Bind actions to the action button on an Echo Dot running overdub.
+    Bind actions to the **action button** on an Echo Dot running overdub. The
+    Dot's other buttons fire the same bus event and are filtered out here, so
+    this binds that one button and no other.
 
     Quick presses are collected into a run and reported once, about a third of a
     second after you stop. A single press waits out that same gap. `{{ count }}`
@@ -57,6 +59,10 @@ triggers:
     event_type: esphome.overdub_pressed
     event_data:
       device_id: !input dot
+      # Every button on the Dot fires this same bus event, so device_id alone is
+      # not enough: without this a mute press would run the single-press action.
+      # A blueprint for another button is this one with the name changed.
+      button: action_button
 
 variables:
   # The numbers arrive as integers: the daemon sends them in the service call's

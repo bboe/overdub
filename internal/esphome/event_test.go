@@ -1,6 +1,7 @@
 package esphome
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 	"time"
@@ -23,6 +24,11 @@ func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 	found := 0
 	for f := range c.out {
 		if f.msgType != msgListEvent {
+			continue
+		}
+		// Only the action button's; the listing now carries one per button.
+		if !bytes.Contains(f.payload, []byte("action_button")) ||
+			bytes.Contains(f.payload, []byte("mute_button")) {
 			continue
 		}
 		found++
@@ -52,8 +58,8 @@ func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
 	if got := string(entity[1].data); got != "action_button" {
 		t.Errorf("the event entity has object_id %q, want action_button", got)
 	}
-	if uint32(entity[2].num) != s.keyAction {
-		t.Errorf("action_button has key %d, want %d", entity[2].num, s.keyAction)
+	if uint32(entity[2].num) != s.button("action_button").keyEvent {
+		t.Errorf("action_button has key %d, want %d", entity[2].num, s.button("action_button").keyEvent)
 	}
 	// A key sent as a varint decodes to the same number here and to nothing in
 	// Home Assistant, which files every entity under key zero.
@@ -139,7 +145,7 @@ func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
 	s.conns[loud] = struct{}{}
 	s.mu.Unlock()
 
-	s.FirePress(EventLongPressEnd, 0, 742*time.Millisecond)
+	s.FirePress("action_button", EventLongPressEnd, 0, 742*time.Millisecond)
 
 	if n := len(quiet.out); n != 0 {
 		t.Errorf("a client that never subscribed was sent %d frames", n)
@@ -155,8 +161,8 @@ func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
 	if err := pbWalk(f.payload, func(field pbField) { fields[field.field] = field }); err != nil {
 		t.Fatalf("the event did not parse: %v", err)
 	}
-	if uint32(fields[1].num) != s.keyAction {
-		t.Errorf("the event carries key %d, want %d", fields[1].num, s.keyAction)
+	if uint32(fields[1].num) != s.button("action_button").keyEvent {
+		t.Errorf("the event carries key %d, want %d", fields[1].num, s.button("action_button").keyEvent)
 	}
 	if fields[1].wire != wireFixed32 {
 		t.Errorf("the event sent its key as wire type %d, want fixed32 (%d)",
@@ -173,7 +179,7 @@ func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
 // hanging off a press nobody made.
 func TestAPressIsNotPublished(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	s.FirePress(EventPressEnd, 0, 0)
+	s.FirePress("action_button", EventPressEnd, 0, 0)
 
 	s.mu.Lock()
 	held := len(s.published)
@@ -205,7 +211,7 @@ func TestAPressIsNotPublished(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("a replayed frame did not parse: %v", err)
 		}
-		if key == s.keyAction {
+		if key == s.button("action_button").keyEvent {
 			t.Errorf("a client that subscribed after a press was sent it, as message %d", f.msgType)
 		}
 	}
@@ -260,7 +266,7 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 	s.conns[c] = struct{}{}
 	s.mu.Unlock()
 
-	s.FirePress(EventMultiEnd, 7, 0)
+	s.FirePress("action_button", EventMultiEnd, 7, 0)
 
 	if len(c.out) != 2 {
 		t.Fatalf("a press sent %d frames to a client subscribed to both, want 2", len(c.out))
@@ -287,7 +293,14 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 	// The strings stay strings. device is the operator's -name, and Home
 	// Assistant renders data_template, so a name with Jinja markers would be a
 	// template this daemon asked it to run.
-	for key, value := range map[string]string{"event_type": "multi_press_end", "device": "kitchen"} {
+	// button is the discriminator: every button fires this one service name, so
+	// an automation filtering on the device alone runs for all of them. The
+	// blueprint filters on this key.
+	for key, value := range map[string]string{
+		"event_type": "multi_press_end",
+		"device":     "kitchen",
+		"button":     "action_button",
+	} {
 		if data[key] != value {
 			t.Errorf("the service call carries %s=%q in data, want %q", key, data[key], value)
 		}
@@ -316,7 +329,7 @@ func TestTheCountGoesOnlyToAClientThatAskedForServices(t *testing.T) {
 	s.conns[services] = struct{}{}
 	s.mu.Unlock()
 
-	s.FirePress(EventMultiEnd, 2, 0)
+	s.FirePress("action_button", EventMultiEnd, 2, 0)
 
 	if len(states.out) != 1 {
 		t.Fatalf("a states-only client was sent %d frames, want 1", len(states.out))
@@ -351,14 +364,14 @@ func TestSubscribingToServicesIsWhatTurnsTheCountOn(t *testing.T) {
 	s.conns[c] = struct{}{}
 	s.mu.Unlock()
 
-	s.FirePress(EventPressEnd, 0, 0)
+	s.FirePress("action_button", EventPressEnd, 0, 0)
 	if len(c.out) != 0 {
 		t.Fatalf("a client that asked for nothing was sent %d frames, want 0", len(c.out))
 	}
 	if err := s.handle(c, msgSubscribeHAServ, nil); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	s.FirePress(EventPressEnd, 0, 0)
+	s.FirePress("action_button", EventPressEnd, 0, 0)
 	if len(c.out) != 1 {
 		t.Fatalf("a client that subscribed to services was sent %d frames, want 1", len(c.out))
 	}
@@ -388,7 +401,7 @@ func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 		s.conns[c] = struct{}{}
 		s.mu.Unlock()
 
-		s.FirePress(tt.eventType, tt.count, tt.holdFor)
+		s.FirePress("action_button", tt.eventType, tt.count, tt.holdFor)
 		if len(c.out) != 1 {
 			t.Fatalf("%s sent %d frames, want 1", tt.what, len(c.out))
 		}
@@ -404,6 +417,27 @@ func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 			case key.want != "" && got != key.want:
 				t.Errorf("%s carries %s=%q, want %q", tt.what, key.name, got, key.want)
 			}
+		}
+	}
+}
+
+// The discriminator names the button that fired, not always the first one. Two
+// buttons sharing one service name is the whole reason it is there.
+func TestTheServiceCallNamesTheButtonThatFired(t *testing.T) {
+	for _, objectID := range []string{"action_button", "mute_button"} {
+		s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+		c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, services: true}
+		s.mu.Lock()
+		s.conns[c] = struct{}{}
+		s.mu.Unlock()
+
+		s.FirePress(objectID, EventPressEnd, 0, 0)
+		if len(c.out) != 1 {
+			t.Fatalf("%s sent %d frames, want 1", objectID, len(c.out))
+		}
+		_, _, data, _ := actionData(t, (<-c.out).payload)
+		if data["button"] != objectID {
+			t.Errorf("a press of %s carries button=%q", objectID, data["button"])
 		}
 	}
 }

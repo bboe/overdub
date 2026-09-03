@@ -100,9 +100,32 @@ const (
 	msgEventState        = 108
 )
 
-// What the daemon starts as, so a server with no button wired reports the mode
-// a Dot with one would be in rather than an empty string.
-func shippedButtonMode() string { return buttonModes[0] }
+// A physical button on the Dot: an event entity reporting what it did, and a
+// select saying what the daemon does with it. Every button here has both, so
+// there is no button that reports without being configurable or the reverse.
+type physicalButton struct {
+	objectID string // the event entity's, and the select's with "_mode" on it
+	name     string
+	keyEvent uint32
+	keyMode  uint32
+
+	// What the button is doing, and the ask to change it. The button owns its
+	// mode, so there is one copy of it rather than two that could disagree: the
+	// read loop consults its own field on every event and cannot take the
+	// server lock to do it. setMode is called with the server lock held and
+	// mode is called from readTicked without it, so the rule for both is the
+	// stricter one: neither may block, whichever holds what. Set together by
+	// UseButton and never apart, because either alone is a select that lies.
+	// setMode is nil on a server built without that button, which is a test
+	// rather than a state a Dot can be in, and the select then reports the
+	// shipped mode and moves nothing.
+	mode    func() string
+	setMode func(string)
+}
+
+// What a button reports before anything wires it, so a server with none reports
+// a mode rather than an empty string.
+func shipped(mode string) func() string { return func() string { return mode } }
 
 func entityKey(objectID string) uint32 {
 	h := fnv.New32a()
@@ -150,12 +173,11 @@ type Server struct {
 	keyJackOn uint32
 	keySound  uint32
 
-	// The action button itself, which is an event rather than a reading: it
-	// reports a moment rather than a value, and so is never published.
-	keyAction uint32
-
-	// The one entity a peer can write to rather than only read.
-	keyMode uint32
+	// The physical buttons, in the order they are listed. Each is an event
+	// entity, which reports a moment rather than a value and so is never
+	// published, and a select, which is the only kind of entity a peer writes.
+	// A slice rather than a map, because the order is what Home Assistant shows.
+	buttons []*physicalButton
 
 	// PollLive's alone, and unlocked because of it.
 	soundOn  bool
@@ -177,19 +199,6 @@ type Server struct {
 	sound   func() (bool, bool)
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
-
-	// What the action button is doing, and the ask to change it. The button
-	// owns the mode, so there is one copy of it rather than two that could
-	// disagree: its read loop consults its own field on every event and cannot
-	// take the server lock to do it. setMode is called with the server lock
-	// held and buttonMode is called from readTicked without it, so the rule for
-	// both is the stricter one: neither may block, whichever holds what. Set
-	// together by UseButton and never apart, because either alone is a select
-	// that lies. setMode is nil on a server built without a button, which is a
-	// test rather than a state a Dot can be in, and the select then reports the
-	// shipped default and moves nothing.
-	buttonMode func() string
-	setMode    func(string)
 
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
@@ -232,8 +241,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyJack:       entityKey("jack_volume"),
 		keyJackOn:     entityKey("audio_jack"),
 		keySound:      entityKey("speaker_playing"),
-		keyAction:     entityKey("action_button"),
-		keyMode:       entityKey("action_button_mode"),
+		buttons:       newButtons(),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
 		volumes:       device.MusicVolumes,
@@ -241,7 +249,6 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		sound:         device.SpeakerPlaying,
 		cpu:           device.CPUTemperature,
 		memory:        device.AvailableMemory,
-		buttonMode:    shippedButtonMode,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		wakeGap:       minLiveReadGap,
@@ -254,13 +261,64 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 	}
 }
 
+// The buttons a Dot has, in listing order. Named here rather than by the caller
+// because the object ids are what Home Assistant files entities under, and a
+// name invented per call site is one that can differ between two of them.
+func newButtons() []*physicalButton {
+	var out []*physicalButton
+	for _, b := range []struct{ objectID, name string }{
+		{"action_button", "Action button"},
+		{"mute_button", "Mute button"},
+	} {
+		out = append(out, &physicalButton{
+			objectID: b.objectID,
+			name:     b.name,
+			keyEvent: entityKey(b.objectID),
+			keyMode:  entityKey(b.objectID + "_mode"),
+			// A placeholder, not this button's shipped mode: the caller owns
+			// the keys and therefore what each starts in, and UseButton
+			// replaces this before any connection exists. Naming the real mode
+			// here would state it twice with nothing holding the two together.
+			mode: shipped(buttonModes[0]),
+		})
+	}
+	return out
+}
+
+// Buttons names every button this server reports, in listing order. The caller
+// wires the keys, so this is what lets it check that it has one for each.
+func (s *Server) Buttons() []string {
+	out := make([]string, 0, len(s.buttons))
+	for _, b := range s.buttons {
+		out = append(out, b.objectID)
+	}
+	return out
+}
+
+// HasButton says whether an object id names a button this server reports. The
+// caller wires the keys, and a name it has that this does not is one whose
+// presses reach nobody.
+func (s *Server) HasButton(objectID string) bool { return s.button(objectID) != nil }
+
+// The button an object id names, or nil.
+func (s *Server) button(objectID string) *physicalButton {
+	for _, b := range s.buttons {
+		if b.objectID == objectID {
+			return b
+		}
+	}
+	return nil
+}
+
 // UseButton wires the select to the button, reader and writer in one call.
 // Two exported fields let a caller set the writer and leave the reader at the
 // default, which is a select that really moves the button and reports the
 // shipped mode for ever: Home Assistant's dropdown snaps back on every poll and
 // nothing says why.
-func (s *Server) UseButton(mode func() string, setMode func(string)) {
-	s.buttonMode, s.setMode = mode, setMode
+func (s *Server) UseButton(objectID string, mode func() string, setMode func(string)) {
+	if b := s.button(objectID); b != nil {
+		b.mode, b.setMode = mode, setMode
+	}
 }
 
 func (s *Server) Listen(addr string) error {
@@ -564,10 +622,12 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}); err != nil {
 			return err
 		}
-		if key != s.keyMode {
-			return nil
+		for _, b := range s.buttons {
+			if key == b.keyMode {
+				s.setModeLocked(conn, b, choice)
+				break
+			}
 		}
-		s.setModeLocked(conn, choice)
 		return nil
 
 	case msgSubscribeHAServ:
@@ -584,29 +644,29 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 
 // The button is told and the poll is woken; nothing is published from here,
 // because publish takes the server lock and this runs under it. Caller holds mu.
-func (s *Server) setModeLocked(conn *conn, choice string) {
+func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
 	// A mode we never offered is not one to act on: the listing is what Home
 	// Assistant was told it could pick from, so anything else is a peer making
 	// something up rather than a user choosing.
 	if !slices.Contains(buttonModes, choice) {
-		conn.noted = fmt.Sprintf("esphome api: %s asked for button mode %q, which was not offered",
-			conn.sock.RemoteAddr(), truncate(choice))
+		conn.noted = fmt.Sprintf("esphome api: %s asked %s for mode %q, which was not offered",
+			conn.sock.RemoteAddr(), b.objectID, truncate(choice))
 		return
 	}
 	// No button to move, or it is already where it is being asked to go. This
 	// turns away a repeat and nothing else: a peer cycling the modes changes
 	// the state every time and so passes every time. What bounds that is the
 	// wake gap on the poll below, not this.
-	if s.setMode == nil || s.buttonMode() == choice {
+	if b.setMode == nil || b.mode() == choice {
 		return
 	}
-	s.setMode(choice)
+	b.setMode(choice)
 	// Which way the button went is the most consequential thing a peer can ask
 	// for here, and the only record separating a button nobody is answering
 	// from one Home Assistant let go of. Carried out of the lock like the hello
 	// line, because the log is a file on /data.
-	conn.noted = fmt.Sprintf("esphome api: %s set the action button to %s",
-		conn.sock.RemoteAddr(), choice)
+	conn.noted = fmt.Sprintf("esphome api: %s set %s to %s",
+		conn.sock.RemoteAddr(), b.objectID, choice)
 	// The state Home Assistant is waiting for goes out on the next turn of the
 	// sensor poll, which is what publishes this reading at all. That turn is
 	// gated by the wake gap, so a peer toggling as fast as it can send does not
