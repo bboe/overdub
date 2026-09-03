@@ -41,7 +41,7 @@ func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 	return fields, eventTypes
 }
 
-// An event entity is a fifth message with a fifth set of field numbers, and
+// An event entity is its own message with its own set of field numbers, and
 // every one of them is silent when wrong: 8 is device_class here and a binary
 // sensor's icon, 9 is event_types here and device_class on a sensor.
 func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {

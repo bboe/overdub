@@ -352,16 +352,16 @@ replaces both with one that never changes. So an icon here would cost the state
 it is there to show. The sensors are the other way round: a sensor with neither
 a device_class nor an icon is drawn as `mdi:eye`, and there is no class for a
 volume percentage, since Home Assistant's `volume` measures litres. Both
-volumes therefore carry `mdi:volume-high` and the other four take the icon their
+volumes therefore carry `mdi:volume-high` and the rest take the icon their
 class implies. The button switch looks like the jack's case and is not. Home
 Assistant does draw a switch from a pair, `mdi:toggle-switch-variant` and
 `-off`, but it also renders a toggle control beside it, so the icon is not what
 shows the state there and the pair an icon replaces was redundant. What it
 costs to keep is identification: a generic toggle says nothing about which of
-ten entities it is. So `button_capture` carries `mdi:gesture-tap-button` and
-the jack still carries none. The icon fields are not the same number either, 5
-on a sensor and a switch, 8 on a binary sensor, which is the
-field-numbers-are-per-message rule once more.
+the device's entities it is. So `button_capture` carries
+`mdi:gesture-tap-button` and the jack still carries none. The icon fields are
+not the same number either, 5 on a sensor and a switch, 8 on a binary sensor,
+which is the field-numbers-are-per-message rule once more.
 
 Whether the speaker is playing is two signals, and needs both. ALSA says whether
 a PCM substream is open -- `state: RUNNING` in
@@ -809,17 +809,18 @@ unbounded write to `/data` by an unauthenticated-until-the-key peer, which is
 the hazard docs/pitfalls.md exists for. A budget of its own would work; sharing
 the general one and saying so is what is done.
 
-`SwitchStateResponse` has no `missing_state` field, unlike the other two state
-messages: a switch is what this end last set it to, and there is no read of the
-device to have failed. Its listing numbers are its own as usual -- 17, 26 and 33
-against the sensor's 16 and 25 -- and `entity_category` is field 8 there,
-carrying `config` rather than the `diagnostic` every other entity here carries.
+`SwitchStateResponse` has no `missing_state` field, unlike the state messages
+that carry a reading: a switch is what this end last set it to, and there is no
+read of the device to have failed. Its listing numbers are its own as usual --
+17, 26 and 33 against the sensor's 16 and 25 -- and `entity_category` is field
+8 there, carrying `config` rather than the `diagnostic` every other entity here
+carries.
 
 ## What a press reports
 
 A press the daemon is holding becomes one ESPHome *event*: `action_button`,
-carrying `press` or `hold`. That is the fourth message kind here and the only
-entity with no state. It reports a moment rather than a value, so nothing
+carrying `press` or `hold`. It is a message kind of its own, and the only entity
+here with no state. It reports a moment rather than a value, so nothing
 publishes it, no snapshot replays it, and a client that was not connected has
 missed it -- which is the whole difference between an event and every other
 entity here, all of which answer a new subscriber from the published state.

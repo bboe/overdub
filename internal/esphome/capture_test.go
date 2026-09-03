@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// A switch is a third message with a third set of field numbers, not a binary
+// A switch is its own message with its own set of field numbers, not a binary
 // sensor Home Assistant happens to let you press. Every number here is silent
 // when wrong: the entity lands under the wrong heading, or Home Assistant reads
 // the field it finds there and shows something else.
@@ -200,7 +200,7 @@ func TestTurningTheSwitchOffHandsTheButtonBackAndReportsIt(t *testing.T) {
 }
 
 // The key is how Home Assistant says which entity it means, and this device
-// has one switch among ten entities. A command that ignored it would take
+// has exactly one switch. A command that ignored the key would take
 // every switch.turn_off on the device as this one.
 func TestASwitchCommandForAnotherEntityIsIgnored(t *testing.T) {
 	var out lockedBuffer

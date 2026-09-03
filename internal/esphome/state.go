@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Which of the three state messages carries a reading. ESPHome reads fields by
+// Which state message carries a reading. ESPHome reads fields by
 // number and the numbers are per message, so this picks an encoding rather than
 // labelling one.
 const (

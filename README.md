@@ -6,8 +6,8 @@ keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
 component, no MQTT, and no Home Assistant credential on the Dot. The Dot reports
-a press and a hold of the action button to Home Assistant, reports eight
-diagnostic entities over the same connection, takes the button back from Home
+a press and a hold of the action button to Home Assistant, reports what it can
+read about itself over the same connection, takes the button back from Home
 Assistant and hands it over again, and chimes on the device itself for every
 press it takes.
 

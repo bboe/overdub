@@ -81,7 +81,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
-			t.Errorf("an entity of type %d is listed, and it is none of the four kinds this "+
+			t.Errorf("an entity of type %d is listed, and it is none of the kinds this "+
 				"device has", entity[0].num)
 			continue
 		}

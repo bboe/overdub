@@ -19,7 +19,7 @@ const (
 
 	// A switch renders a toggle control, so unlike a binary sensor its icon is
 	// not what shows the state. That frees it to say which entity this is,
-	// which is the job an icon has among a device's ten.
+	// which is the job an icon has among a device's others.
 	captureIcon = "mdi:gesture-tap-button"
 )
 
