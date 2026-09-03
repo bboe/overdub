@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -144,9 +145,19 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 	}
 
 	over := serveOne(t, s)
-	if err := over.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// The refusal closes the pipe, and a deadline cannot be set on one that is
+	// already closed: net.Pipe answers io.ErrClosedPipe. That is the refusal
+	// arriving before this line rather than a failure, and it is what the
+	// server is being asked to do, so treating it as fatal made this test fail
+	// on exactly the behaviour it asserts -- measured, once, under qemu on CI.
+	// Any other error is a real one.
+	if err := over.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil &&
+		!errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
+	// A pipe the far end closed then reads as io.EOF -- measured, rather than
+	// the ErrClosedPipe the line above answers -- and EOF is neither nil nor a
+	// timeout, so both checks below still say what they mean.
 	_, err := over.Read(make([]byte, 1))
 	if err == nil {
 		t.Fatalf("connection %d was served; the cap does not hold", maxConns+1)
