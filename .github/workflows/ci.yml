@@ -35,6 +35,10 @@ jobs:
       # build for the runner, so they get a second run natively.
       - run: go test -race ./internal/esphome/ ./internal/device/
 
+      # build.sh is the only supported build, and it is cgo against OpenSL ES, so
+      # CI needs the NDK to build what ships rather than something adjacent to
+      # it. The runner image already carries one; this only says where.
+      - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - run: ./build.sh
 
       # The shell is half of this repository, so it is linted like the Go.

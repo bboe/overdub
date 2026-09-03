@@ -11,7 +11,7 @@ was measured on hardware rather than reasoned out.
 ## Commands
 
 ```sh
-./build.sh                       # the only supported build
+./build.sh                       # the only supported build; needs an NDK
 deploy/install.sh <name>         # build, push, install over adb
 deploy/uninstall.sh              # remove it again, and give the button back
 gofmt -l .                       # expected to be silent
@@ -22,7 +22,7 @@ shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
 Tests cover what is hand-rolled and checkable in isolation: the wire formats,
-the event layout, the parsers, and the one encoding Alexa's demuxer accepts.
+the event layout, the parsers, and the shape of the chime.
 They run as 32-bit ARM under qemu, because the tree compiles for nothing else.
 Anything touching the hardware or Amazon's stack is verified on the device
 instead.
@@ -31,8 +31,8 @@ instead.
 
 ```
 main.go, serve.go  the flag, the constants, and the wiring
-internal/alexa     speech through Alexa: the intent, the clip, and the server
-                   that serves it to her
+internal/audio     the chime: the tones it is made of, and the OpenSL ES
+                   player that sounds them
 internal/button    the exclusive grab, the clone, the read loop, and whether
                    the action key is ours or Alexa's
 internal/device    the Dot itself: its network, and the firewall rule
@@ -49,5 +49,6 @@ it is in context here without being opened:
 @docs/hardware.md
 @docs/constraints.md
 @docs/architecture.md
+@docs/audio.md
 @docs/pitfalls.md
 @docs/deployment.md

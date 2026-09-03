@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bboe/overdub/internal/alexa"
+	"github.com/bboe/overdub/internal/audio"
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
@@ -70,15 +70,15 @@ func serve(flags config) error {
 		os.Exit(0)
 	}()
 
-	chimeURL, chimeStopped, err := alexa.ServeChime()
+	// Held open for the life of the daemon. Building the player per press was
+	// measured at 333ms of process startup and dynamic linking against 33ms
+	// once it is up, and there is nothing to serve or supervise either way.
+	chime, err := audio.NewChime()
 	if err != nil {
 		log.Printf("warning: %v; presses will be silent", err)
+		chime = nil
 	} else {
-		go func() {
-			log.Printf("chime server stopped: %v", <-chimeStopped)
-			withdraw()
-			os.Exit(1)
-		}()
+		defer chime.Close()
 	}
 
 	// Off the read loop, because the button is not the network's to wait for: a
@@ -89,15 +89,17 @@ func serve(flags config) error {
 	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
 		inputNode, actionKey, uinputName)
 
-	var chiming atomic.Bool
 	return i.Run(func(held time.Duration) {
 		log.Printf("intercepted %d (held %v)", actionKey, held.Round(time.Millisecond))
-		if chimeURL == "" || !chiming.CompareAndSwap(false, true) {
+		if chime == nil {
 			return
 		}
+		// Off the read loop, which mute passes through. Play only queues the
+		// clip rather than waiting for it, but it still takes the player's lock
+		// and a few milliseconds, and a press restarts a chime already sounding
+		// rather than being dropped.
 		go func() {
-			defer chiming.Store(false)
-			if err := alexa.Speak(chimeURL); err != nil {
+			if err := chime.Play(); err != nil {
 				log.Printf("chime: %v", err)
 			}
 		}()

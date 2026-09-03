@@ -383,6 +383,14 @@ Measured on the Dot, with the same chime played twice:
 Neither route moves the substream, because the codec routes downstream of it.
 The ten and a half seconds is why the track is consulted at all.
 
+The daemon's own player is a track too, and it is held for the whole run rather
+than built per chime, so this thread now always has one. Measured idle with the
+player up: `1 Tracks of which 0 are active`, where before the change it read
+`0 Tracks`. The count that is read is the active one whenever the dump offers
+it, which is why the reading is still silence -- and the long form is what this
+Dot prints at zero active, measured rather than assumed, because taking the
+total instead would report every idle moment as playing.
+
 Bluetooth is the route this cannot answer for, and it fails quietly rather than
 loudly. A2DP does not go through the MTK PCM device at all, so no substream
 runs, and the cheap gate below answers "not playing" without ever reading the
@@ -407,7 +415,7 @@ core to rule out.
 
 The reading is not the sample. Sound has to last `SoundOnDelay`, a second,
 before it is reported, and be gone `SoundOffDelay`, another, before that is
-withdrawn. The first is the point of the entity: a press plays a chime of six
+withdrawn. The first is the point of the entity: a press plays a chime of four
 tenths of a second, and reporting that would make this flicker on every press
 rather than say whether the Dot is speaking. The second keeps the gaps inside a
 sentence from reading as the end of it -- measured, two of Alexa's own playbacks
@@ -866,46 +874,64 @@ name has to be unique, and that is the whole of the enforcement. The same
 deafness means a spoofed goodbye retires the Dot from every cache on the
 segment, unnoticed, until something asks again.
 
-## Speech
+## The chime
 
-`internal/alexa/say.go` hands a URL to Alexa's `SpeechSynthesizer` via `am
-startservice`, so she mixes and ducks it like her own speech. Writing PCM is not
-an option: `mediaserver` holds card 0 device 23 permanently, so it contends and
-stutters.
+`internal/audio`. A press is acknowledged by the daemon's own sound, played
+through OpenSL ES, which is the layer AudioFlinger mixes. That is what lets it
+coexist with Alexa: her speech is a track like ours rather than an owner of the
+device. Writing to ALSA directly is not an option and fails worse than silently:
+card 0 device 23 is the speaker, declares one substream, and the audio HAL holds
+it open for the life of the boot, so a second opener gets `EBUSY`. The DSP
+front-ends around it do accept a write and do reach the speaker, and doing so
+corrupts the codec stream and leaves the driver logging
+`mtk_pcm_I2S0dl1_pointer underflow` fast enough to empty the kernel ring buffer,
+until a reboot. Every sound on the device pops in that state.
 
-`/system/priv-app/SpeechInteractionManager` enforces four things:
+Handing a URL to Alexa's `SpeechSynthesizer` via `am startservice` was the route
+before this, and it worked. What it cost was 691ms from press to sound against
+33ms now, measured five trials each at the moment the codec substream goes
+RUNNING. Nearly all of the difference was hers: binder to her service, an http
+fetch, an mp3 decode. It also required a loopback listener alive for the life of
+the daemon, four separate quirks of `SpeechInteractionManager`, one exact mp3
+encoding, and a stack that a debloated Dot may not have running at all. None of
+that is needed to make a sound.
 
-1. **Two parsers read the same intent** and want different shapes. One throws
-   `IllegalArgumentException: Namespace null` without singular
-   `namespace`/`name`/`payload`; the other needs the string arrays
-   `namespaces`/`names`/`payloads`/`payloadVersions`. Send both.
-2. **This build's `am` does not unescape `\,` in `--esa`.** A JSON payload with
-   commas arrives as several broken array elements and fails with `Invalid
-   JSON`, so the array payload carries only `{"url":"..."}`.
-3. **`sequenceId` is required** alongside `directiveId`, both plain string
-   extras. Omit either and the play throws a bare `IllegalArgumentException`,
-   logged as `Unable to play` and naming no field, while `am` still exits 0.
-   The values are not keys: the same pair sent twice plays twice, because
-   `SpeechInteractionManager` mints its own queue id. They are still worth
-   choosing. `directiveId` carries the pid and `sequenceId` counts presses
-   within it, and both appear verbatim in the `SPCH-SIM_*` and
-   `SpeechSynthesizerAgent-TtsEventListener` lines, which is the only way to
-   follow one press through to its `onSpeechEnded`.
-4. **The URL must be `http://`.** `file://` fails with `ClassCastException:
-   FileURLConnection cannot be cast to HttpURLConnection`, because the code
-   casts unconditionally.
+**The player is built once and held.** Building it per press was measured at
+333ms, and almost all of that is `exec` plus linking `libOpenSLES`: the helper's
+own work, from its `main` to the buffer queue, was 4ms. A resident process is
+therefore the whole trick, and once one is resident it may as well be this one --
+a separate helper measured the same 33ms while costing a second binary to push
+and verify, a pipe, a child to supervise, and 10MB of its own.
 
-The clip is served from a loopback listener that lives as long as the daemon.
-If it ever stops the daemon exits, because nothing else would notice: the URL
-would still be handed over, `am` would still exit 0, and every press for the
-rest of the boot would be logged and silent. Exiting hands the supervisor a
-restart, and the kernel drops the grab and the clone with the descriptors.
+**It is cgo, so the target is `GOOS=android` rather than `GOOS=linux`.** That is
+not a preference. Go's linux runtime hangs before `main` against Bionic, so a
+linux build does not fail, it stops -- with no output, which is what makes it
+worth stating. Bionic also folds pthread into libc and ships no `libpthread`,
+while cgo appends `-lpthread` regardless, so `build.sh` makes the empty stub
+archives older NDKs used to carry.
 
-`am` exits 0 whether or not it found the service, printing `Error: Not found; no
-service started.` and returning zero, so its output is read as well as its
-status. That is exactly the state a suppressed Alexa stack leaves behind, and
-without the check the play reads as accepted, and what surfaces is the device's
-own two-minute timeout rather than a reason.
+The daemon pays about 9MB of RSS for holding the media stack in its own address
+space, roughly doubling it, and CI keeps building for `GOOS=linux` because the
+audio package is behind a build tag. What that buys is the tests and `go vet`
+running exactly as they did, on the real 32-bit target, with the audio path
+verified on the device like everything else that touches hardware.
+
+**The sound is generated rather than stored**, which is why no asset is in the
+tree and nothing needs ffmpeg to regenerate one. Two sustained sine tones a
+fifth apart, A5 then E6, ramped at both ends and fading over the last tenth of
+a second. Those
+are the recording's own numbers rather than a choice: a DFT over each half of the
+clip this replaces reads 880.0 Hz and 1320.0 Hz, within two cents of A5 and E6,
+with no partial above the fundamental carrying enough energy to matter, and an
+envelope that holds its level for three quarters of its length rather than decaying
+like a bell.
+
+Generating it once costs 12.7ms on the Dot and 39.4KB held for the run.
+Generating it per press would spend that 12.7ms inside the 33ms budget, which is
+most of what the change bought, and the buffer queue holds a *pointer* into the
+PCM rather than a copy -- so a clip regenerated under a second press is a
+use-after-free rather than a slow chime. The 39.4KB is 0.008% of what this device
+has.
 
 ## Encryption
 

@@ -60,6 +60,11 @@ one.
   the boot script to, and it fails there rather than guessing. A Magisk that
   uses `/data/adb/service.d` needs that path changed first
 * Go 1.25 or later, and `adb`, on a development machine
+* An **Android NDK**, for the chime: it is played through OpenSL ES, so the
+  daemon is cgo and `build.sh` will not run without one. `brew install --cask
+  android-ndk` on macOS, or a release from
+  [developer.android.com/ndk](https://developer.android.com/ndk) elsewhere, with
+  `ANDROID_NDK_HOME` pointing at it
 * Home Assistant on the same subnet as the Dot
 
 The buttons on this hardware:
@@ -107,6 +112,13 @@ you have suppressed things yourself will undo that too.
 `GOARCH=arm` is not optional, and `build.sh` pins it. A build for any other word
 size fails to compile rather than producing a daemon that misreads every input
 event: `internal/evdev` asserts the 32-bit `timeval` this device has.
+
+`GOOS=android` is not optional either, and is the less obvious of the two: the
+chime is cgo against OpenSL ES, and Go's linux runtime hangs before `main`
+against Bionic rather than failing. `build.sh` sets it, finds the NDK compiler,
+and makes the empty `libpthread` stub Bionic needs and cgo asks for. Set
+`ANDROID_NDK_HOME` if the NDK is not where it looks; it says so if it cannot
+find one.
 
 ## Install
 
@@ -314,7 +326,7 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on p
 | nothing starts, and the log says `NAME is unset` | the boot script was installed by hand; rerun `deploy/install.sh <name>` |
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |
-| nothing is spoken | the daemon log. `Error: Not found; no service started.` means the Alexa stack is still suppressed: run `deploy/restore-amazon.sh` and reboot |
+| the button does not chime | the daemon log. `presses will be silent` means the audio player did not start. It needs nothing of Alexa's stack, only the device's own `libOpenSLES.so` |
 | the button does nothing, and the device is otherwise online | the `Button capture` switch, then the daemon log, which names the address that turned it off |
 | the button rings Alexa rather than chiming | the same switch: it is off, which is what off means |
 
@@ -335,17 +347,11 @@ each decision is defending against.
 
 BSD 2-Clause; [LICENSE.txt](LICENSE.txt) carries the terms.
 
-`internal/alexa/chime.mp3` is original to this repository: two sine tones,
-concatenated and faded, so the licence covers it as it covers the code. It is
-synthesised rather than sampled, and this is what made it, byte for byte:
-
-```sh
-ffmpeg -y -loglevel error \
-  -f lavfi -i "sine=frequency=880:duration=0.18,volume=0.5" \
-  -f lavfi -i "sine=frequency=1320:duration=0.22,volume=0.5" \
-  -filter_complex "[0][1]concat=n=2:v=0:a=1,afade=t=out:st=0.30:d=0.10,aresample=24000" \
-  -c:a libmp3lame -b:a 48k -ar 24000 -ac 1 -write_xing 0 -id3v2_version 0 chime.mp3
-```
+The chime is original to this repository, so the licence covers it as it covers
+the code. It is not a recording and not an asset: `internal/audio/chime.go`
+renders it at startup from two sine tones, 880 Hz then 1320 Hz, faded out over
+the last tenth of a second. It was an mp3 built by ffmpeg until the daemon
+learned to make the sound itself, and those are that clip's own numbers.
 
 This licence covers the code in this repository and nothing else. This
 repository contains no Amazon code. The Amazon names it does carry identify
