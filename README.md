@@ -20,7 +20,7 @@ behind you before anything here runs.
 
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
-daemon holds it. The `Button capture` switch gives it back without stopping
+daemon holds it. The `Action button mode` select gives it back without stopping
 anything else, so the Dot keeps reporting and keeps its entities while Alexa
 has her button. Mute and the volume keys are untouched throughout.
 
@@ -237,7 +237,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
-| `switch.<name>_button_capture` | config | whether the action button is the daemon's or Alexa's |
+| `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
 
 Uptime and signal are read once a minute, and again when Home Assistant
 subscribes. Both volumes, the jack, the temperature and the memory are read
@@ -261,17 +261,29 @@ A bluetooth speaker is a third route and is not reported at all. Pair one and
 Android tracks its level separately again, so neither of these readings is what
 you are hearing and `audio_jack` does not say so.
 
-`button_capture` is the one entity Home Assistant writes to. Turn it off and the
-action button is Alexa's again -- press-to-talk is measured, and timers and
-setup mode follow the same key path -- while the daemon keeps running and keeps
-reporting. Turn it back on and the button
-is the daemon's, with no reboot and no reinstall. A press arriving mid-toggle
-belongs to whichever side owned the button when it went down, so nothing is ever
+`action_button_mode` is the one entity Home Assistant writes to, and it has
+three settings:
+
+| mode | Alexa | Home Assistant |
+|---|---|---|
+| `intercept` | nothing | events |
+| `monitor` | answers the press as usual | events |
+| `pass through` | answers the press as usual | nothing |
+
+`intercept` is the default and what the daemon is for. `pass through` gives the
+button back -- press-to-talk is measured, and timers and setup mode follow the
+same key path -- while the daemon keeps running and keeps reporting everything
+else. `monitor` is both at once: press-to-talk still works and your automation
+fires too. Only an intercepted press chimes, because in monitor Alexa answers it
+herself and two acknowledgements for one press is worse than none.
+
+Changing it takes no reboot and no reinstall. A press arriving mid-change
+belongs to whichever mode was set when the key went down, so nothing is ever
 half-delivered.
 
-The daemon starts with the button captured, and the switch is not remembered
-across a restart: a Dot that reboots comes back holding its button whatever the
-switch said before. Home Assistant will restore it if you ask it to, with an
+The daemon starts in `intercept`, and the mode is not remembered across a
+restart: a Dot that reboots comes back holding its button whatever was set
+before. Home Assistant will restore it if you ask it to, with an
 automation on `homeassistant_start` or on the device becoming available.
 
 `audio_jack` is on whenever the socket is occupied and nothing more. The
@@ -315,11 +327,12 @@ It is an event rather than a sensor, so it has no state to read: an automation
 triggers on it, and the dashboard shows no value between presses. A Home
 Assistant that was not connected does not learn about a press afterwards.
 
-Only a captured press does any of this. With `button_capture` off the button is
-Alexa's, and a press is silent and unreported. The chime is how you know the
-daemon still has the button.
+Only a press the daemon reports does any of this. In `pass through` the button
+is Alexa's and a press is unreported. The chime tells intercept from the other
+two rather than telling you the daemon is alive: `monitor` reports the press
+without chiming, so silence there is the mode working as asked.
 
-`button_capture` is still the only entity Home Assistant writes to. Everything
+`action_button_mode` is still the only entity Home Assistant writes to. Everything
 else reports, the button included, and together they are the connection proved
 end to end in both directions.
 
@@ -367,9 +380,9 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on p
 | nothing starts, and the log says `NAME is unset` | the boot script was installed by hand; rerun `deploy/install.sh <name>` |
 | mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
 | every keycode looks wrong | the build. `GOARCH=arm` is required |
-| the button does not chime | the daemon log. `presses will be silent` means the audio player did not start. It needs nothing of Alexa's stack, only the device's own `libOpenSLES.so` |
-| the button does nothing, and the device is otherwise online | the `Button capture` switch, then the daemon log, which names the address that turned it off |
-| the button rings Alexa rather than chiming | the same switch: it is off, which is what off means |
+| the button does not chime | the mode first: only `intercept` chimes. Then the daemon log, where `presses will be silent` means the audio player did not start. It needs nothing of Alexa's stack, only the device's own `libOpenSLES.so` |
+| the button does nothing, and the device is otherwise online | the `Action button mode` select, then the daemon log, which names the address that changed it |
+| the button rings Alexa rather than chiming | the mode. `pass through` is Alexa's alone; `monitor` is hers *and* reported, and only `intercept` chimes |
 
 ## How it works
 

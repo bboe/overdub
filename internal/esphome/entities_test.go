@@ -77,7 +77,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		// these ones, and reading them with this table would compare the wrong
 		// numbers.
 		switch entity[0].num {
-		case uint64(msgListBinarySensor), uint64(msgListSwitch), uint64(msgListEvent):
+		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
@@ -201,12 +201,12 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	}{
 		{"ListEntitiesSensorResponse", msgListSensor, 16},
 		{"ListEntitiesBinarySensorResponse", msgListBinarySensor, 12},
-		{"ListEntitiesSwitchResponse", msgListSwitch, 17},
+		{"ListEntitiesSelectResponse", msgListSelect, 52},
 		{"ListEntitiesDoneResponse", msgListEntitiesDone, 19},
 		{"SensorStateResponse", msgSensorState, 25},
 		{"BinarySensorStateResponse", msgBinarySensorState, 21},
-		{"SwitchStateResponse", msgSwitchState, 26},
-		{"SwitchCommandRequest", msgSwitchCommand, 33},
+		{"SelectStateResponse", msgSelectState, 53},
+		{"SelectCommandRequest", msgSelectCommand, 54},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
 		{"ENTITY_CATEGORY_CONFIG", entityCategoryConfig, 1},
 		{"ENTITY_CATEGORY_DIAGNOSTIC", entityCategoryDiagnostic, 2},

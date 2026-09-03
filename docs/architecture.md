@@ -114,9 +114,9 @@ guarded.
 
 A `HelloRequest` that does not parse is not answered. `pbWalk` visits the fields
 it read before it failed, so replying would mean replying to whatever was
-scraped out of a message we could not understand. `SwitchCommandRequest` is
+scraped out of a message we could not understand. `SelectCommandRequest` is
 under the same rule and for a sharper reason -- acting on it means acting on a
-key and a state that may both be halves of something else -- and the two are
+key and a mode that may both be halves of something else -- and the two are
 the only messages whose payloads are read at all: the rest carry nothing this
 daemon needs, so their bodies are never looked at.
 
@@ -353,12 +353,11 @@ it is there to show. The sensors are the other way round: a sensor with neither
 a device_class nor an icon is drawn as `mdi:eye`, and there is no class for a
 volume percentage, since Home Assistant's `volume` measures litres. Both
 volumes therefore carry `mdi:volume-high` and the rest take the icon their
-class implies. The button switch looks like the jack's case and is not. Home
-Assistant does draw a switch from a pair, `mdi:toggle-switch-variant` and
-`-off`, but it also renders a toggle control beside it, so the icon is not what
-shows the state there and the pair an icon replaces was redundant. What it
-costs to keep is identification: a generic toggle says nothing about which of
-the device's entities it is. So `button_capture` carries
+class implies. The button mode looks like the jack's case and is not. A select
+is drawn with a dropdown showing the chosen option, so its icon was never what
+shows the state and no pair is given up by sending one. What it
+costs to keep is identification: a generic control says nothing about which of
+the device's entities it is. So `action_button_mode` carries
 `mdi:gesture-tap-button` and the jack still carries none. The icon fields are
 not the same number either, 5 on a sensor and a switch, 8 on a binary sensor,
 which is the field-numbers-are-per-message rule once more.
@@ -701,19 +700,49 @@ flight each, and the product has to fit a device with 512 MiB of RAM, of which
 so is the file they come from: the kernel writes `kB` and means KiB, which is
 why a reading of it is divided by 1024 rather than by 1000.
 
-## The button switch
+## The button mode
 
-`button_capture` is the one entity Home Assistant writes to, and everything
-else here is read-only. Off, the action button is Alexa's again; on, it is this
-daemon's and a press does what it did before. It is a switch rather than a
-diagnostic reading of whether the grab took, because what somebody looking at
-that reading almost always wants is to change it.
+`action_button_mode` is the one entity Home Assistant writes to, and everything
+else here is read-only. It is a select rather than a diagnostic reading of
+whether the grab took, because what somebody looking at that reading almost
+always wants is to change it.
 
-**The grab is untouched either way.** Releasing it is the obvious reading of
+Three modes, and they are two independent things rather than three points on a
+line: whether Android sees the key, and whether Home Assistant hears about it.
+**Intercept** keeps the key and reports it. **Monitor** re-emits it *and*
+reports it, so Alexa answers the press as she always did and an automation fires
+too. **Pass through** re-emits it and reports nothing.
+
+Measured on the Dot, 138 injected into `event1` with each mode set through the
+API, counting the daemon's own gesture lines against `uber` in logcat, which is
+this Dot's name for the action button. The daemon's count separates reported
+from not; logcat is what separates the two modes that report:
+
+| mode | daemon reports | Alexa sees the key |
+|---|---|---|
+| `intercept` | yes | no |
+| `monitor` | yes | yes |
+| `pass through` | no | yes |
+
+It was a switch, and monitor is what it could not say. Two states can only offer
+"ours" or "hers", and the useful third is both -- press-to-talk still working
+while Home Assistant counts the presses.
+
+Intercept is first in the list and is what a Dot ships in, so a device nobody
+has configured keeps its button: the daemon exists to take it. `Mode`'s zero
+value is intercept for the same reason, so a construction path that never
+mentions a mode does not quietly hand the key to Alexa.
+
+A mode the listing did not offer is refused rather than acted on. Home Assistant
+only sends what it was told, so anything else is a peer inventing one, and a
+select can be asked for a word rather than a bit -- which is a thing a switch
+could not get wrong.
+
+**The grab is untouched by all three.** Releasing it is the obvious reading of
 "pass the button through" and it is the wrong one: the real node still delivers
 to `EventHub`, so a released grab beside a live clone lands every key twice, and
-mute would toggle on and straight back off. What "not captured" means instead is
-that keycode 138 is re-emitted through the clone like every other key. The clone
+mute would toggle on and straight back off. What the other two modes mean instead
+is that keycode 138 is re-emitted through the clone like every other key. The clone
 is named `mtk-kpd` so Android applies the same keylayout, and that is the route
 mute has always taken here, which is the reason the clone carries the whole key
 bitmap in the first place.
@@ -725,7 +754,7 @@ same `IsExternal`. `mtk-kpd.kl` maps `key 138 BUTTON_MODE` and both devices
 resolve to it.
 
 The app layer was the open question and it is now answered. Measured on the Dot
-with capture off and 138 injected into `event1`, which reaches the daemon and
+in pass through with 138 injected into `event1`, which reaches the daemon and
 not `EventHub` because `EVIOCGRAB` gates reading rather than writing:
 
 ```
@@ -737,8 +766,8 @@ SPCH-SIM_SimStateMachine:    ReadyState -> ListenState
 ```
 
 `deviceId=24` is the clone, so Alexa's handlers do not care which device the
-`KeyEvent` came from; the daemon logged no interception for that press and did
-for the same injection with capture on, which is the control. "uber" is the
+`KeyEvent` came from; the daemon logged nothing for that press and did report
+the same injection in intercept, which is the control. "uber" is the
 Dot's own name for the action button, and is what to grep for.
 
 What that measures exactly is press-to-talk. Stopping a timer and entering setup
@@ -809,11 +838,12 @@ unbounded write to `/data` by an unauthenticated-until-the-key peer, which is
 the hazard docs/pitfalls.md exists for. A budget of its own would work; sharing
 the general one and saying so is what is done.
 
-`SwitchStateResponse` has no `missing_state` field, unlike the state messages
-that carry a reading: a switch is what this end last set it to, and there is no
-read of the device to have failed. Its listing numbers are its own as usual --
-17, 26 and 33 against the sensor's 16 and 25 -- and `entity_category` is field
-8 there, carrying `config` rather than the `diagnostic` every other entity here
+`SelectStateResponse` has a `missing_state` at field 3, as the state messages
+carrying a reading do, and nothing here sends one: a select is what this end
+last set it to, and there is no read of the device to have failed. Its listing
+numbers are its own as usual -- 52, 53 and 54 against the sensor's 16 and 25 --
+and `entity_category` is field 8 there, carrying `config` rather than the
+`diagnostic` every other entity here
 carries.
 
 ## What a press reports

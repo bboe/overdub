@@ -63,7 +63,16 @@ func TestWaitForNodeReturnsOnceTheNodeAppears(t *testing.T) {
 
 // Most of these tests are about which key reaches which end, and the chime the
 // key-down callback stands for is neither.
-func noDown() {}
+func noDown(Mode) {}
+
+// The mode a latch test flips to. Any other mode will do: what is under test is
+// that the halves of one press do not take different routes, not which route.
+func other(m Mode) Mode {
+	if m == ModeIntercept {
+		return ModePassThrough
+	}
+	return ModeIntercept
+}
 
 type emitted struct {
 	code  uint16
@@ -96,8 +105,8 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func() { order = append(order, "down") },
-		func(h time.Duration) {
+	}, func(Mode) { order = append(order, "down") },
+		func(_ Mode, h time.Duration) {
 			order = append(order, "press")
 			held = append(held, h)
 		})
@@ -131,7 +140,7 @@ func TestRouteIgnoresAReleaseWithNoPress(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, noDown, func(time.Duration) { presses++ })
+	}, noDown, func(Mode, time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -154,7 +163,7 @@ func TestRouteStopsOnAFailedEmit(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return boom
-	}, noDown, func(time.Duration) {})
+	}, noDown, func(Mode, time.Duration) {})
 
 	if !errors.Is(err, boom) {
 		t.Fatalf("route returned %v, want %v: a dead clone holds the grab", err, boom)
@@ -172,7 +181,7 @@ func TestRouteIgnoresASecondReleaseAfterAPress(t *testing.T) {
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0}, // a second release
 	)), func(uint16, int32) error { return nil }, noDown,
-		func(h time.Duration) { held = append(held, h) })
+		func(_ Mode, h time.Duration) { held = append(held, h) })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -242,14 +251,14 @@ func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 	var got []emitted
 	presses, downs := 0, 0
 	i := &Interceptor{consume: testKey}
-	i.SetCaptured(false)
+	i.SetMode(ModePassThrough)
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func() { downs++ }, func(time.Duration) { presses++ })
+	}, func(Mode) { downs++ }, func(Mode, time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -271,17 +280,17 @@ func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 // about capture keeps the key. The alternative fails the wrong way round: a
 // daemon that gave the button back because a field was never set.
 func TestTheZeroValueHoldsTheButton(t *testing.T) {
-	if !(&Interceptor{}).Captured() {
+	if (&Interceptor{}).Mode() != ModeIntercept {
 		t.Error("a fresh Interceptor is not capturing, so it hands the action button to Alexa")
 	}
 }
 
-func TestSetCapturedIsReadBack(t *testing.T) {
+func TestSetModeIsReadBack(t *testing.T) {
 	i := &Interceptor{consume: testKey}
-	for _, want := range []bool{false, true, false} {
-		i.SetCaptured(want)
-		if got := i.Captured(); got != want {
-			t.Errorf("SetCaptured(%v) reads back as %v", want, got)
+	for _, want := range []Mode{ModePassThrough, ModeMonitor, ModeIntercept, ModePassThrough} {
+		i.SetMode(want)
+		if got := i.Mode(); got != want {
+			t.Errorf("SetMode(%v) reads back as %v", want, got)
 		}
 	}
 }
@@ -313,40 +322,40 @@ func (f *flipAfter) Read(p []byte) (int, error) {
 func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
-		start   bool
+		start   Mode
 		want    []emitted
 		presses int
 	}{
-		// Latched captured: the release still reports the press, and nothing
-		// of it reaches Android, which was never told it began.
-		{"let go while held", true, nil, 1},
+		// Latched intercepting: the release still reports the press, and
+		// nothing of it reaches Android, which was never told it began.
+		{"let go while held", ModeIntercept, nil, 1},
 		// Latched passing: Android already has the key-down, so it gets the
 		// key-up too rather than being left holding BUTTON_MODE.
-		{"taken while held", false, []emitted{{testKey, 1}, {testKey, 0}}, 0},
+		{"taken while held", ModePassThrough, []emitted{{testKey, 1}, {testKey, 0}}, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []emitted
 			presses := 0
 			i := &Interceptor{consume: testKey}
-			i.SetCaptured(tt.start)
+			i.SetMode(tt.start)
 			r := &flipAfter{
 				r: bytes.NewReader(events(
 					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 					evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 				)),
 				at:   2,
-				flip: func() { i.SetCaptured(!tt.start) },
+				flip: func() { i.SetMode(other(tt.start)) },
 			}
 			err := i.route(r, func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, noDown, func(time.Duration) { presses++ })
+			}, noDown, func(Mode, time.Duration) { presses++ })
 
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
 			}
-			if i.Captured() == tt.start {
-				t.Fatal("the flag never flipped, so this test proves nothing")
+			if i.Mode() == tt.start {
+				t.Fatal("the mode never changed, so this test proves nothing")
 			}
 			if presses != tt.presses {
 				t.Errorf("reported %d presses, want %d", presses, tt.presses)
@@ -365,35 +374,35 @@ func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
 func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
 	const repeat = 2
 	for _, tt := range []struct {
-		name     string
-		captured bool
-		send     []evdev.Event
-		want     []emitted
+		name string
+		mode Mode
+		send []evdev.Event
+		want []emitted
 	}{
-		{"consumed press swallows its repeats", true, []evdev.Event{
+		{"consumed press swallows its repeats", ModeIntercept, []evdev.Event{
 			{Type: evdev.EvKey, Code: testKey, Value: 1},
 			{Type: evdev.EvKey, Code: testKey, Value: repeat},
 			{Type: evdev.EvKey, Code: testKey, Value: 0},
 		}, nil},
-		{"passed-through press carries its repeats", false, []evdev.Event{
+		{"passed-through press carries its repeats", ModePassThrough, []evdev.Event{
 			{Type: evdev.EvKey, Code: testKey, Value: 1},
 			{Type: evdev.EvKey, Code: testKey, Value: repeat},
 			{Type: evdev.EvKey, Code: testKey, Value: 0},
 		}, []emitted{{testKey, 1}, {testKey, repeat}, {testKey, 0}}},
 		// The key was down before the grab took it, so Android has no press of
 		// ours to hang a repeat on.
-		{"a repeat with no press of ours is dropped", false, []evdev.Event{
+		{"a repeat with no press of ours is dropped", ModePassThrough, []evdev.Event{
 			{Type: evdev.EvKey, Code: testKey, Value: repeat},
 		}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []emitted
 			i := &Interceptor{consume: testKey}
-			i.SetCaptured(tt.captured)
+			i.SetMode(tt.mode)
 			err := i.route(bytes.NewReader(events(tt.send...)), func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, noDown, func(time.Duration) {})
+			}, noDown, func(Mode, time.Duration) {})
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
 			}
@@ -401,5 +410,83 @@ func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
 				t.Errorf("emitted %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// The three modes differ in two independent things: whether Android sees the
+// key, and whether the caller hears about it. Monitor is the new one and the
+// only combination that does both, which is what makes it worth a table rather
+// than a third test that looks like the other two.
+func TestEachModeEmitsAndReportsOrDoesNot(t *testing.T) {
+	for _, tt := range []struct {
+		mode      Mode
+		wantEmit  []emitted
+		wantDowns int
+	}{
+		// The key is ours: Android is never told, and the caller is.
+		{ModeIntercept, nil, 1},
+		// Alexa answers it as she always did, and Home Assistant hears too.
+		{ModeMonitor, []emitted{{testKey, 1}, {testKey, 0}}, 1},
+		// The clone does what the real node would, and nothing is reported.
+		{ModePassThrough, []emitted{{testKey, 1}, {testKey, 0}}, 0},
+	} {
+		t.Run(tt.mode.String(), func(t *testing.T) {
+			var got []emitted
+			downs, presses := 0, 0
+			i := &Interceptor{consume: testKey}
+			i.SetMode(tt.mode)
+			err := i.route(bytes.NewReader(events(
+				evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
+				evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
+			)), func(code uint16, value int32) error {
+				got = append(got, emitted{code, value})
+				return nil
+			}, func(Mode) { downs++ }, func(Mode, time.Duration) { presses++ })
+
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("route returned %v, want io.EOF", err)
+			}
+			if !reflect.DeepEqual(got, tt.wantEmit) {
+				t.Errorf("%v emitted %v, want %v", tt.mode, got, tt.wantEmit)
+			}
+			// Both halves or neither: a mode that chimed without reporting, or
+			// reported without chiming, is one of them arriving alone.
+			if downs != tt.wantDowns || presses != tt.wantDowns {
+				t.Errorf("%v reported %d downs and %d presses, want %d of each",
+					tt.mode, downs, presses, tt.wantDowns)
+			}
+		})
+	}
+}
+
+// The mode names are what Home Assistant is offered and what it sends back, so
+// a rename here is an option the daemon lists and then refuses to act on.
+func TestTheModeNamesAreTheOnesOffered(t *testing.T) {
+	for _, tt := range []struct {
+		mode Mode
+		want string
+	}{
+		{ModeIntercept, "intercept"},
+		{ModeMonitor, "monitor"},
+		{ModePassThrough, "pass through"},
+	} {
+		if got := tt.mode.String(); got != tt.want {
+			t.Errorf("mode %d is named %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// A mode with no name answers with none. Without this a mode added later
+// stringifies as intercept, so the select reports a button being held while it
+// is being passed through, and the daemon agrees with itself all the way down.
+func TestAModeWithNoNameHasNoName(t *testing.T) {
+	if got := Mode(99).String(); got != "" {
+		t.Errorf("an unrecognised mode is named %q, want the empty string", got)
+	}
+	// And every real one still has one, or the entity lists a blank option.
+	for _, m := range []Mode{ModeIntercept, ModeMonitor, ModePassThrough} {
+		if m.String() == "" {
+			t.Errorf("mode %d has no name", m)
+		}
 	}
 }

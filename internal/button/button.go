@@ -20,12 +20,41 @@ type Interceptor struct {
 	consume uint16
 	once    sync.Once
 
-	// Whether the consumed key is being handed to the clone rather than acted
-	// on. Stated this way round so that the zero value is a captured button:
-	// a construction path that never sets it keeps the key, which is what this
-	// daemon is for, rather than quietly giving it back. Read by the read loop
-	// and written from whichever goroutine calls SetCaptured.
-	passing atomic.Bool
+	// What the daemon does with the consumed key. Read by the read loop and
+	// written from whichever goroutine calls SetMode.
+	mode atomic.Int32
+}
+
+// What the daemon does with a key it was given.
+type Mode int32
+
+const (
+	// The key is consumed and reported. The zero value, so a construction path
+	// that never mentions a mode keeps the key rather than quietly handing it
+	// to Alexa, which is what this daemon is for.
+	ModeIntercept Mode = iota
+	// The key is re-emitted and reported: Alexa answers it as she always did,
+	// and Home Assistant hears about it too.
+	ModeMonitor
+	// The key is re-emitted and nothing is reported. The daemon holds the grab
+	// either way, so this is the clone doing what the real node would have.
+	ModePassThrough
+)
+
+// A mode with no name here answers with none, rather than with the first one.
+// The alternative is a mode added later that reports itself as intercept: the
+// select would show a button held while it was being passed through, and
+// nothing at either end would say so.
+func (m Mode) String() string {
+	switch m {
+	case ModeIntercept:
+		return "intercept"
+	case ModeMonitor:
+		return "monitor"
+	case ModePassThrough:
+		return "pass through"
+	}
+	return ""
 }
 
 func Open(path string, consume uint16, uiName string, wait time.Duration) (*Interceptor, error) {
@@ -79,16 +108,16 @@ func Open(path string, consume uint16, uiName string, wait time.Duration) (*Inte
 	return &Interceptor{node: file, clone: uinput, consume: consume}, nil
 }
 
-func (i *Interceptor) Captured() bool { return !i.passing.Load() }
+func (i *Interceptor) Mode() Mode { return Mode(i.mode.Load()) }
 
-// Hands the key to Alexa and takes it back. The grab is untouched either way --
-// it is what stops the real node reaching EventHub at all, so releasing it
-// would leave the clone echoing a live original and land every key twice.
-// Letting the key go means re-emitting it through the clone instead.
+// The grab is untouched by any of the modes -- it is what stops the real node
+// reaching EventHub at all, so releasing it would leave the clone echoing a
+// live original and land every key twice. What a mode chooses is whether the
+// clone re-emits the key, and whether the caller hears about it.
 //
-// It takes effect at the next press rather than at the next event, so a toggle
-// arriving mid-press cannot split one between the two paths.
-func (i *Interceptor) SetCaptured(on bool) { i.passing.Store(!on) }
+// It takes effect at the next press rather than at the next event, so a change
+// arriving mid-press cannot split one between two paths.
+func (i *Interceptor) SetMode(m Mode) { i.mode.Store(int32(m)) }
 
 // The caller's signal handler and its defer can both reach this, so it has to
 // be idempotent. A second pass would be inert rather than harmful -- an
@@ -103,19 +132,22 @@ func (i *Interceptor) Close() {
 
 // The key is reported twice, because the two halves answer different questions.
 // onDown is the acknowledgement and has to sound before anybody knows what the
-// press will be; onPress carries how long it lasted.
+// press will be; onPress carries how long it lasted. Neither runs in
+// ModePassThrough, where reporting nothing is the whole of what the mode means.
+// Both are given the mode latched at the key-down, so the caller can tell a key
+// it owns from one Alexa is answering too.
 //
 // Both run on the read loop, which mute passes through, so neither may block for
 // long. onPress may wait: MultiPress orders its reports under one lock, and a
 // timer goroutine can hold it across the caller's own callback. That callback
 // therefore bounds how long mute can be delayed, whichever goroutine runs it.
-func (i *Interceptor) Run(onDown func(), onPress func(held time.Duration)) error {
+func (i *Interceptor) Run(onDown func(Mode), onPress func(Mode, time.Duration)) error {
 	return i.route(i.node, i.clone.Emit, onDown, onPress)
 }
 
-func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(), onPress func(held time.Duration)) error {
+func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(Mode), onPress func(Mode, time.Duration)) error {
 	var pressedAt time.Time
-	consuming := false
+	mode := ModePassThrough
 	buf := make([]byte, evdev.EventSize)
 	for {
 		if _, err := io.ReadFull(r, buf); err != nil {
@@ -126,13 +158,13 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown 
 		if event.Type == evdev.EvKey && event.Code == i.consume {
 			switch event.Value {
 			case evdev.KeyPress:
-				// Latched here and held to the release, so a toggle inside one
+				// Latched here and held to the release, so a change inside one
 				// press cannot send its halves different ways: a release
 				// Android was never given a press for, or a press it is never
 				// told ended.
-				consuming, pressedAt = i.Captured(), time.Now()
-				if consuming {
-					onDown()
+				mode, pressedAt = i.Mode(), time.Now()
+				if mode != ModePassThrough {
+					onDown(mode)
 				}
 			case evdev.KeyRelease:
 				// No press of ours: the key was down before the grab took it,
@@ -142,8 +174,8 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown 
 				}
 				held := time.Since(pressedAt)
 				pressedAt = time.Time{}
-				if consuming {
-					onPress(held)
+				if mode != ModePassThrough {
+					onPress(mode, held)
 				}
 			default:
 				// Autorepeat, which belongs to the press in flight if there is
@@ -152,7 +184,9 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown 
 					continue
 				}
 			}
-			if consuming {
+			// Only intercept keeps the key. The other two hand it to the clone
+			// like every other key, which is the route mute has always taken.
+			if mode == ModeIntercept {
 				continue
 			}
 		}

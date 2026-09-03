@@ -13,13 +13,17 @@ import (
 const (
 	kindSensor = iota
 	kindBinary
-	kindSwitch
+	kindSelect
 )
 
 type reading struct {
 	key   uint32
 	value float32
-	ok    bool
+	// A select's state is a word rather than a number, and this is the only
+	// kind that carries one. Comparable like the rest of the struct, so the
+	// published state still tells a changed reading from an unchanged one.
+	text string
+	ok   bool
 	// A field here rather than a published map per kind, because one published
 	// state is what makes a subscriber and the polls agree.
 	kind int
@@ -39,7 +43,7 @@ func (s *Server) readTicked() []reading {
 		// before its first wait; and a toggle reaches Home Assistant by waking
 		// this poll, which is what handle can do with the server lock held and
 		// publishing is not.
-		{key: s.keyCapture, value: boolValue(s.captured()), ok: true, kind: kindSwitch},
+		{key: s.keyMode, text: s.buttonMode(), ok: true, kind: kindSelect},
 	}
 }
 
@@ -159,8 +163,8 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 		switch r.kind {
 		case kindBinary:
 			msgType, payload = msgBinarySensorState, binaryState(r.key, r.value != 0, !r.ok)
-		case kindSwitch:
-			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
+		case kindSelect:
+			msgType, payload = msgSelectState, selectState(r.key, r.text)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err
@@ -169,20 +173,21 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 	return nil
 }
 
+// SelectStateResponse. Its missing_state is field 3 as a sensor's is, but a
+// select is what this end last set it to and there is no read of the device to
+// have failed, so nothing here sends one.
+func selectState(key uint32, choice string) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.str(2, choice)
+	return p.b
+}
+
 func binaryState(key uint32, on, missing bool) []byte {
 	var p pb
 	p.fixed32(1, key)
 	p.boolean(2, on)
 	p.boolean(3, missing)
-	return p.b
-}
-
-// SwitchStateResponse has no missing_state field: a switch is what this end
-// last set it to, and there is no read of the device to have failed.
-func switchState(key uint32, on bool) []byte {
-	var p pb
-	p.fixed32(1, key)
-	p.boolean(2, on)
 	return p.b
 }
 

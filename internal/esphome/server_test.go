@@ -651,11 +651,15 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 		case 1:
 			key = uint32(f.num)
 		case 2:
-			if msgType == msgBinarySensorState || msgType == msgSwitchState {
+			switch msgType {
+			case msgBinarySensorState:
 				if f.num != 0 {
 					value = 1
 				}
-			} else {
+			case msgSelectState:
+				// A word rather than a number. Callers that want it use
+				// selectReading; this one only needs the key.
+			default:
 				value = math.Float32frombits(uint32(f.num))
 			}
 		case 3:
@@ -670,9 +674,14 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 	if seen[1] != wireFixed32 {
 		t.Errorf("the key went out as wire type %d, want fixed32 (%d)", seen[1], wireFixed32)
 	}
+	// Each state message encodes its value differently, and the wrong wire type
+	// is a field Home Assistant skips rather than an error either end sees.
 	want := wireFixed32
-	if msgType == msgBinarySensorState || msgType == msgSwitchState {
+	switch msgType {
+	case msgBinarySensorState:
 		want = wireVarint
+	case msgSelectState:
+		want = wireBytes
 	}
 	if seen[2] != want {
 		t.Errorf("the value went out as wire type %d, want %d for message %d", seen[2], want, msgType)
@@ -707,7 +716,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0, s.keyCapture: 1,
+		s.keySound: 0, s.keyMode: 0,
 	}
 }
 
@@ -753,9 +762,9 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a reading did not arrive: %v", err)
 		}
-		if msgType != msgSensorState && msgType != msgBinarySensorState && msgType != msgSwitchState {
+		if msgType != msgSensorState && msgType != msgBinarySensorState && msgType != msgSelectState {
 			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d) or switch (%d) state",
-				msgType, msgSensorState, msgBinarySensorState, msgSwitchState)
+				msgType, msgSensorState, msgBinarySensorState, msgSelectState)
 		}
 		key, value, missing := sensorReading(t, msgType, payload)
 		expected, known := want[key]
@@ -885,7 +894,7 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	}
 
 	// Every reading moves, so anything the tick carries arrives and anything it
-	// does not carry is visibly absent. button_capture is on this tick too and
+	// does not carry is visibly absent. action_button_mode is on this tick too and
 	// deliberately stands still: it is not a reading of the device, and what
 	// this is measuring is which reads the tick repeats.
 	s.uptime = func() (float32, bool) { return 5678, true }
@@ -1878,9 +1887,9 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				name    string
 				msgType int
 			}{
-				s.keyJackOn:  {"audio_jack", msgBinarySensorState},
-				s.keySound:   {"speaker_playing", msgBinarySensorState},
-				s.keyCapture: {"button_capture", msgSwitchState},
+				s.keyJackOn: {"audio_jack", msgBinarySensorState},
+				s.keySound:  {"speaker_playing", msgBinarySensorState},
+				s.keyMode:   {"action_button_mode", msgSelectState},
 			}
 
 			s.sound = tt.sound

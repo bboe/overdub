@@ -109,19 +109,24 @@ func serve(flags config) error {
 
 	// Called from whichever goroutine recognised the gesture. MultiPress orders
 	// them, so two cannot reach Home Assistant the wrong way round.
+	//
+	// The line does not say which mode the press was in, and the word is not
+	// "intercepted": monitor reports a press it also handed to Alexa. Which
+	// mode is in force is logged where it changes, which is once rather than
+	// once a press.
 	chain := button.NewMultiPress(multiGap, holdTime, func(g button.Gesture, count int, holdFor time.Duration) {
 		event, ok := pressEvent(g)
 		if !ok {
-			log.Printf("intercepted %d: gesture %v has no esphome name; not reported", actionKey, g)
+			log.Printf("action button %d: gesture %v has no esphome name; not reported", actionKey, g)
 			return
 		}
 		switch {
 		case holdFor > 0:
-			log.Printf("intercepted %d: %s (held %v)", actionKey, event, holdFor.Round(time.Millisecond))
+			log.Printf("action button %d: %s (held %v)", actionKey, event, holdFor.Round(time.Millisecond))
 		case count > 0:
-			log.Printf("intercepted %d: %s (%d)", actionKey, event, count)
+			log.Printf("action button %d: %s (%d)", actionKey, event, count)
 		default:
-			log.Printf("intercepted %d: %s", actionKey, event)
+			log.Printf("action button %d: %s", actionKey, event)
 		}
 		// Sent from here rather than through a queue: FirePress holds the
 		// server lock only long enough to queue a frame per subscriber. A queue
@@ -134,9 +139,9 @@ func serve(flags config) error {
 	// The chime is at the key-down, before anything knows what the run will be,
 	// so it sounds once per press rather than once per gesture.
 	return i.Run(
-		func() {
+		func(mode button.Mode) {
 			chain.Down()
-			if chime == nil {
+			if chime == nil || !chimes(mode) {
 				return
 			}
 			// Off the read loop, which mute passes through. Play only queues the
@@ -149,7 +154,24 @@ func serve(flags config) error {
 				}
 			}()
 		},
-		chain.Up)
+		func(_ button.Mode, held time.Duration) { chain.Up(held) })
+}
+
+// Only a key the daemon is keeping gets a chime. In monitor mode Alexa answers
+// the same press herself, and two acknowledgements for one press is worse than
+// none; in pass through there is nothing of ours to acknowledge.
+func chimes(mode button.Mode) bool { return mode == button.ModeIntercept }
+
+// The modes the button has, under the names Home Assistant is offered. Two
+// functions rather than one map so that a mode with no name fails to compile
+// here rather than reaching a listing that cannot name it.
+func parseButtonMode(choice string) (button.Mode, bool) {
+	for _, m := range []button.Mode{button.ModeIntercept, button.ModeMonitor, button.ModePassThrough} {
+		if m.String() == choice {
+			return m, true
+		}
+	}
+	return button.ModeIntercept, false
 }
 
 // What the gesture is called on the wire, and the whole of the translation.
@@ -189,10 +211,17 @@ func serveAPI(name string, psk []byte, i *button.Interceptor) {
 		log.Printf("%s appeared", wifiIface)
 	}
 	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac, psk)
-	// The button owns whether it is captured; the server reads it and asks for
-	// it to change. Wired here rather than passed to NewServer because a server
-	// is testable without a button and a Dot never runs without one.
-	server.UseButton(i.Captured, i.SetCaptured)
+	// The button owns its mode; the server reads it and asks for it to change.
+	// The names cross here rather than in either package, the way pressEvent
+	// does. Wired here rather than passed to NewServer because a server is
+	// testable without a button and a Dot never runs without one.
+	server.UseButton(
+		func() string { return i.Mode().String() },
+		func(choice string) {
+			if m, ok := parseButtonMode(choice); ok {
+				i.SetMode(m)
+			}
+		})
 	// Found rather than handed over: the read loop has been running since before
 	// there was an address to build this server with.
 	api.Store(server)

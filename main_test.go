@@ -190,17 +190,17 @@ func TestTheReadmeQuotesTheMissingKeyError(t *testing.T) {
 }
 
 // The one line that hands the button to the API, and nothing else reaches it:
-// serveAPI dials no test and the switch lists either way, so deleting the call
-// leaves a switch that reports the button captured for ever and moves nothing,
+// serveAPI dials no test and the select lists either way, so deleting the call
+// leaves a select that reports one mode for ever and moves nothing,
 // with the whole suite green. Asserted over the source for the reason the port
 // and the key path are: it is the only thing that can see a wiring line go.
-func TestServeWiresTheButtonToTheSwitch(t *testing.T) {
+func TestServeWiresTheButtonToTheSelect(t *testing.T) {
 	source, err := os.ReadFile("serve.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(source), "server.UseButton(") {
-		t.Error("serve.go never calls UseButton, so button_capture moves nothing and says so to nobody")
+		t.Error("serve.go never calls UseButton, so action_button_mode moves nothing and says so to nobody")
 	}
 }
 
@@ -325,5 +325,42 @@ func TestTheBlueprintSelectsOnTheGesturesTheDaemonSends(t *testing.T) {
 		if !strings.Contains(string(body), "trigger.event.data."+key) {
 			t.Errorf("the blueprint never reads trigger.event.data.%s", key)
 		}
+	}
+}
+
+// The chime says the daemon has the button, so it belongs to the one mode that
+// keeps it. Monitor hands the same press to Alexa, who answers it herself, and
+// two acknowledgements for one press is worse than none.
+func TestOnlyAnInterceptedPressChimes(t *testing.T) {
+	for _, tt := range []struct {
+		mode button.Mode
+		want bool
+	}{
+		{button.ModeIntercept, true},
+		{button.ModeMonitor, false},
+		{button.ModePassThrough, false},
+	} {
+		if got := chimes(tt.mode); got != tt.want {
+			t.Errorf("a press in %v chimes=%v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// The names the select offers and the modes the button has are one set. A mode
+// with no name is one Home Assistant can never choose; a name with no mode is
+// one the daemon offers and then refuses to act on.
+func TestEveryOfferedModeParsesBackToAMode(t *testing.T) {
+	for _, m := range []button.Mode{button.ModeIntercept, button.ModeMonitor, button.ModePassThrough} {
+		got, ok := parseButtonMode(m.String())
+		if !ok {
+			t.Errorf("mode %v is named %q, which parseButtonMode does not know", m, m.String())
+			continue
+		}
+		if got != m {
+			t.Errorf("%q parsed back to %v, want %v", m.String(), got, m)
+		}
+	}
+	if _, ok := parseButtonMode("captured"); ok {
+		t.Error("a name the button has no mode for parsed anyway")
 	}
 }

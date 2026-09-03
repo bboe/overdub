@@ -17,11 +17,17 @@ const (
 
 	speakerIcon = "mdi:speaker"
 
-	// A switch renders a toggle control, so unlike a binary sensor its icon is
-	// not what shows the state. That frees it to say which entity this is,
-	// which is the job an icon has among a device's others.
-	captureIcon = "mdi:gesture-tap-button"
+	// A select renders a dropdown, so unlike a binary sensor its icon is not
+	// what shows the state. That frees it to say which entity this is, which is
+	// the job an icon has among a device's others.
+	buttonModeIcon = "mdi:gesture-tap-button"
 )
+
+// What the action button can be told to do, and the whole of what a
+// SelectCommandRequest may name. First is what a Dot ships in: the daemon
+// exists to take the button, so a device nobody has configured keeps it.
+// docs/architecture.md says what each one means.
+var buttonModes = []string{"intercept", "monitor", "pass through"}
 
 // What a press can turn out to be. Home Assistant refuses an event whose type
 // the listing did not advertise, so the types it is told and the types FirePress
@@ -145,15 +151,25 @@ func (s *Server) listEntities(conn *conn) error {
 
 	// The one entity Home Assistant writes to. Config rather than diagnostic:
 	// it changes what the device does rather than reporting what it is doing.
-	var capture pb
-	capture.str(1, "button_capture")
-	capture.fixed32(2, s.keyCapture)
-	capture.str(3, "Button capture")
-	capture.str(5, captureIcon)
-	capture.boolean(6, false) // assumed_state: this end knows, and is asked
-	capture.boolean(7, false)
-	capture.u32(8, entityCategoryConfig)
-	if err := s.send(conn, msgListSwitch, capture.b); err != nil {
+	// Its field numbers are a select's own -- options is 6, where 6 on a switch
+	// is assumed_state and on a sensor is the unit.
+	var mode pb
+	mode.str(1, "action_button_mode")
+	mode.fixed32(2, s.keyMode)
+	// "Action button mode" rather than "Action button": Home Assistant sets
+	// has_entity_name and builds the entity id from the device name and this,
+	// so the bare name would show twice on the device page -- once here and
+	// once on the event entity -- and read as two controls for one button. It
+	// also keeps object_id equal to the slug of the name, as every other entity
+	// here does.
+	mode.str(3, "Action button mode")
+	mode.str(5, buttonModeIcon)
+	for _, option := range buttonModes {
+		mode.str(6, option)
+	}
+	mode.boolean(7, false) // disabled_by_default
+	mode.u32(8, entityCategoryConfig)
+	if err := s.send(conn, msgListSelect, mode.b); err != nil {
 		return err
 	}
 
