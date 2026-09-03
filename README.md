@@ -228,7 +228,7 @@ Dot's own firewall.
 
 | Entity | Kind | Notes |
 |---|---|---|
-| `event.<name>_action_button` | none | `press`, or `hold` for six hundred milliseconds or more; an event, so it has no state between presses |
+| `event.<name>_action_button` | none | Home Assistant's standard button types: `press_end`, `multi_press_end`, `long_press_start`, `long_press_end`; an event, so it has no state between presses |
 | `sensor.<name>_uptime` | diagnostic | seconds since boot |
 | `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 | `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
@@ -279,21 +279,45 @@ detection is electrical and stops at the contacts: a bare cable with nothing on
 the far end reads the same as headphones, and unplugging the far end of a
 connected cable is invisible to it.
 
-`action_button` is the button itself. A press fires `press` and a press held for
-six hundred milliseconds or more fires `hold`, which is Alexa's own threshold
-for a long press, so the hold you already know is the hold this reports. Both
-arrive when you let go: a hold is reported at its end rather than at the moment
-it becomes one.
+`action_button` is the button itself. It reports Home Assistant's standard
+button gestures rather than names of its own, so an automation written for any
+other button works here.
 
-It is an event rather than a sensor, so it has no state to read and nothing to
-be behind: an automation triggers on it, and there is no value on the dashboard
-between presses. A Home Assistant that was not connected does not learn about a
-press afterwards.
+Quick presses are collected into a run, which fires `multi_press_end` once with
+its count about a third of a second after you stop pressing. A single press
+fires `press_end`, and waits out that same third of a second first: nothing
+knows a press was single until it has.
+
+Holding past six hundred milliseconds, Alexa's own threshold for a long press,
+fires `long_press_start` **while you are still holding**, so an automation can
+run for as long as the button is down. Letting go fires `long_press_end`. A hold
+ends any run in front of it, and that run is reported first.
+
+If the daemon is busy enough to notice the threshold late, it falls back to the
+duration the release carries and sends both at once. The hold is still reported;
+it is not reported early.
+
+The chime does not wait. It sounds as the button goes down, once per press, so
+four presses are four chimes and one `multi_press_end`.
+
+An `EventResponse` carries a type and nothing else, so the numbers arrive beside
+it as an `esphome.overdub_pressed` event on Home Assistant's bus. It always
+carries `event_type` and `device`; `multi_press_count` comes with
+`multi_press_end`, `held_ms` with `long_press_end`. Both are integers, so
+`{{ trigger.event.data.multi_press_count == 7 }}` works without a cast. The
+blueprint in `ha/` wires the gestures up.
+
+`long_press_start` and `long_press_end` are not a guaranteed pair. Events carry
+no state, so if Home Assistant misses the release -- a restart, a reconnect --
+whatever the hold started keeps running. Give such an automation its own timeout.
+
+It is an event rather than a sensor, so it has no state to read: an automation
+triggers on it, and the dashboard shows no value between presses. A Home
+Assistant that was not connected does not learn about a press afterwards.
 
 Only a captured press does any of this. With `button_capture` off the button is
-Alexa's, and a press is silent and unreported. The chime is not the event: it
-sounds the moment the button goes down, whether the press turns out to be a
-press or a hold, and it is how you know the daemon still has the button.
+Alexa's, and a press is silent and unreported. The chime is how you know the
+daemon still has the button.
 
 `button_capture` is still the only entity Home Assistant writes to. Everything
 else reports, the button included, and together they are the connection proved

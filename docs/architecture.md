@@ -818,71 +818,142 @@ carries.
 
 ## What a press reports
 
-A press the daemon is holding becomes one ESPHome *event*: `action_button`,
-carrying `press` or `hold`. It is a message kind of its own, and the only entity
-here with no state. It reports a moment rather than a value, so nothing
-publishes it, no snapshot replays it, and a client that was not connected has
-missed it -- which is the whole difference between an event and every other
-entity here, all of which answer a new subscriber from the published state.
-Publishing a press instead would mean a Home Assistant reconnecting fires every
-automation hanging off one nobody made.
+The action button is one ESPHome *event* entity, `action_button`. It reports a
+moment rather than a value, so nothing publishes it and no snapshot replays it.
+A client that was not connected has missed it. Publishing a press instead would
+fire every automation hanging off one nobody made, on every reconnect.
 
-`ListEntitiesEventResponse` is 107 and `EventResponse` is 108, and the field
-numbers are per message as usual: `device_class` is 8 here where 8 is a binary
-sensor's icon, and `event_types` is 9 where 9 is a sensor's `device_class`.
-Home Assistant refuses an event whose type the listing did not advertise, so the
-types it is told and the types `FirePress` may be given are one slice rather
-than two that can drift apart silently.
+`ListEntitiesEventResponse` is 107 and `EventResponse` is 108. Field numbers are
+per message: `device_class` is 8 here and a binary sensor's icon, `event_types`
+is 9 here and a sensor's `device_class`. Home Assistant drops an event whose type
+the listing did not advertise, so one slice is both.
 
-The class is `button`, which is also what Home Assistant draws the icon from, so
-the entity carries none of its own -- the jack's rule for the jack's reason. It
-carries no `entity_category` either, and it is the one entity here that has
-neither: the readings are `diagnostic` and the switch is `config`, and a
-categorised entity is filed away from the device's controls. This is what the
-device is for.
+The class is `button`, which Home Assistant draws the icon from, so the entity
+sends none. It sends no `entity_category` either: the readings are `diagnostic`
+and the switch is `config`, and a categorised entity is filed away from the
+device's controls. This is what the device is for.
 
-`press` and `hold` are the whole of it. Double and triple presses are an event
-type each in the branch this came from and are not here yet; what the listing
-advertises is exactly what can be fired.
+**The gestures are Home Assistant's `ButtonEventType` verbatim.** Its
+architecture discussion 1377 settled the set in July 2026, because integrations
+spelled the same gestures differently and no generic automation worked across
+them. An automation written for any other button works here.
 
-**The two are one key, told apart at the release.** Six hundred milliseconds is
-the threshold, and it is Alexa's number rather than one chosen here: a
-`BUTTON_MODE` she sees held past it is her long press, which is setup mode. So
-the hold somebody already has in their hand is the hold this reports. The
-boundary belongs to the hold, because a press held for exactly as long as the
-instructions say should give what the instructions promised.
+Two of the six are absent, and none is mandatory: an integration maps what its
+hardware produces. `press_start` went because the decision that approved the set
+dropped it as a trigger, and no gesture here needs a key-down alone.
+`multi_press_ongoing` went because it costs a message per press for a signal
+nothing here uses, and a run's count is not settled until the run closes. The
+same rule makes a single press `press_end` rather than a `multi_press_end`
+carrying one.
 
-Firing at the release rather than at the threshold keeps a timer out of the read
-loop and makes one press exactly one event. What it costs is that a hold is
-reported when it ends rather than when it is recognised, so a hold of unbounded
-length is late by its own length. Nothing here needs it sooner, and the
-alternative wants a flag saying the release must not also fire a `press`.
+**A run of presses is one gesture, and the gap ends it.** A run is closed and
+reported with its count by three hundred and fifty milliseconds of silence after
+a release. So a single press waits: nothing knows it was single until the gap
+passes. The chime does not wait, which is what makes that affordable -- it is at
+the key-down, 33ms in.
 
-**The chime sounds at the key-down and the event goes at the key-up**, because
-they answer different questions. The chime says the daemon has the button, and
-it has to sound before anything knows which of the two this press is: one that
-waited for the release would leave a hold silent for as long as it was held,
-which is exactly when the acknowledgement is worth most. So the chime is not a
-function of the event type. Every press sounds it and only capture gates it,
-because it is acknowledging the key rather than reporting it.
+The gap stays under the hold threshold, and `main_test.go` holds the two
+together.
 
-The event is sent from the read loop rather than through a queue of its own.
-`FirePress` takes the server lock only long enough to queue a frame per
-subscriber, and every other holder of that lock is as short, so the loop mute
-passes through is not measurably delayed. A goroutine per press would be worse
-than blocking: two presses could then reach Home Assistant in the other order.
+**The hold is reported while the key is still down.** Six hundred milliseconds
+is the threshold, and it is Alexa's: a `BUTTON_MODE` she sees held past it is
+setup mode. So the hold somebody already has in their hand is the one this
+reports. The boundary belongs to the hold.
+
+That is why `MultiPress` takes `Down` and `Up` rather than a finished press.
+`long_press_start` has to arrive while the button is held, so an automation can
+act *during* a hold, and nothing at the release is early enough. Two timers run:
+a hold timer armed at each key-down, and a gap timer armed at each release.
+
+The release is the backstop. `AfterFunc` promises only "not before", so on a
+busy core the timer can lose the race to `Up`, and the duration the release
+carries decides the boundary when it does. That path fires `long_press_start`
+and `long_press_end` together, so the hold is reported but not reported early:
+an automation bound to the start runs after the button is already up. It is
+reachable only when the timer runs late, and the alternative is reporting a key
+held past the threshold as a press.
+
+The pair is unpaired, and that is a cost rather than a solved problem. An event
+carries no state, so nothing heals a missing one: a Home Assistant that took the
+`long_press_start` and missed the `long_press_end` leaves whatever the hold
+started running. Discussion 1377 accepted this. The alternative is a stateful
+binary sensor of the raw key, which self-heals on reconnect and is what
+ESPHome's own `binary_sensor` does, and which reports the key rather than the
+gesture.
+
+A hold ends the run in front of it, at the threshold, and the run is reported
+first. They are separate automations at the far end. One lock held across a whole
+report is the only ordering between the read loop and the two timers.
+
+Every key event invalidates both timers, so a run cannot close while a key is
+down. Without that, a press arriving inside the gap and then held would have its
+run closed under it and be reported twice.
+
+A timer that has fired cannot be stopped, so a generation says its moment has
+passed -- a hold timer whose key came up, a gap timer whose run a new press took.
+Either would report something no longer true rather than a duplicate. The key
+event bumps the generation, because the key is what made the timer stale.
+
+**The count and the duration ride a service call**, because `EventResponse`
+carries a key and a type and nothing else. The standard puts the count in a
+`multi_press_count` attribute, and Home Assistant's ESPHome platform passes only
+the type string to `_trigger_event`, so an attribute has nowhere to go. A
+`HomeassistantServiceResponse` carries them instead: `esphome.overdub_pressed`,
+`is_event` set, with `event_type` and `device` always, `multi_press_count` on
+`multi_press_end`, and `held_ms` on `long_press_end`. The key uses the
+standard's name.
+
+Each extra key belongs to the gesture that has one. A count on a single press is
+a 1 nobody asked about, and a run has several durations and no single one, so
+both are absent rather than zero: a zero read as a measurement is the `p2p0` row
+again.
+
+The `esphome.` prefix is Home Assistant's rule -- it fires an `is_event` service
+call only for its own domain -- and it adds `device_id` itself, which the daemon
+could not know.
+
+**The numbers go in a different field from the strings.** Every value in a
+`HomeassistantServiceMap` is a string, so field 2, `data`, arrives as one. Home
+Assistant renders field 3, `data_template`, and every render ends in
+`_parse_result`, which turns a numeric string back into a number. So the numbers
+go in field 3 and reach an automation as integers, the way they would from an
+integration that calls the bus directly. Every integration but this one does;
+the string is an artifact of ESPHome's transport.
+
+A literal never compiles: `is_static` is true without Jinja markers, so
+`async_render` returns the parsed value without rendering. That matters because
+a `TemplateError` drops the whole event rather than one value, and there is no
+render here to fail.
+
+The strings stay in field 2, `device` especially. It is the operator's `-name`,
+and Home Assistant evaluates a `data_template` value carrying Jinja markers: a
+Dot named for a template would be one this daemon asked it to run. A number this
+end formatted cannot carry a marker, which is what makes the split safe.
+
+That second message is a second subscription, `SubscribeHomeassistantServices`,
+tracked per connection. A peer that asked only for states gets the gesture and
+not the numbers. Home Assistant asks for both.
+
+**The chime sounds at the key-down**, because it answers a different question. It
+says the daemon has the button, and it has to sound before anything knows what
+the run will be. One that waited would leave a hold silent while it was held. So
+it sounds once per press rather than once per gesture -- four presses are four
+chimes and one `multi_press_end` -- and only capture gates it.
+
+The gestures are sent from whichever goroutine recognised them. The gap timer
+closes a run, and so does the hold timer when a hold ends one, and so does the
+read loop when the release is the backstop -- so all three can send a
+run-closing gesture, and `long_press_end` comes from the read loop. `FirePress` holds the server lock only long enough to queue
+a frame per subscriber, so the read loop mute passes through is not measurably
+delayed. A queue was the shape this came from; it drops what it cannot take,
+which loses presses in order to report them, and the lock is what keeps two
+gestures in order anyway.
 
 **A press with no server to tell is dropped.** The button is taken before the
-network is waited for, so the read loop runs for as long as `wlan0` takes, and
-`serve.go` holds the server in an `atomic.Pointer` the way it holds the
-responder. A press that finds nothing there goes no further than the log.
-Queueing it would be the opposite of an event: one delivered when the access
-point finally came back says the button was pressed at a moment it was not.
-
-Neither callback runs for a press that is passing through, so a press Alexa is
-answering is silent as well as unreported. Which side owns it is latched at the
-key-down like everything else here, so a toggle inside one press cannot chime
-for the daemon and report to nobody.
+network is waited for, so the read loop runs for as long as `wlan0` takes.
+`serve.go` holds the server in an `atomic.Pointer`, and a press that finds
+nothing there goes no further than the log. Queueing it would deliver a press at
+a moment it did not happen.
 
 ## Discovery
 

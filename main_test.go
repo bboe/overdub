@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
 )
@@ -203,22 +204,33 @@ func TestServeWiresTheButtonToTheSwitch(t *testing.T) {
 	}
 }
 
-// Where a press stops being a press. The boundary belongs to the hold, so
-// holding for exactly as long as the instructions say gives the hold rather
-// than the press it was meant to replace.
-func TestAHoldIsAPressThatOutlastsAlexasOwnThreshold(t *testing.T) {
+// The wire name of every gesture, which is ButtonEventType verbatim. A wrong
+// mapping is an event Home Assistant drops or files under the wrong trigger,
+// with nothing at either end to say so.
+func TestEveryGestureHasItsStandardName(t *testing.T) {
 	for _, tt := range []struct {
-		held time.Duration
-		want esphome.EventType
+		gesture button.Gesture
+		want    esphome.EventType
 	}{
-		{time.Millisecond, esphome.EventPress},
-		{holdTime - time.Millisecond, esphome.EventPress},
-		{holdTime, esphome.EventHold},
-		{3 * time.Second, esphome.EventHold},
+		{button.GesturePressEnd, "press_end"},
+		{button.GestureMultiEnd, "multi_press_end"},
+		{button.GestureLongStart, "long_press_start"},
+		{button.GestureLongEnd, "long_press_end"},
 	} {
-		if got := pressEvent(tt.held); got != tt.want {
-			t.Errorf("a press held %v reported %q, want %q", tt.held, got, tt.want)
+		got, ok := pressEvent(tt.gesture)
+		if !ok {
+			t.Errorf("%v has no esphome name, so it would not be reported", tt.gesture)
+			continue
 		}
+		if got != tt.want {
+			t.Errorf("%v is sent as %q, want %q", tt.gesture, got, tt.want)
+		}
+	}
+	// A gesture added later must be reported as nothing rather than as the
+	// nearest name: a default answering press_end would report a single press
+	// for something else entirely, and nothing would say so.
+	if _, ok := pressEvent(button.Gesture(99)); ok {
+		t.Error("an unrecognised gesture is given an esphome name, so it would be reported as one")
 	}
 }
 
@@ -257,6 +269,61 @@ func TestServeGivesThePressSomewhereToGo(t *testing.T) {
 	for _, said := range []string{"api.Store(server)", "server.FirePress("} {
 		if !strings.Contains(string(source), said) {
 			t.Errorf("serve.go never says %q, so a press reaches Home Assistant by no route", said)
+		}
+	}
+}
+
+// The docs promise the gap in words, and nothing else ties the prose to the
+// constant. The literal here is a deliberate third copy: retuning multiGap fails
+// rather than quietly leaving the prose lying.
+func TestTheDocsPromiseTheGapTheDaemonUses(t *testing.T) {
+	const said = "three hundred and fifty milliseconds"
+	const promised = 350 * time.Millisecond
+	if multiGap != promised {
+		t.Errorf("multiGap is %v and the docs promise %q; change them together", multiGap, said)
+	}
+	body, err := os.ReadFile("docs/architecture.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), said) {
+		t.Errorf("docs/architecture.md no longer says %q, which is the gap the daemon uses", said)
+	}
+}
+
+// The gap is what a single press waits before it is reported. It has to stay
+// under the hold threshold, which is read at the same release.
+func TestTheMultiGapIsShorterThanTheHold(t *testing.T) {
+	if multiGap <= 0 {
+		t.Fatalf("multiGap is %v; a run would be reported before its next press could join it", multiGap)
+	}
+	if multiGap >= holdTime {
+		t.Errorf("multiGap is %v and holdTime is %v; the gap has to be the shorter of the two",
+			multiGap, holdTime)
+	}
+}
+
+// Nothing compiles the blueprint, so a gesture renamed here leaves it selecting
+// on a string the daemon no longer sends: an automation that stops firing.
+func TestTheBlueprintSelectsOnTheGesturesTheDaemonSends(t *testing.T) {
+	body, err := os.ReadFile("ha/dot-action-button.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []esphome.EventType{
+		esphome.EventPressEnd,
+		esphome.EventMultiEnd,
+		esphome.EventLongPressStart,
+		esphome.EventLongPressEnd,
+	} {
+		if !strings.Contains(string(body), "'"+string(event)+"'") {
+			t.Errorf("the blueprint never selects on %q, so that gesture reaches no action", event)
+		}
+	}
+	// The keys the blueprint reads off trigger.event.data by name.
+	for _, key := range []string{"event_type", "multi_press_count", "held_ms", "device"} {
+		if !strings.Contains(string(body), "trigger.event.data."+key) {
+			t.Errorf("the blueprint never reads trigger.event.data.%s", key)
 		}
 	}
 }

@@ -92,6 +92,8 @@ const (
 	msgSwitchState       = 26
 	msgSubscribeLogs     = 28
 	msgSwitchCommand     = 33
+	msgSubscribeHAServ   = 34
+	msgHomeassistantAct  = 35
 	msgSubscribeHAStates = 38
 	msgListEvent         = 107
 	msgEventState        = 108
@@ -117,6 +119,11 @@ type conn struct {
 	rw     *noiseRW
 	out    chan frame
 	states bool // sent SubscribeStatesRequest
+
+	// Sent SubscribeHomeassistantServicesRequest. A separate subscription from
+	// states, and the only thing that reads it is the press count: docs/
+	// architecture.md says why a count cannot ride the event itself.
+	services bool
 
 	// Written by handle and read by serveConn, both on this connection's own
 	// goroutine, so that the log write happens with no lock held.
@@ -560,6 +567,10 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			return nil
 		}
 		s.setCapturedLocked(conn, on)
+		return nil
+
+	case msgSubscribeHAServ:
+		conn.services = true
 		return nil
 
 	case msgSubscribeLogs, msgSubscribeHAStates:

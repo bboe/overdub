@@ -1,0 +1,88 @@
+blueprint:
+  name: Dot action button
+  description: >-
+    Bind actions to the action button on an Echo Dot running overdub.
+
+    Quick presses are collected into a run and reported once, about a third of a
+    second after you stop. A single press waits out that same gap. `{{ count }}`
+    is how many presses the run was, and is meaningful only on **Run of presses**.
+
+    A hold fires **Hold started** at six hundred milliseconds, while the button
+    is still down, so an action bound there runs for as long as it is held.
+    Letting go fires **Hold released**, with `{{ held_ms }}`.
+
+    The two hold actions are not a guaranteed pair. Events carry no state, so a
+    Home Assistant that misses the release leaves whatever the hold started
+    running. Give that action its own timeout: runs are capped at `max` below,
+    and orphaned ones hold a slot each until they end. Once the cap is reached
+    the button does nothing at all here, and only a "Maximum number of runs
+    exceeded" line in the log says so.
+
+    Leave an action empty to make that gesture do nothing.
+  domain: automation
+  input:
+    dot:
+      name: Dot
+      description: The Dot whose action button should drive this automation.
+      selector:
+        device:
+          integration: esphome
+          entity:
+            domain: event
+    press_action:
+      name: Single press
+      description: One press, alone. Fires after the run gap has passed.
+      default: []
+      selector: { action: {} }
+    multi_end_action:
+      name: Run of presses
+      description: >-
+        Two or more presses, once the run has closed. `{{ count }}` is the total,
+        so a "seven presses" action belongs here.
+      default: []
+      selector: { action: {} }
+    hold_start_action:
+      name: Hold started
+      description: Fires at six hundred milliseconds, while the button is still down.
+      default: []
+      selector: { action: {} }
+    hold_end_action:
+      name: Hold released
+      description: Fires when the button comes back up. `{{ held_ms }}` is how long it was held.
+      default: []
+      selector: { action: {} }
+
+triggers:
+  - trigger: event
+    event_type: esphome.overdub_pressed
+    event_data:
+      device_id: !input dot
+
+variables:
+  # The numbers arrive as integers: the daemon sends them in the service call's
+  # data_template, which Home Assistant renders and parses. The default is for
+  # absence, not for type -- each is absent on the gestures without that number.
+  gesture: "{{ trigger.event.data.event_type }}"
+  count: "{{ trigger.event.data.multi_press_count | default(0) }}"
+  held_ms: "{{ trigger.event.data.held_ms | default(0) }}"
+  # The Dot that fired, i.e. overdub -name, so one action body can serve several
+  # Dots by keying off it rather than hard-coding a name.
+  device: "{{ trigger.event.data.device }}"
+
+actions:
+  - choose:
+      - conditions: "{{ gesture == 'press_end' }}"
+        sequence: !input press_action
+      - conditions: "{{ gesture == 'multi_press_end' }}"
+        sequence: !input multi_end_action
+      - conditions: "{{ gesture == 'long_press_start' }}"
+        sequence: !input hold_start_action
+      - conditions: "{{ gesture == 'long_press_end' }}"
+        sequence: !input hold_end_action
+
+# parallel rather than queued: queued starts a run only after every previous one
+# finishes, so Hold released would wait for Hold started to return -- and an
+# action that runs for as long as the button is held never returns until it is
+# stopped by the release it is blocking.
+mode: parallel
+max: 10

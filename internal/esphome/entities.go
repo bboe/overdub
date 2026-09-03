@@ -31,12 +31,21 @@ const (
 // to write the conversion that says so.
 type EventType string
 
+// Home Assistant's ButtonEventType verbatim. None of the six are mandatory: an
+// integration maps what its hardware produces. press_start is out because the
+// decision that approved the set dropped it as a trigger. multi_press_ongoing is
+// out because it costs a message per press for a signal nothing here uses, and a
+// run's count is not settled until the run closes.
 const (
-	EventPress EventType = "press"
-	EventHold  EventType = "hold"
+	EventPressEnd       EventType = "press_end"
+	EventMultiEnd       EventType = "multi_press_end"
+	EventLongPressStart EventType = "long_press_start"
+	EventLongPressEnd   EventType = "long_press_end"
 )
 
-var actionEvents = []EventType{EventPress, EventHold}
+var actionEvents = []EventType{
+	EventPressEnd, EventMultiEnd, EventLongPressStart, EventLongPressEnd,
+}
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
 // DeviceInfoResponse and in the mDNS TXT record, and the two have to agree:

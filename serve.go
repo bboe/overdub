@@ -36,6 +36,10 @@ const (
 	// press, which is setup mode. So the hold a user already has in their hand
 	// is the hold this reports.
 	holdTime = 600 * time.Millisecond
+
+	// What separates one run from the next, and so what a single press waits
+	// before it is reported at all. docs/architecture.md says why.
+	multiGap = 350 * time.Millisecond
 )
 
 // The responder exists only once serveAPI has an address to advertise, and the
@@ -103,12 +107,35 @@ func serve(flags config) error {
 	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
 		inputNode, actionKey, uinputName)
 
-	// The chime sounds at the key-down and the event is sent at the release,
-	// because they answer different questions. The chime says the daemon has the
-	// button, and it is worth nothing if it waits for a hold to end; the event
-	// says what the press was, which nothing knows until the key comes up.
+	// Called from whichever goroutine recognised the gesture. MultiPress orders
+	// them, so two cannot reach Home Assistant the wrong way round.
+	chain := button.NewMultiPress(multiGap, holdTime, func(g button.Gesture, count int, holdFor time.Duration) {
+		event, ok := pressEvent(g)
+		if !ok {
+			log.Printf("intercepted %d: gesture %v has no esphome name; not reported", actionKey, g)
+			return
+		}
+		switch {
+		case holdFor > 0:
+			log.Printf("intercepted %d: %s (held %v)", actionKey, event, holdFor.Round(time.Millisecond))
+		case count > 0:
+			log.Printf("intercepted %d: %s (%d)", actionKey, event, count)
+		default:
+			log.Printf("intercepted %d: %s", actionKey, event)
+		}
+		// Sent from here rather than through a queue: FirePress holds the
+		// server lock only long enough to queue a frame per subscriber. A queue
+		// that dropped what it could not take would lose presses to report.
+		if server := api.Load(); server != nil {
+			server.FirePress(event, count, holdFor)
+		}
+	})
+
+	// The chime is at the key-down, before anything knows what the run will be,
+	// so it sounds once per press rather than once per gesture.
 	return i.Run(
 		func() {
+			chain.Down()
 			if chime == nil {
 				return
 			}
@@ -122,28 +149,29 @@ func serve(flags config) error {
 				}
 			}()
 		},
-		func(held time.Duration) {
-			event := pressEvent(held)
-			log.Printf("intercepted %d: %s (held %v)", actionKey, event, held.Round(time.Millisecond))
-			// Sent on the read loop rather than through a queue: FirePress holds
-			// the server lock only long enough to queue a frame per subscriber,
-			// and every other holder of that lock is as short. A goroutine each
-			// would be the one thing worse than blocking here, since two presses
-			// could then reach Home Assistant in the wrong order.
-			if server := api.Load(); server != nil {
-				server.FirePress(event)
-			}
-		})
+		chain.Up)
 }
 
-// Which of the two the button did. Held at the threshold counts as a hold, so
-// the boundary belongs to the longer press: a user holding for exactly as long
-// as they were told to gets the hold rather than a press.
-func pressEvent(held time.Duration) esphome.EventType {
-	if held >= holdTime {
-		return esphome.EventHold
+// What the gesture is called on the wire, and the whole of the translation.
+// listEntities advertises exactly these, and Home Assistant drops an event it
+// was not told about.
+//
+// A gesture with no name here is reported as nothing rather than as the nearest
+// one. A default that answered press_end would report a single press for a
+// gesture added later and never noticed, which is the wrong reading rather than
+// no reading.
+func pressEvent(g button.Gesture) (esphome.EventType, bool) {
+	switch g {
+	case button.GesturePressEnd:
+		return esphome.EventPressEnd, true
+	case button.GestureMultiEnd:
+		return esphome.EventMultiEnd, true
+	case button.GestureLongStart:
+		return esphome.EventLongPressStart, true
+	case button.GestureLongEnd:
+		return esphome.EventLongPressEnd, true
 	}
-	return esphome.EventPress
+	return "", false
 }
 
 func serveAPI(name string, psk []byte, i *button.Interceptor) {

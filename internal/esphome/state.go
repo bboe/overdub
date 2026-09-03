@@ -3,6 +3,7 @@ package esphome
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 )
 
@@ -213,6 +214,8 @@ func (s *Server) eachConn(what string, wants func(*conn) bool, send func(*conn) 
 
 func wantsStates(c *conn) bool { return c.states }
 
+func wantsServices(c *conn) bool { return c.services }
+
 // The one way a reading reaches anybody. It records what it sends and sends
 // only what it has not already recorded, so the published state is exactly what
 // every subscriber holds. The snapshot sends too, but only what this has
@@ -249,22 +252,62 @@ func (s *Server) publish(what string, readings []reading) []reading {
 // to be told on arrival, and a press it was not connected for is one it missed.
 // That is what makes it an event rather than a reading.
 //
-// The read loop calls this, and mute passes through that loop, so it does what
-// publish does: the lock is held only for the queueing, and what could not be
-// queued is logged after it is dropped.
-func (s *Server) FirePress(eventType EventType) {
+// Called from the timers that recognise a gesture and from the read loop, which
+// mute passes through, so it does what publish does: the lock covers only the
+// queueing, and what could not be queued is logged after it is dropped.
+func (s *Server) FirePress(eventType EventType, count int, holdFor time.Duration) {
 	var event pb
 	event.fixed32(1, s.keyAction)
 	event.str(2, string(eventType))
+
+	// The same gesture again, carrying the numbers the event cannot. The
+	// esphome. prefix is Home Assistant's rule rather than a convention: it
+	// fires an is_event call as a bus event only for its own domain.
+	//
+	// The two map fields differ. Field 2, data, arrives as the string it is.
+	// Home Assistant renders field 3, data_template, and a render ends in
+	// _parse_result, which turns a numeric string back into a number. So the
+	// numbers go in 3 and reach an automation as integers.
+	//
+	// The strings stay in 2, device especially: it is the operator's -name, and
+	// Home Assistant evaluates a data_template value carrying Jinja markers. A
+	// number this end formatted cannot carry one.
+	var action pb
+	action.str(1, "esphome.overdub_pressed")
+	action.sub(2, kv("event_type", string(eventType)))
+	action.sub(2, kv("device", s.name))
+	// Named for the attribute Home Assistant would have used, had the transport
+	// had room for one. Only multi_press_end has a count.
+	if count > 0 {
+		action.sub(3, kv("multi_press_count", strconv.Itoa(count)))
+	}
+	// Only a hold has one. A run has several durations and no single one, so the
+	// key is absent rather than zero: a zero read as a measurement is p2p0.
+	if holdFor > 0 {
+		action.sub(3, kv("held_ms", strconv.FormatInt(holdFor.Milliseconds(), 10)))
+	}
+	action.boolean(5, true) // is_event
 
 	s.mu.Lock()
 	failed := s.eachConn("event", wantsStates, func(c *conn) error {
 		return s.send(c, msgEventState, event.b)
 	})
+	// A different subscription, so a peer that asked only for states gets the
+	// gesture and not the numbers. Home Assistant asks for both.
+	failed = append(failed, s.eachConn("event count", wantsServices, func(c *conn) error {
+		return s.send(c, msgHomeassistantAct, action.b)
+	})...)
 	s.mu.Unlock()
 	for _, line := range failed {
 		s.peerLogf("%s", line)
 	}
+}
+
+func kv(key, value string) []byte {
+	var p pb
+	p.str(1, key)
+	p.str(2, value)
+	return p.b
 }
 
 // Starts a poll for every sensor listEntities names.
