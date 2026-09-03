@@ -93,6 +93,8 @@ const (
 	msgSubscribeLogs     = 28
 	msgSwitchCommand     = 33
 	msgSubscribeHAStates = 38
+	msgListEvent         = 107
+	msgEventState        = 108
 )
 
 // What the daemon starts as, so a server with no button wired reports the state
@@ -139,6 +141,10 @@ type Server struct {
 	keyJack   uint32
 	keyJackOn uint32
 	keySound  uint32
+
+	// The action button itself, which is an event rather than a reading: it
+	// reports a moment rather than a value, and so is never published.
+	keyAction uint32
 
 	// The one entity a peer can write to rather than only read.
 	keyCapture uint32
@@ -218,6 +224,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyJack:       entityKey("jack_volume"),
 		keyJackOn:     entityKey("audio_jack"),
 		keySound:      entityKey("speaker_playing"),
+		keyAction:     entityKey("action_button"),
 		keyCapture:    entityKey("button_capture"),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,

@@ -36,6 +36,21 @@ func listed(t *testing.T, s *Server) []map[int]pbField {
 	return out
 }
 
+// The listed entities that carry a state. An event entity has none, and that is
+// what makes it an event: it reports a moment rather than a value, so no poll
+// publishes it and no snapshot replays it to a client that arrives afterwards.
+func listedWithState(t *testing.T, s *Server) []map[int]pbField {
+	t.Helper()
+	var out []map[int]pbField
+	for _, entity := range listed(t, s) {
+		if entity[0].num == uint64(msgListEvent) {
+			continue
+		}
+		out = append(out, entity)
+	}
+	return out
+}
+
 func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 
@@ -57,15 +72,16 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, entity := range listed(t, s) {
-		// Binary sensors and the switch are listed under their own message
-		// types and checked by their own tests: their fields are not these
-		// ones, and reading them with this table would compare the wrong
+		// Binary sensors, the switch and the event are listed under their own
+		// message types and checked by their own tests: their fields are not
+		// these ones, and reading them with this table would compare the wrong
 		// numbers.
-		if entity[0].num == uint64(msgListBinarySensor) || entity[0].num == uint64(msgListSwitch) {
+		switch entity[0].num {
+		case uint64(msgListBinarySensor), uint64(msgListSwitch), uint64(msgListEvent):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
-			t.Errorf("an entity of type %d is listed, and it is none of the three kinds this "+
+			t.Errorf("an entity of type %d is listed, and it is none of the four kinds this "+
 				"device has", entity[0].num)
 			continue
 		}

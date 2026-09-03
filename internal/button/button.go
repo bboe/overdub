@@ -101,11 +101,16 @@ func (i *Interceptor) Close() {
 	})
 }
 
-func (i *Interceptor) Run(onPress func(held time.Duration)) error {
-	return i.route(i.node, i.clone.Emit, onPress)
+// The press is reported twice, because the two halves answer different
+// questions. onDown is the acknowledgement, and it has to sound before anybody
+// knows whether this is a press or a hold; onPress is what the press turned out
+// to be, which is only knowable at the release. Both are called on the read
+// loop, which mute passes through, so neither may block.
+func (i *Interceptor) Run(onDown func(), onPress func(held time.Duration)) error {
+	return i.route(i.node, i.clone.Emit, onDown, onPress)
 }
 
-func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onPress func(held time.Duration)) error {
+func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(), onPress func(held time.Duration)) error {
 	var pressedAt time.Time
 	consuming := false
 	buf := make([]byte, evdev.EventSize)
@@ -123,6 +128,9 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onPress
 				// Android was never given a press for, or a press it is never
 				// told ended.
 				consuming, pressedAt = i.Captured(), time.Now()
+				if consuming {
+					onDown()
+				}
 			case evdev.KeyRelease:
 				// No press of ours: the key was down before the grab took it,
 				// so neither path has a whole event to act on.

@@ -244,6 +244,29 @@ func (s *Server) publish(what string, readings []reading) []reading {
 	return changed
 }
 
+// FirePress tells every subscriber what the action button just did. An event is
+// not a state: nothing is published, because there is nothing for a subscriber
+// to be told on arrival, and a press it was not connected for is one it missed.
+// That is what makes it an event rather than a reading.
+//
+// The read loop calls this, and mute passes through that loop, so it does what
+// publish does: the lock is held only for the queueing, and what could not be
+// queued is logged after it is dropped.
+func (s *Server) FirePress(eventType EventType) {
+	var event pb
+	event.fixed32(1, s.keyAction)
+	event.str(2, string(eventType))
+
+	s.mu.Lock()
+	failed := s.eachConn("event", wantsStates, func(c *conn) error {
+		return s.send(c, msgEventState, event.b)
+	})
+	s.mu.Unlock()
+	for _, line := range failed {
+		s.peerLogf("%s", line)
+	}
+}
+
 // Starts a poll for every sensor listEntities names.
 func (s *Server) Poll(sensorTick, liveTick time.Duration) {
 	go s.PollSensors(sensorTick)

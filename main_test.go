@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
@@ -199,5 +200,63 @@ func TestServeWiresTheButtonToTheSwitch(t *testing.T) {
 	}
 	if !strings.Contains(string(source), "server.UseButton(") {
 		t.Error("serve.go never calls UseButton, so button_capture moves nothing and says so to nobody")
+	}
+}
+
+// Where a press stops being a press. The boundary belongs to the hold, so
+// holding for exactly as long as the instructions say gives the hold rather
+// than the press it was meant to replace.
+func TestAHoldIsAPressThatOutlastsAlexasOwnThreshold(t *testing.T) {
+	for _, tt := range []struct {
+		held time.Duration
+		want esphome.EventType
+	}{
+		{time.Millisecond, esphome.EventPress},
+		{holdTime - time.Millisecond, esphome.EventPress},
+		{holdTime, esphome.EventHold},
+		{3 * time.Second, esphome.EventHold},
+	} {
+		if got := pressEvent(tt.held); got != tt.want {
+			t.Errorf("a press held %v reported %q, want %q", tt.held, got, tt.want)
+		}
+	}
+}
+
+// The threshold is a promise three places make to a user in words, and nothing
+// else connects them to the constant: README.md says it twice and
+// docs/architecture.md once. The literal here is a further copy on purpose --
+// it is what makes retuning holdTime fail rather than quietly leave the prose
+// lying, and the failure names what to change with it.
+func TestTheDocsPromiseTheHoldThresholdTheDaemonUses(t *testing.T) {
+	const said = "six hundred milliseconds"
+	const promised = 600 * time.Millisecond
+	if holdTime != promised {
+		t.Errorf("holdTime is %v and the docs promise %q; change them together", holdTime, said)
+	}
+	for _, path := range []string{"README.md", "docs/architecture.md"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), said) {
+			t.Errorf("%s no longer says %q, which is the threshold the daemon uses", path, said)
+		}
+	}
+}
+
+// The other end of the same wire: serveAPI builds the server long after the
+// read loop started, so a press finds it through the pointer or reaches nobody.
+// Asserted over the source for the reason UseButton is -- deleting either line
+// leaves a daemon that chimes, logs the press, and tells Home Assistant
+// nothing, with the whole suite green.
+func TestServeGivesThePressSomewhereToGo(t *testing.T) {
+	source, err := os.ReadFile("serve.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, said := range []string{"api.Store(server)", "server.FirePress("} {
+		if !strings.Contains(string(source), said) {
+			t.Errorf("serve.go never says %q, so a press reaches Home Assistant by no route", said)
+		}
 	}
 }

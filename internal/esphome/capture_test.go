@@ -200,7 +200,7 @@ func TestTurningTheSwitchOffHandsTheButtonBackAndReportsIt(t *testing.T) {
 }
 
 // The key is how Home Assistant says which entity it means, and this device
-// has one switch among nine entities. A command that ignored it would take
+// has one switch among ten entities. A command that ignored it would take
 // every switch.turn_off on the device as this one.
 func TestASwitchCommandForAnotherEntityIsIgnored(t *testing.T) {
 	var out lockedBuffer

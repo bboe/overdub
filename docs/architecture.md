@@ -358,7 +358,7 @@ Assistant does draw a switch from a pair, `mdi:toggle-switch-variant` and
 `-off`, but it also renders a toggle control beside it, so the icon is not what
 shows the state there and the pair an icon replaces was redundant. What it
 costs to keep is identification: a generic toggle says nothing about which of
-nine entities it is. So `button_capture` carries `mdi:gesture-tap-button` and
+ten entities it is. So `button_capture` carries `mdi:gesture-tap-button` and
 the jack still carries none. The icon fields are not the same number either, 5
 on a sensor and a switch, 8 on a binary sensor, which is the
 field-numbers-are-per-message rule once more.
@@ -814,6 +814,74 @@ messages: a switch is what this end last set it to, and there is no read of the
 device to have failed. Its listing numbers are its own as usual -- 17, 26 and 33
 against the sensor's 16 and 25 -- and `entity_category` is field 8 there,
 carrying `config` rather than the `diagnostic` every other entity here carries.
+
+## What a press reports
+
+A press the daemon is holding becomes one ESPHome *event*: `action_button`,
+carrying `press` or `hold`. That is the fourth message kind here and the only
+entity with no state. It reports a moment rather than a value, so nothing
+publishes it, no snapshot replays it, and a client that was not connected has
+missed it -- which is the whole difference between an event and every other
+entity here, all of which answer a new subscriber from the published state.
+Publishing a press instead would mean a Home Assistant reconnecting fires every
+automation hanging off one nobody made.
+
+`ListEntitiesEventResponse` is 107 and `EventResponse` is 108, and the field
+numbers are per message as usual: `device_class` is 8 here where 8 is a binary
+sensor's icon, and `event_types` is 9 where 9 is a sensor's `device_class`.
+Home Assistant refuses an event whose type the listing did not advertise, so the
+types it is told and the types `FirePress` may be given are one slice rather
+than two that can drift apart silently.
+
+The class is `button`, which is also what Home Assistant draws the icon from, so
+the entity carries none of its own -- the jack's rule for the jack's reason. It
+carries no `entity_category` either, and it is the one entity here that has
+neither: the readings are `diagnostic` and the switch is `config`, and a
+categorised entity is filed away from the device's controls. This is what the
+device is for.
+
+`press` and `hold` are the whole of it. Double and triple presses are an event
+type each in the branch this came from and are not here yet; what the listing
+advertises is exactly what can be fired.
+
+**The two are one key, told apart at the release.** Six hundred milliseconds is
+the threshold, and it is Alexa's number rather than one chosen here: a
+`BUTTON_MODE` she sees held past it is her long press, which is setup mode. So
+the hold somebody already has in their hand is the hold this reports. The
+boundary belongs to the hold, because a press held for exactly as long as the
+instructions say should give what the instructions promised.
+
+Firing at the release rather than at the threshold keeps a timer out of the read
+loop and makes one press exactly one event. What it costs is that a hold is
+reported when it ends rather than when it is recognised, so a hold of unbounded
+length is late by its own length. Nothing here needs it sooner, and the
+alternative wants a flag saying the release must not also fire a `press`.
+
+**The chime sounds at the key-down and the event goes at the key-up**, because
+they answer different questions. The chime says the daemon has the button, and
+it has to sound before anything knows which of the two this press is: one that
+waited for the release would leave a hold silent for as long as it was held,
+which is exactly when the acknowledgement is worth most. So the chime is not a
+function of the event type. Every press sounds it and only capture gates it,
+because it is acknowledging the key rather than reporting it.
+
+The event is sent from the read loop rather than through a queue of its own.
+`FirePress` takes the server lock only long enough to queue a frame per
+subscriber, and every other holder of that lock is as short, so the loop mute
+passes through is not measurably delayed. A goroutine per press would be worse
+than blocking: two presses could then reach Home Assistant in the other order.
+
+**A press with no server to tell is dropped.** The button is taken before the
+network is waited for, so the read loop runs for as long as `wlan0` takes, and
+`serve.go` holds the server in an `atomic.Pointer` the way it holds the
+responder. A press that finds nothing there goes no further than the log.
+Queueing it would be the opposite of an event: one delivered when the access
+point finally came back says the button was pressed at a moment it was not.
+
+Neither callback runs for a press that is passing through, so a press Alexa is
+answering is silent as well as unreported. Which side owns it is latched at the
+key-down like everything else here, so a toggle inside one press cannot chime
+for the daemon and report to nobody.
 
 ## Discovery
 

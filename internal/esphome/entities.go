@@ -1,6 +1,7 @@
 package esphome
 
 const (
+	entityCategoryNone       = 0
 	entityCategoryConfig     = 1
 	entityCategoryDiagnostic = 2
 
@@ -18,9 +19,24 @@ const (
 
 	// A switch renders a toggle control, so unlike a binary sensor its icon is
 	// not what shows the state. That frees it to say which entity this is,
-	// which is the job an icon has among a device's nine.
+	// which is the job an icon has among a device's ten.
 	captureIcon = "mdi:gesture-tap-button"
 )
+
+// What a press can turn out to be. Home Assistant refuses an event whose type
+// the listing did not advertise, so the types it is told and the types FirePress
+// is given have to be the same set. A type of its own is what holds that at the
+// call site: actionEvents is both what the listing sends and the whole of what
+// this package defines, so a caller reaching FirePress with anything else has
+// to write the conversion that says so.
+type EventType string
+
+const (
+	EventPress EventType = "press"
+	EventHold  EventType = "hold"
+)
+
+var actionEvents = []EventType{EventPress, EventHold}
 
 // What Home Assistant shows as the device's firmware version. Sent twice, in
 // DeviceInfoResponse and in the mDNS TXT record, and the two have to agree:
@@ -40,6 +56,24 @@ func (s *Server) deviceInfo() []byte {
 }
 
 func (s *Server) listEntities(conn *conn) error {
+	// The button itself, and the only entity here that is not a reading or a
+	// control: it reports a moment rather than a value, so it has no state and
+	// no category. Home Assistant draws an event entity from its device_class,
+	// so this carries no icon for the reason the jack does not.
+	var action pb
+	action.str(1, "action_button")
+	action.fixed32(2, s.keyAction)
+	action.str(3, "Action button")
+	action.boolean(6, false) // disabled_by_default
+	action.u32(7, entityCategoryNone)
+	action.str(8, "button") // device_class
+	for _, eventType := range actionEvents {
+		action.str(9, string(eventType))
+	}
+	if err := s.send(conn, msgListEvent, action.b); err != nil {
+		return err
+	}
+
 	for _, sensor := range []struct {
 		objectID    string
 		key         uint32

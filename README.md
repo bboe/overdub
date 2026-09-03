@@ -5,10 +5,11 @@ present the Dot to Home Assistant as an **ESPHome device**, while stock Alexa
 keeps running.
 
 Home Assistant adopts it with its own first-party ESPHome integration: no custom
-component, no MQTT, and no Home Assistant credential on the Dot. So far the Dot
-reports eight diagnostic entities over that connection, takes the action button
-back from Home Assistant and hands it over again, and a press still plays its
-chime on the device itself.
+component, no MQTT, and no Home Assistant credential on the Dot. The Dot reports
+a press and a hold of the action button to Home Assistant, reports eight
+diagnostic entities over the same connection, takes the button back from Home
+Assistant and hands it over again, and chimes on the device itself for every
+press it takes.
 
 ## Scope
 
@@ -227,6 +228,7 @@ Dot's own firewall.
 
 | Entity | Kind | Notes |
 |---|---|---|
+| `event.<name>_action_button` | none | `press`, or `hold` for six hundred milliseconds or more; an event, so it has no state between presses |
 | `sensor.<name>_uptime` | diagnostic | seconds since boot |
 | `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
 | `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
@@ -277,10 +279,25 @@ detection is electrical and stops at the contacts: a bare cable with nothing on
 the far end reads the same as headphones, and unplugging the far end of a
 connected cable is invisible to it.
 
-The eight readings are read-only and `button_capture` is not, and together they
-are the connection proved end to end in both directions. What is still missing
-is the press itself: it chimes on the device, and Home Assistant is not told
-about it.
+`action_button` is the button itself. A press fires `press` and a press held for
+six hundred milliseconds or more fires `hold`, which is Alexa's own threshold
+for a long press, so the hold you already know is the hold this reports. Both
+arrive when you let go: a hold is reported at its end rather than at the moment
+it becomes one.
+
+It is an event rather than a sensor, so it has no state to read and nothing to
+be behind: an automation triggers on it, and there is no value on the dashboard
+between presses. A Home Assistant that was not connected does not learn about a
+press afterwards.
+
+Only a captured press does any of this. With `button_capture` off the button is
+Alexa's, and a press is silent and unreported. The chime is not the event: it
+sounds the moment the button goes down, whether the press turns out to be a
+press or a hold, and it is how you know the daemon still has the button.
+
+`button_capture` is still the only entity Home Assistant writes to. Everything
+else reports, the button included, and together they are the connection proved
+end to end in both directions.
 
 ### Encryption
 

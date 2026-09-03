@@ -715,7 +715,9 @@ func stubSensors(s *Server) map[uint32]float32 {
 // polled. A constant rather than a call: the tests that count device reads stub
 // the readers, so anything that asks the server how many sensors it has would
 // be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
-// honest.
+// honest. It counts the entities that carry a state, which is the listing less
+// the action button: an event is not replayed to a subscriber, so no snapshot
+// ever carries one.
 const sensorCount = 9
 
 // What the two pollers put into the published state, without their tickers.
@@ -2188,7 +2190,7 @@ func TestEveryListedSensorHasAPollThatPublishesIt(t *testing.T) {
 	stubSensors(s)
 
 	want := map[uint32]bool{}
-	for _, entity := range listed(t, s) {
+	for _, entity := range listedWithState(t, s) {
 		want[uint32(entity[2].num)] = true
 	}
 	if len(want) == 0 {
@@ -2303,8 +2305,8 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 // which surfaces as an unrelated test hanging on a read, rather than as this.
 func TestTheSensorCountMatchesTheListing(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	if got := len(listed(t, s)); got != sensorCount {
-		t.Errorf("the server lists %d sensors and sensorCount is %d", got, sensorCount)
+	if got := len(listedWithState(t, s)); got != sensorCount {
+		t.Errorf("the server lists %d entities with a state and sensorCount is %d", got, sensorCount)
 	}
 }
 

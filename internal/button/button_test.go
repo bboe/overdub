@@ -61,6 +61,10 @@ func TestWaitForNodeReturnsOnceTheNodeAppears(t *testing.T) {
 	}
 }
 
+// Most of these tests are about which key reaches which end, and the chime the
+// key-down callback stands for is neither.
+func noDown() {}
+
 type emitted struct {
 	code  uint16
 	value int32
@@ -81,6 +85,7 @@ func events(list ...evdev.Event) []byte {
 func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	var got []emitted
 	var held []time.Duration
+	var order []string
 	i := &Interceptor{consume: testKey}
 	err := i.route(bytes.NewReader(events(
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
@@ -91,7 +96,11 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func(h time.Duration) { held = append(held, h) })
+	}, func() { order = append(order, "down") },
+		func(h time.Duration) {
+			order = append(order, "press")
+			held = append(held, h)
+		})
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF once the events run out", err)
@@ -105,6 +114,12 @@ func TestRouteConsumesTheActionButtonAndPassesTheRest(t *testing.T) {
 	if held[0] <= 0 || held[0] > time.Second {
 		t.Errorf("press held %v, want a short positive duration", held[0])
 	}
+	// The chime hangs off the first of these, and it is worth nothing if it
+	// waits for the release: a hold would then be silent for as long as it was
+	// held.
+	if want := []string{"down", "press"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("the press reported %v, want %v", order, want)
+	}
 }
 
 func TestRouteIgnoresAReleaseWithNoPress(t *testing.T) {
@@ -116,7 +131,7 @@ func TestRouteIgnoresAReleaseWithNoPress(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func(time.Duration) { presses++ })
+	}, noDown, func(time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
@@ -139,7 +154,7 @@ func TestRouteStopsOnAFailedEmit(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return boom
-	}, func(time.Duration) {})
+	}, noDown, func(time.Duration) {})
 
 	if !errors.Is(err, boom) {
 		t.Fatalf("route returned %v, want %v: a dead clone holds the grab", err, boom)
@@ -156,7 +171,7 @@ func TestRouteIgnoresASecondReleaseAfterAPress(t *testing.T) {
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 1},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0},
 		evdev.Event{Type: evdev.EvKey, Code: testKey, Value: 0}, // a second release
-	)), func(uint16, int32) error { return nil },
+	)), func(uint16, int32) error { return nil }, noDown,
 		func(h time.Duration) { held = append(held, h) })
 
 	if !errors.Is(err, io.EOF) {
@@ -225,7 +240,7 @@ func TestOpenGivesUpAfterTheWaitItIsGiven(t *testing.T) {
 // put a live original beside a live clone -- so this is the only route back.
 func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 	var got []emitted
-	presses := 0
+	presses, downs := 0, 0
 	i := &Interceptor{consume: testKey}
 	i.SetCaptured(false)
 	err := i.route(bytes.NewReader(events(
@@ -234,13 +249,18 @@ func TestAReleasedButtonPassesThroughInsteadOfBeingActedOn(t *testing.T) {
 	)), func(code uint16, value int32) error {
 		got = append(got, emitted{code, value})
 		return nil
-	}, func(time.Duration) { presses++ })
+	}, func() { downs++ }, func(time.Duration) { presses++ })
 
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("route returned %v, want io.EOF", err)
 	}
 	if presses != 0 {
 		t.Errorf("a released button reported %d presses, want 0", presses)
+	}
+	// The chime is what says the daemon has the button, so a press Alexa is
+	// answering has to be silent as well as unreported.
+	if downs != 0 {
+		t.Errorf("a released button sounded %d times, want 0", downs)
 	}
 	if want := []emitted{{testKey, 1}, {testKey, 0}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("emitted %v, want %v: a key nobody is holding has to reach Android", got, want)
@@ -320,7 +340,7 @@ func TestATogglePartWayThroughAPressDoesNotSplitIt(t *testing.T) {
 			err := i.route(r, func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, func(time.Duration) { presses++ })
+			}, noDown, func(time.Duration) { presses++ })
 
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
@@ -373,7 +393,7 @@ func TestAutorepeatFollowsThePressItBelongsTo(t *testing.T) {
 			err := i.route(bytes.NewReader(events(tt.send...)), func(code uint16, value int32) error {
 				got = append(got, emitted{code, value})
 				return nil
-			}, func(time.Duration) {})
+			}, noDown, func(time.Duration) {})
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("route returned %v, want io.EOF", err)
 			}

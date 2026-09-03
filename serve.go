@@ -30,12 +30,26 @@ const (
 	sensorTick = 60 * time.Second
 	liveTick   = 500 * time.Millisecond
 	firewallRe = 30 * time.Second
+
+	// What separates a press from a hold, and it is Alexa's own number rather
+	// than one chosen here: a BUTTON_MODE she sees held past this is her long
+	// press, which is setup mode. So the hold a user already has in their hand
+	// is the hold this reports.
+	holdTime = 600 * time.Millisecond
 )
 
 // The responder exists only once serveAPI has an address to advertise, and the
 // signal handler is installed before that. Held here so the handler can withdraw
 // the records rather than leave Home Assistant to time them out.
 var advertised atomic.Pointer[esphome.Responder]
+
+// The API server exists only once serveAPI has the MAC that names it, and the
+// read loop is running well before that: the button is taken first, so a Dot
+// with no wlan0 keeps its button. A press with nobody to tell is therefore
+// dropped rather than queued, which is what an event means -- one delivered
+// when the network finally came up would say the button was pressed at a moment
+// it was not.
+var api atomic.Pointer[esphome.Server]
 
 // Every path out of this process goes through here, because an advertised
 // record that outlives the daemon is one Home Assistant keeps for the PTR's
@@ -89,21 +103,47 @@ func serve(flags config) error {
 	log.Printf("intercepting %s: consuming keycode %d, passing the rest to %q",
 		inputNode, actionKey, uinputName)
 
-	return i.Run(func(held time.Duration) {
-		log.Printf("intercepted %d (held %v)", actionKey, held.Round(time.Millisecond))
-		if chime == nil {
-			return
-		}
-		// Off the read loop, which mute passes through. Play only queues the
-		// clip rather than waiting for it, but it still takes the player's lock
-		// and a few milliseconds, and a press restarts a chime already sounding
-		// rather than being dropped.
-		go func() {
-			if err := chime.Play(); err != nil {
-				log.Printf("chime: %v", err)
+	// The chime sounds at the key-down and the event is sent at the release,
+	// because they answer different questions. The chime says the daemon has the
+	// button, and it is worth nothing if it waits for a hold to end; the event
+	// says what the press was, which nothing knows until the key comes up.
+	return i.Run(
+		func() {
+			if chime == nil {
+				return
 			}
-		}()
-	})
+			// Off the read loop, which mute passes through. Play only queues the
+			// clip rather than waiting for it, but it still takes the player's
+			// lock and a few milliseconds, and a press restarts a chime already
+			// sounding rather than being dropped.
+			go func() {
+				if err := chime.Play(); err != nil {
+					log.Printf("chime: %v", err)
+				}
+			}()
+		},
+		func(held time.Duration) {
+			event := pressEvent(held)
+			log.Printf("intercepted %d: %s (held %v)", actionKey, event, held.Round(time.Millisecond))
+			// Sent on the read loop rather than through a queue: FirePress holds
+			// the server lock only long enough to queue a frame per subscriber,
+			// and every other holder of that lock is as short. A goroutine each
+			// would be the one thing worse than blocking here, since two presses
+			// could then reach Home Assistant in the wrong order.
+			if server := api.Load(); server != nil {
+				server.FirePress(event)
+			}
+		})
+}
+
+// Which of the two the button did. Held at the threshold counts as a hold, so
+// the boundary belongs to the longer press: a user holding for exactly as long
+// as they were told to gets the hold rather than a press.
+func pressEvent(held time.Duration) esphome.EventType {
+	if held >= holdTime {
+		return esphome.EventHold
+	}
+	return esphome.EventPress
 }
 
 func serveAPI(name string, psk []byte, i *button.Interceptor) {
@@ -125,6 +165,9 @@ func serveAPI(name string, psk []byte, i *button.Interceptor) {
 	// it to change. Wired here rather than passed to NewServer because a server
 	// is testable without a button and a Dot never runs without one.
 	server.UseButton(i.Captured, i.SetCaptured)
+	// Found rather than handed over: the read loop has been running since before
+	// there was an address to build this server with.
+	api.Store(server)
 
 	responder := &esphome.Responder{Instance: name, MAC: mac, Iface: wifiIface, Port: apiPort}
 	advertised.Store(responder)
