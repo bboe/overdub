@@ -172,12 +172,27 @@ type Server struct {
 	keyJack   uint32
 	keyJackOn uint32
 	keySound  uint32
+	keyADB    uint32
 
 	// The physical buttons, in the order they are listed. Each is an event
 	// entity, which reports a moment rather than a value and so is never
 	// published, and a select, which is the only kind of entity a peer writes.
 	// A slice rather than a map, because the order is what Home Assistant shows.
 	buttons []*physicalButton
+
+	// One worker at a time, and one mode waiting for it. Home Assistant can
+	// move a dropdown faster than adbd restarts, and every position asked for
+	// in between is a position nobody wants to arrive at: collapsing them to
+	// the latest is what makes the select settle where it was last put.
+	adbWorking    bool
+	adbHasPending bool
+	adbPending    device.ADBMode
+
+	// Whether the last apply ended where it was aimed. The no-op guard below
+	// rests on it: without it a position that half-took is reported as reached
+	// and can never be asked for again, so an operator watching a stale rule
+	// has no way to drive it out from the dropdown.
+	adbSettled bool
 
 	// PollLive's alone, and unlocked because of it.
 	soundOn  bool
@@ -192,6 +207,8 @@ type Server struct {
 
 	// Read the device, so the tests can answer for them: /proc/uptime and
 	// /proc/net/wireless are Linux's, and the tests run wherever the developer is.
+	// The adb three are here for a second reason as well: the setter restarts
+	// adbd and opens a port, which no test may do.
 	uptime  func() (float32, bool)
 	wifi    func() (float32, bool)
 	volumes func() device.MusicVolume
@@ -200,10 +217,17 @@ type Server struct {
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
 
+	adbMode     func() (device.ADBMode, bool)
+	adbSet      func(device.ADBMode) error
+	adbSecureOK func() bool
+	adbHold     func() error
+	adbDeny     func() error
+
 	// Fields so a test can shrink them without racing another test's server.
 	handshakeWait time.Duration
 	pingWait      time.Duration
 	wakeGap       time.Duration
+	adbSettle     time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -241,6 +265,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyJack:       entityKey("jack_volume"),
 		keyJackOn:     entityKey("audio_jack"),
 		keySound:      entityKey("speaker_playing"),
+		keyADB:        entityKey("network_adb"),
 		buttons:       newButtons(),
 		uptime:        device.UptimeSeconds,
 		wifi:          device.WifiSignal,
@@ -248,10 +273,16 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		jack:          device.JackOccupied,
 		sound:         device.SpeakerPlaying,
 		cpu:           device.CPUTemperature,
+		adbMode:       device.CurrentADBMode,
+		adbSet:        device.SetADBMode,
+		adbSecureOK:   device.ADBSecureAvailable,
+		adbHold:       device.HoldADBOpen,
+		adbDeny:       func() error { return device.DenyTCP(device.ADBPort) },
 		memory:        device.AvailableMemory,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		wakeGap:       minLiveReadGap,
+		adbSettle:     adbSettleFor,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
@@ -622,6 +653,10 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}); err != nil {
 			return err
 		}
+		if key == s.keyADB {
+			s.setADBLocked(conn, choice)
+			return nil
+		}
 		for _, b := range s.buttons {
 			if key == b.keyMode {
 				s.setModeLocked(conn, b, choice)
@@ -675,4 +710,144 @@ func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
 	case s.sensorWake <- struct{}{}:
 	default:
 	}
+}
+
+// A mode the listing did not offer is refused rather than acted on, the way a
+// button mode is, and Secure is refused for the same reason when there is no
+// key to authenticate against: adbd would come up open instead, which is the
+// one position nobody asked for.
+//
+// Caller holds mu, so this may not do the work. SetADBMode restarts adbd and
+// then waits to see what the device settled on, which is seconds spent under a
+// lock that gates the accept path and every other connection. It hands the mode
+// to a worker instead, and nothing is published from here.
+func (s *Server) setADBLocked(conn *conn, choice string) {
+	want, ok := device.ParseADBMode(choice)
+	if !ok || (want == device.ADBSecure && !s.adbSecureOK()) {
+		conn.noted = fmt.Sprintf("esphome api: %s asked network adb for %q, which was not offered",
+			conn.sock.RemoteAddr(), truncate(choice))
+		return
+	}
+	// Already there, or already on its way there. The button select turns away
+	// a repeat to save a wake; here it saves an adbd restart, which drops every
+	// live adb session -- so a peer resending one position on a connection it
+	// already holds would otherwise cost a restart every couple of seconds for
+	// as long as it liked, on a path the eight slots do not bound. Compared
+	// against the published state rather than the device, because reading the
+	// device forks and this runs under the server lock.
+	if s.adbHasPending || s.adbWorking {
+		if s.adbPending == want {
+			return
+		}
+	} else if was, told := s.published[s.keyADB]; told && s.adbSettled && was.text == want.String() {
+		return
+	}
+	conn.noted = fmt.Sprintf("esphome api: %s set network adb to %s", conn.sock.RemoteAddr(), want)
+	s.adbPending, s.adbHasPending = want, true
+	if s.adbWorking {
+		return
+	}
+	s.adbWorking = true
+	go s.adbWorker()
+}
+
+// One worker however many moves arrive, taking the latest pending mode each
+// time round rather than a queue of them: a dropdown dragged through three
+// positions restarts adbd once and lands on the third. Every position in
+// between is one nobody wanted to arrive at.
+func (s *Server) adbWorker() {
+	for {
+		s.mu.Lock()
+		if !s.adbHasPending {
+			s.adbWorking = false
+			s.mu.Unlock()
+			return
+		}
+		want := s.adbPending
+		s.adbHasPending = false
+		s.mu.Unlock()
+
+		s.setADBMode(want)
+	}
+}
+
+// How long adbd is given to restart before the device is asked what it settled
+// on. A field on the server rather than a package variable, like the other
+// three above: the worker outlives the test that started it, so a test
+// restoring a shared one races the goroutine still reading it.
+const adbSettleFor = 2 * time.Second
+
+// What the device actually did, rather than what it was told to do. adbd is
+// restarted by a property, so nothing here gets a result back: the mode is set,
+// the device is given a moment, and then it is read.
+//
+// The gap between the two is why Secure fails closed. Asking for Secure means
+// installing a key and setting ro.adb.secure, and if the property did not take
+// while adbd came up anyway, the device is open to the whole subnet with no
+// authentication -- a strictly weaker position than the one that was asked for,
+// arrived at silently. So that one case is closed rather than reported.
+func (s *Server) setADBMode(want device.ADBMode) {
+	err := s.adbSet(want)
+	if err != nil {
+		s.peerLogf("network adb: %v", err)
+	}
+	time.Sleep(s.adbSettle)
+
+	live, known := s.adbMode()
+	switch {
+	case !known:
+		s.peerLogf("network adb: asked for %v, and the device could not be read", want)
+	case live != want:
+		s.peerLogf("network adb: asked for %v, device is %v", want, live)
+		if want == device.ADBSecure && live == device.ADBInsecure {
+			if err := s.adbSet(device.ADBOff); err != nil {
+				s.peerLogf("network adb: %v", err)
+			}
+			// Settled like the first attempt rather than read straight away:
+			// adbd is restarted by a property and goes down on its own
+			// schedule, so an immediate read finds it still listening.
+			time.Sleep(s.adbSettle)
+			live, known = s.adbMode()
+			s.peerLogf("network adb: closed instead; device is %v", live)
+		}
+	case live == device.ADBSecure && err == nil:
+		s.peerLogf("network adb: LISTENING on tcp/%d, key required; root is still one su away", device.ADBPort)
+	case live == device.ADBInsecure:
+		s.peerLogf("network adb: LISTENING on tcp/%d with no authentication; this is a root-capable shell", device.ADBPort)
+	}
+
+	// A port that ended up closed is closed again here. adbd dies on its own
+	// schedule after ctl.restart, so the sensor poll can have found it still
+	// listening and put the rule back -- and once adbd is gone nothing else
+	// would ever take that rule out: the mode reads Off, so no poll re-asserts
+	// it, no later command repeats an Off the guard turns away, and
+	// uninstall.sh leaves this port alone on purpose.
+	if known && live == device.ADBOff {
+		if err := s.adbDeny(); err != nil {
+			s.peerLogf("network adb: %v", err)
+		}
+	}
+
+	s.mu.Lock()
+	s.adbSettled = known && err == nil && live == want
+	s.mu.Unlock()
+
+	// The poll is woken rather than told, so the device keeps one reader. A
+	// publish from here would be a second, and docs/architecture.md gives the
+	// case: this end and the poll can read the device either side of a change
+	// and the later publish is not the later reading, which leaves Home
+	// Assistant holding a mode nothing will correct until the minute is up. The
+	// wake is the button select's, and the gap on it bounds this too.
+	select {
+	case s.sensorWake <- struct{}{}:
+	default:
+	}
+}
+
+// Whether a position is on its way to the device, which is the window where
+// what the device says about itself is behind what it has been asked for.
+func (s *Server) adbBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adbWorking || s.adbHasPending
 }

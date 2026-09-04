@@ -47,6 +47,19 @@ func (s *Server) readTicked() []reading {
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
 	}
+	// This one is a reading of the device rather than of this end, and it is
+	// the reason it rides the minute rather than the live tick. Off costs a
+	// procfs read and nothing else, because nothing is asked about a port that
+	// is not listening; open, it is two forks, one of them an iptables call
+	// that waits on a lock netd holds constantly. So the cheap answer is the
+	// ordinary one, the same shape as the speaker's substream gate.
+	// Nothing is published for a mode that could not be read. A select carries
+	// no missing_state, so the choice is between the last value Home Assistant
+	// was given and a position invented here, and the invented one says the
+	// port is shut.
+	if mode, known := s.adbMode(); known {
+		out = append(out, reading{key: s.keyADB, text: mode.String(), ok: true, kind: kindSelect})
+	}
 	return out
 }
 
@@ -341,6 +354,21 @@ func (s *Server) PollSensors(every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
+		// Before the readings, so the rule is back before the mode that needs
+		// it is reported. netd rebuilds the INPUT chain on its own schedule and
+		// discards what it finds there, the same hazard tcp/6053 answers with
+		// HoldTCPOpen -- but this port is held open only while adbd is
+		// listening, which is a question the device answers, so nothing here
+		// remembers an intention across a restart of this daemon. Nothing is
+		// logged: a failure is reported by the mode the next read finds.
+		// Not while a position is being applied. "adbd is listening" lags a
+		// restart it was asked for, so a re-assert landing inside a transition
+		// puts back a rule the worker has just taken out. It also waits on the
+		// same lock the worker holds for the whole apply, which would park this
+		// serial poll -- and the button modes publish from here.
+		if !s.adbBusy() {
+			_ = s.adbHold()
+		}
 		s.publish("sensors", s.readTicked())
 		read := time.Now()
 		select {
