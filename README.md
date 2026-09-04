@@ -140,6 +140,7 @@ ANDROID_SERIAL=<serial> deploy/install.sh kitchen
 | `overdub` | `/data/local/bin/` |
 | `overdub.sh` | Magisk `service.d`, inside `magisk.img` on Magisk 17.3 |
 | `.overdub-noise-key` | `/data/local/bin/`, mode 600, generated if absent |
+| `adb_keys` | `/data/local/bin/`, from `~/.android/adbkey.pub` or `$ADBKEY`; enables [`Secure`](#network-adb), and removed if there is no key to push |
 
 **The name is required, and must be unique on your network.** Every entity id
 Home Assistant creates is prefixed with it, so a duplicate collides there, and
@@ -240,6 +241,7 @@ Dot's own firewall.
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
+| `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
 
 Uptime and signal are read once a minute, and again when Home Assistant
 subscribes. Both volumes, the jack, the temperature and the memory are read
@@ -350,6 +352,59 @@ without chiming, so silence there is the mode working as asked.
 The mode selects are still the only entities Home Assistant writes to. Everything
 else reports, the button included, and together they are the connection proved
 end to end in both directions.
+
+### Network ADB
+
+`Network ADB` turns adb on over the network, on tcp/5555, so the Dot can be
+worked on without a cable. It has three positions, and a reboot always returns
+it to the first:
+
+| Position | What it does |
+|---|---|
+| `Off` | adbd stops listening on the network, and tcp/5555 is closed again |
+| `Insecure` | adb is open to the local network, and **anyone on it may connect** |
+| `Secure` | adb is open, but only a client holding the installed key may connect |
+
+Connect with `adb connect <address>:5555`. `ANDROID_SERIAL` then picks that
+target for `install.sh` as readily as a cable does.
+
+**`Off` and `Insecure` are the network only.** Neither touches adb over USB, so
+`Off` is not a way to lock the Dot down against someone holding it: it closes
+tcp/5555 and nothing else.
+
+**`Secure` reaches the cable as well.** `ro.adb.secure` is a setting on `adbd`
+rather than on one transport, so while it is on, every adb connection is
+challenged. A machine that does not hold the installed key gets `unauthorized`
+over USB too, and this Dot has no screen to show the prompt a phone would.
+
+Changing position restarts `adbd`, which drops every live adb session -- the one
+you may be watching from included. Do not change it from an install that is
+running over adb.
+
+`Secure` is offered only if `deploy/install.sh` found a public key to install --
+`~/.android/adbkey.pub`, or whatever `ADBKEY` names. Without one it would refuse
+every machine including yours, so it is not listed at all. That key becomes the
+*only* one adbd will accept: a Dot that had authorised other machines over USB
+stops accepting them.
+
+> **Secure is authentication, not a sandbox.** `ro.secure=1` on this build, so
+> adbd runs as `shell` and root still comes from `su`. A client holding the key
+> reaches root exactly as it did before. It decides who may connect, not what
+> they may do, and it is not a reason to expose tcp/5555 beyond your own network.
+
+If a key ever locks you out, set the control back to `Off` or `Insecure` from
+Home Assistant. That path is the ESPHome API on tcp/6053 and owes nothing to
+adb. Failing that, power-cycle the Dot.
+
+Uninstalling does not turn it off. The position lives in the property store and
+the firewall chain rather than on disk, and `uninstall.sh` may itself be running
+over the connection it would cut, so it says so and leaves it to a reboot.
+
+Installing with no key while the Dot is in `Secure` leaves the control reporting
+a position it no longer offers, and Home Assistant marks that state invalid.
+Both halves are true: the Dot really is in `Secure`, and `Secure` really cannot
+be chosen with no key to install. Nothing is broken by it, and a reboot clears
+it, since `ro.adb.secure` does not survive one.
 
 ### Encryption
 

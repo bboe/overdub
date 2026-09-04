@@ -711,12 +711,16 @@ func stubSensors(s *Server) map[uint32]float32 {
 	}
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
+	// A reader of the device like the rest, and stubbed for the same reason:
+	// the container the tests run in has a /proc/net/tcp of its own.
+	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
 	// Not a reader of the device, so it is left at the shipped default rather
 	// than stubbed: what the tests below count is reads, and this is not one.
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
 		s.keySound: 0, s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
+		s.keyADB: 0,
 	}
 }
 
@@ -727,7 +731,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 // honest. It counts the entities that carry a state, which is the listing less
 // the action button: an event is not replayed to a subscriber, so no snapshot
 // ever carries one.
-const sensorCount = 10
+const sensorCount = 11
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -1891,6 +1895,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.keySound:                        {"speaker_playing", msgBinarySensorState},
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
 				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
+				s.keyADB:                          {"network_adb", msgSelectState},
 			}
 
 			s.sound = tt.sound

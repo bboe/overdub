@@ -56,6 +56,14 @@ The daemon opens it itself, in `internal/device/firewall.go`. `iptables -L
 INPUT -n -v | grep 6053` shows a packet counter, which separates "the device
 dropped it" from "the network did".
 
+`AllowTCP` checks and then appends, which is two calls and not one. One port
+needed no lock. With the adb select there are two, reached from the sensor poll
+and from the adb worker, and two arriving together both find their rule absent
+and both append it. The `-D` that closes a port removes one copy, so the chain
+keeps an ACCEPT nothing will ever delete for a port the select truthfully
+reports as closed. The chain is not ours alone either, so nothing tidies it up
+later. One mutex over both mutations is the whole fix.
+
 `-w` on this iptables takes no seconds argument: it waits for the xtables lock
 for as long as it takes, and netd holds that lock constantly. Ten seconds, so a
 held lock is reported rather than waited on. The one-shot call at startup says

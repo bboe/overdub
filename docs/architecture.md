@@ -1031,6 +1031,114 @@ network is waited for, so the read loop runs for as long as `wlan0` takes.
 nothing there goes no further than the log. Queueing it would deliver a press at
 a moment it did not happen.
 
+## Network ADB
+
+`internal/device/adb.go`, and a select of the *device* rather than of this
+daemon: the button modes say what overdub does with a key, and this one turns a
+port on. It exists so the Dot can be worked on without a cable, which is the
+thing a rooted Echo on a shelf is otherwise worst at.
+
+Three positions, and what separates them is authentication rather than reach.
+**Off** stops adbd listening on the network and closes tcp/5555. **Insecure**
+opens it to anyone who can route to the Dot. **Secure** opens it to a client
+holding the installed key, because `ro.adb.secure` is 1.
+
+`ro.adb.secure` is a property init has already frozen, so `setprop` will not
+move it and Magisk's `resetprop` is what does. That is the one thing here that
+needs Magisk rather than root.
+
+**Secure is offered only when there is a key to authenticate against.** The
+listing leaves it out, and `setADBLocked` refuses it a second time in case a
+peer sends it anyway. Without a key, asking for Secure does not produce a
+stricter adbd: it produces a listening one that authenticates nobody, which is
+Insecure arrived at by asking for its opposite.
+
+**The device is read back rather than trusted.** adbd is restarted through a
+property, so nothing hands back a result. The mode is set, the device is given
+`adbSettle`, and then it is asked what it became. The gap is why Secure fails
+closed: if the property did not take while adbd came up anyway, the Dot is open
+to the subnet with no authentication, which is strictly weaker than what was
+asked for and arrived at silently. That one case is closed rather than reported.
+
+A mode that could not be read is published as nothing at all. The rule check
+runs iptables, which waits on the lock netd holds constantly, so it fails on a
+working device -- and a select carries no `missing_state`, so the choice is
+between the last value Home Assistant holds and a position invented here. The
+invented one says the port is shut, which is the `p2p0` row again: a reading
+nobody took, drawn as a measurement.
+
+The reading is `CurrentADBMode`, and it is on the minute tick because of what it
+costs. A port that is not listening is answered from `/proc/net/tcp` alone; only
+one that is costs two forks, one of them an `iptables -C` that waits on the lock
+netd holds constantly. So the cheap gate answers the ordinary case, which is the
+shape the speaker's substream test has.
+
+**The rule is re-asserted by the sensor poll rather than by a ticker of its
+own.** netd rebuilds the INPUT chain and discards what it finds, the same hazard
+tcp/6053 answers with `HoldTCPOpen` -- but this port is held open only while
+adbd is listening, so a Dot with adb off runs no iptables at all.
+
+What decides that is `ADBListening`, and not `CurrentADBMode`, which is the
+reading everything else here uses. That reading folds the firewall rule into
+itself: a Dot whose rule netd has just wiped is still listening but no longer
+reachable, so it reports `Off`. A re-assert gated on it would therefore stop at
+exactly the moment it is needed, and the mode would never come back. The
+question the re-assert asks is the narrower one the procfs table answers on its
+own.
+
+Nothing remembers an intention across a restart of this daemon either, which
+falls out of the same choice: the supervisor respawns on any fatal exit, and a
+flag would start false beside an adbd still listening. The device is asked
+instead.
+
+The poll does not re-assert at all while a position is being applied, and that
+is a second rule rather than a refinement of the first. "adbd is listening" lags
+a restart that was asked for: `ctl.restart` is a property init acts on when it
+gets to it, so `SetADBMode` returns with the old adbd still up. A re-assert
+landing there puts back the rule the close has just taken out, and once adbd
+does go down nothing would ever remove it -- the mode reads `Off`, so no poll
+re-asserts it, the no-op guard turns away a repeated `Off`, and `uninstall.sh`
+leaves this port alone on purpose. So a close deletes the rule a second time
+after its settle, and the poll stays out of the way while a worker is in flight.
+
+`HoldADBOpen` takes the same lock as `SetADBMode`, because the decision and the
+call have to be one step. Split, a poll that read "listening" a moment before
+the worker closed the port puts the rule back afterwards, and the chain keeps an
+ACCEPT for a port the select truthfully reports as closed -- which is the
+duplicate-rule hazard in docs/pitfalls.md arriving by another road. It is not
+the server's lock: this waits on iptables, which waits on netd.
+
+**Home Assistant can move a dropdown faster than adbd restarts.** So the command
+hands a mode to a worker and returns: `SetADBMode` takes seconds and `handle`
+holds the server lock for its whole body, which would park the accept path and
+every other connection behind a property write. The worker keeps one pending
+mode rather than a queue, so a dropdown dragged through three positions restarts
+adbd once and lands on the third. Every position in between is a port opened
+because somebody's finger passed over it.
+
+A command asking for the position the device is already in is turned away, as
+the button select turns one away. There it saves a wake; here it saves an adbd
+restart, which drops every live adb session -- so a peer resending one position
+on a connection it already holds would otherwise cost a restart every couple of
+seconds for as long as it liked, on a path the eight slots do not bound. It is
+compared against the published state rather than against the device, because
+reading the device forks and this runs under the server lock -- and only when
+the last apply reached where it was aimed. `SetADBMode` deletes the rule first
+and reports that failure last, so the properties can succeed while the rule
+stays behind; the device then reads `Off` truthfully, and without that condition
+the guard would turn away every `Off` after it, leaving an operator watching a
+stale rule with no way to drive it out.
+
+The worker wakes the poll rather than publishing what it read. Publishing would
+make it a second reader of the device, which is the thing one published state
+exists to prevent: the two can read either side of a change, and the later
+publish is not the later reading.
+
+Uninstalling does not undo any of this, and cannot. The position lives in the
+property store and the INPUT chain rather than on disk, and deleting the rule
+would cut the connection the uninstall may be running over. So the script says
+so and leaves it to a reboot.
+
 ## Discovery
 
 `internal/esphome/mdns.go`. Without it the Dot is added to Home Assistant by

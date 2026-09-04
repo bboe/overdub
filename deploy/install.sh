@@ -19,6 +19,11 @@ staged=0
 # window would otherwise leave a live key nobody has seen: the local copy goes
 # with the trap, and the next install finds the device's and keeps it.
 key_landed=0
+# The adb key's staging directory, and whether an unverified copy of that key is
+# sitting where the daemon looks for it. Both are the same shape as the two
+# above: a window an interrupt can land in, which nothing downstream reports.
+adb_staged=0
+adb_key_landed=0
 # The device half matters as much as the host half: an interrupt between the
 # push and the move leaves a second live copy of the key on the device.
 cleanup() {
@@ -27,6 +32,12 @@ cleanup() {
     echo >&2
     echo "Interrupted after the key was written and before it was shown." >&2
     discard_new_key
+  fi
+  if [ "$adb_key_landed" = 1 ]; then
+    discard_adb_key
+  fi
+  if [ "$adb_staged" = 1 ]; then
+    adb shell 'su -c "rm -rf /data/local/tmp/overdub-adbkey"' >/dev/null 2>&1 || true
   fi
   if [ "$staged" = 1 ]; then
     adb shell 'su -c "rm -rf /data/local/tmp/overdub-install"' >/dev/null 2>&1 || true
@@ -125,6 +136,20 @@ check_key_mode() {
 # A key this script wrote and could not verify has to go, not stay: it was never
 # printed, and the next run would find it and keep it, leaving the Dot serving an
 # API under a key that exists nowhere. Only ever called on the generate branch.
+# An adb public key that was pushed and not verified is one the daemon would
+# offer Secure against, so it goes rather than staying for the next run to trust.
+# ADBSecureAvailable only stats the path: nothing downstream looks at what is in
+# it.
+discard_adb_key() {
+  adb shell 'su -c "rm -f /data/local/bin/adb_keys"' >/dev/null 2>&1 || true
+  if [ -z "$(adb shell 'su -c "[ -f /data/local/bin/adb_keys ] || echo gone"' 2>/dev/null |
+       tr -d "\r" | grep -x gone || true)" ]; then
+    echo "WARNING: an unverified adb public key may still be at" >&2
+    echo "  /data/local/bin/adb_keys -- Network ADB would offer Secure against it:" >&2
+    echo "  adb shell 'su -c \"rm -f /data/local/bin/adb_keys\"'" >&2
+  fi
+}
+
 discard_new_key() {
   adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"' >/dev/null 2>&1 || true
   # Reported as it really went. This runs because something already failed, and
@@ -252,6 +277,103 @@ else
   echo
   rm -f "$keyfile"
   keyfile=""
+fi
+
+# The public half of the operator's adb key, which is what the Secure position
+# of the Network ADB control authenticates against. Not a secret, but not
+# staged in the shared directory either: adb push lands a file 0666 and
+# /data/local/tmp is o+x, so any uid could substitute a key of its own between
+# the push and the copy. The read-back below would catch that and fail the
+# install, having already put a stranger's key where the daemon looks for it.
+# So it goes through a 0700 directory of ours, the way the API key does.
+#
+# What this cannot do is revoke. adbd authenticates against
+# /data/misc/adb/adb_keys, which only the daemon writes and only on Secure, and
+# ro.adb.secure is not persistent -- so an install with no key stops Secure
+# being offered from here on, and a Dot already in Secure keeps honouring the
+# key it was given until it reboots.
+adbkey="${ADBKEY:-$HOME/.android/adbkey.pub}"
+if [ -f "$adbkey" ] && grep -q 'PRIVATE KEY' "$adbkey" 2>/dev/null; then
+  echo "$adbkey looks like a PRIVATE key; ADBKEY wants the .pub" >&2
+  exit 2
+fi
+# An empty file is not a key, and it is the one shape that would pass every
+# check below: the read-back greps for the file's own content, and an empty
+# pattern matches the blank line the device echoes. Installed, it would set
+# ro.adb.secure against a key that authenticates nobody, which reaches USB too
+# and locks the operator out of a Dot with no screen to say so.
+if [ -f "$adbkey" ] && ! grep -Eq '^(ssh-|[A-Za-z0-9+/]{32,})' "$adbkey"; then
+  echo "$adbkey is empty or does not look like an adb public key" >&2
+  exit 2
+fi
+if [ -f "$adbkey" ]; then
+  if ! adb shell 'mkdir /data/local/tmp/overdub-adbkey 2>/dev/null && chmod 700 /data/local/tmp/overdub-adbkey && echo made' |
+     tr -d "\r" | grep -qx made; then
+    echo "INSTALL FAILED: /data/local/tmp/overdub-adbkey already exists, so either" >&2
+    echo "  another install is running or one was interrupted. Nothing was changed." >&2
+    echo "  If nothing else is running, remove it and try again:" >&2
+    echo "  adb shell 'su -c \"rm -rf /data/local/tmp/overdub-adbkey\"'" >&2
+    exit 1
+  fi
+  adb_staged=1
+  # Read back before the key goes in, for the reason the API key's is: the mode
+  # is the whole point of the directory, and nothing downstream would notice its
+  # absence -- the verification below catches a substituted key only after it
+  # has been copied to where the daemon looks.
+  adb_stage_mode=$(adb shell 'ls -ld /data/local/tmp/overdub-adbkey' |
+    tr -d "\r" | grep -E '^d' | head -1 | awk '{print $1}')
+  case "$adb_stage_mode" in
+    drwx------) ;;
+    *) echo "INSTALL FAILED: the adb key staging directory is ${adb_stage_mode:-missing}, want drwx------." >&2
+       echo "The key was not pushed. Nothing was changed." >&2
+       exit 1 ;;
+  esac
+  adb push "$adbkey" /data/local/tmp/overdub-adbkey/k.pub
+  # Armed before the write for the reason the API key's flag is: an interrupt
+  # arrives during the call, so a flag set on the next line never runs.
+  adb_key_landed=1
+  adb shell 'su -c "
+    cp /data/local/tmp/overdub-adbkey/k.pub /data/local/bin/adb_keys
+    chmod 644 /data/local/bin/adb_keys
+    rm -rf /data/local/tmp/overdub-adbkey
+  "'
+  adb_staged=0
+  # The key's own line rather than the whole stream, and a sentinel to end it:
+  # adb merges the device's stderr into its stdout, so a linker warning from su
+  # would fail an equality test on a key that landed perfectly. docs/pitfalls.md
+  # has the rule.
+  # The bare echo is load-bearing: adbkey.pub carries no trailing newline, so
+  # without it the sentinel lands on the end of the key's own line and neither
+  # of the two greps below can match.
+  answer=$(adb shell 'su -c "cat /data/local/bin/adb_keys; echo; echo --read-ok--"' | tr -d "\r")
+  if ! printf '%s\n' "$answer" | grep -qx -- --read-ok--; then
+    echo "INSTALL FAILED: could not read the adb public key back from the device." >&2
+    discard_adb_key
+    exit 1
+  fi
+  if ! printf '%s\n' "$answer" | grep -qFx -- "$(cat "$adbkey")"; then
+    echo "INSTALL FAILED: the adb public key on the device is not the one pushed." >&2
+    discard_adb_key
+    exit 1
+  fi
+  adb_key_landed=0
+  if [ "$(probe '-d /data/local/tmp/overdub-adbkey')" != "no" ]; then
+    echo "INSTALL FAILED: the adb key staging directory is still on the device." >&2
+    exit 1
+  fi
+  echo "adb key verified on device; Network ADB will offer Secure"
+else
+  adb shell 'su -c "rm -f /data/local/bin/adb_keys"'
+  # A decision rather than a value, for the reason above: an empty read and a
+  # dropped cable are the same string.
+  if [ "$(probe '-f /data/local/bin/adb_keys')" != "no" ]; then
+    echo "INSTALL FAILED: an old adb public key is still on the device," >&2
+    echo "  or the device did not answer. Network ADB would offer Secure" >&2
+    echo "  against a key you did not install." >&2
+    exit 1
+  fi
+  echo "no $adbkey, so Network ADB will offer Off and Insecure only."
+  echo "  A Dot already in Secure keeps honouring the key it was given until it reboots."
 fi
 
 adb push build/overdub /data/local/tmp/overdub

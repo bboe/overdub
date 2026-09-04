@@ -550,8 +550,11 @@ func TestEveryButtonIsListedAsAnEventAndASelect(t *testing.T) {
 			t.Errorf("%s has no mode select, so nothing can change what it does", objectID)
 		}
 	}
+	// The device's own selects are not buttons and are not counted here: what
+	// this holds is that no button was listed with half a pair.
+	delete(selects, "network_adb")
 	if len(events) != 2 || len(selects) != 2 {
-		t.Errorf("listed %d event entities and %d selects, want 2 of each", len(events), len(selects))
+		t.Errorf("listed %d event entities and %d button selects, want 2 of each", len(events), len(selects))
 	}
 }
 
