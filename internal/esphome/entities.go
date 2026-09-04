@@ -1,5 +1,7 @@
 package esphome
 
+import "github.com/bboe/overdub/internal/device"
+
 const (
 	entityCategoryNone       = 0
 	entityCategoryConfig     = 1
@@ -21,6 +23,14 @@ const (
 	// what shows the state. That frees it to say which entity this is, which is
 	// the job an icon has among a device's others.
 	buttonModeIcon = "mdi:gesture-tap-button"
+
+	// A name Home Assistant cannot resolve is not an error anywhere: the field
+	// is sent, the frontend finds nothing, and the entity is drawn with no icon
+	// at all. mdi:android-debug-bridge was the obvious name and does not exist
+	// -- Material Design Icons dropped its Android brand icons -- so this one
+	// was checked against the library rather than guessed. Nothing here can
+	// test it: the set of real names lives in the frontend.
+	adbIcon = "mdi:console-network"
 )
 
 // What the action button can be told to do, and the whole of what a
@@ -174,6 +184,27 @@ func (s *Server) listEntities(conn *conn) error {
 		if err := s.send(conn, msgListSelect, mode.b); err != nil {
 			return err
 		}
+	}
+
+	// A select of the device rather than of this daemon: the others say what
+	// overdub does with a key, and this one turns a port on. Secure is offered
+	// only when there is a key to authenticate against, because an option that
+	// cannot work is worse than one that is not there -- Home Assistant would
+	// show it, accept it, and land on Off.
+	var adb pb
+	adb.str(1, "network_adb")
+	adb.fixed32(2, s.keyADB)
+	adb.str(3, "Network ADB")
+	adb.str(5, adbIcon)
+	adb.str(6, device.ADBOff.String()) // options
+	adb.str(6, device.ADBInsecure.String())
+	if s.adbSecureOK() {
+		adb.str(6, device.ADBSecure.String())
+	}
+	adb.boolean(7, false) // disabled_by_default
+	adb.u32(8, entityCategoryConfig)
+	if err := s.send(conn, msgListSelect, adb.b); err != nil {
+		return err
 	}
 
 	return s.send(conn, msgListEntitiesDone, nil)

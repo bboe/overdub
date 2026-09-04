@@ -8,6 +8,8 @@ BOOT=/sbin/.core/img/.core/service.d/overdub.sh
 BIN=/data/local/bin/overdub
 LOG=/data/local/tmp/overdub.log
 KEY=/data/local/bin/.overdub-noise-key
+ADBKEY=/data/local/bin/adb_keys
+ADBKEYS=/data/misc/adb/adb_keys
 STAGE=/data/local/tmp/overdub-install
 
 if ! adb shell 'su -c "id"' | tr -d '\r' | grep -q 'uid=0'; then
@@ -24,7 +26,7 @@ overdub_pid() {
 adb shell "su -c 'rm -f $BOOT'"
 
 adb shell "su -c '
-  rm -f $BIN ${BIN}.new $KEY
+  rm -f $BIN ${BIN}.new $KEY $ADBKEY
   rm -rf $STAGE
   rm -f /data/local/tmp/overdub /data/local/tmp/s.sh
 '"
@@ -107,5 +109,30 @@ if [ -n "$rule" ]; then
   echo "  Nothing listens behind it now. It lives in the chain rather than on" >&2
   echo "  disk, so a reboot clears it." >&2
 fi
+
+# The key went with the rest, and Home Assistant is still holding it. Said here
+# because nothing else reports it: the integration simply stops connecting, and
+# a fresh install generates a key rather than restoring the old one, which is
+# only recoverable from Home Assistant's own config entry.
+echo
+echo "Home Assistant can no longer talk to this device: the API key it was"
+echo "configured with is gone. Installing again generates a NEW key and prints"
+echo "it once. Give that to the ESPHome integration, which asks for it when the"
+echo "handshake fails."
+
+# Not touched, and not by oversight. Network ADB lives in the property store and
+# the INPUT chain rather than on disk, so this script cannot undo it -- and
+# deleting the rule here would cut the connection this script may be running
+# over, which is the whole point of having turned it on.
+echo
+echo "Reboot to finish. Whatever Network ADB was last set to is still in force:"
+echo "it lives in the property store and the firewall chain rather than on disk."
+echo "If it was Insecure, tcp/5555 is an unauthenticated root shell until you"
+echo "reboot."
+echo
+echo "One file is left on purpose: the public key at $ADBKEYS."
+echo "adbd consults it only while ro.adb.secure is 1, and nothing sets that once"
+echo "this is gone, so it grants nothing. Removing it would take away the half"
+echo "that grants access and leave the half that denies it."
 
 echo "Removed. The action button belongs to Alexa again."
