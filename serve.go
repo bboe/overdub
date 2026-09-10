@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -278,6 +279,17 @@ func serveAPI(name string, psk []byte, i *button.Interceptor) {
 				}
 			})
 	}
+	server.UseMicMute(func() error {
+		err := i.Press(muteKey)
+		if errors.Is(err, button.ErrKeyStuck) {
+			log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
+			withdraw()
+			i.Close()
+			os.Exit(1)
+		}
+		return err
+	})
+
 	// Found rather than handed over: the read loop has been running since before
 	// there was an address to build this server with.
 	api.Store(server)

@@ -170,7 +170,7 @@ func parseWifiLevel(table, iface string) (float32, bool) {
 }
 
 var (
-	volumeReadTimeout = 1500 * time.Millisecond
+	volumeReadTimeout = 1000 * time.Millisecond
 	volumeWaitDelay   = 500 * time.Millisecond
 
 	// argv rather than a whole command, so a test drives the real one against a

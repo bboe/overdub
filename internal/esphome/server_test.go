@@ -384,6 +384,10 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		playing, _ := watch(0)()
 		return playing != 0, true
 	}
+	s.micMute = func() (bool, bool) {
+		muted, _ := watch(0)()
+		return muted != 0, true
+	}
 
 	// Ticks far enough away that every read below is either the sensor poll's
 	// startup publish or one a subscriber woke.
@@ -652,7 +656,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 			key = uint32(f.num)
 		case 2:
 			switch msgType {
-			case msgBinarySensorState:
+			case msgBinarySensorState, msgSwitchState:
 				if f.num != 0 {
 					value = 1
 				}
@@ -678,7 +682,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 	// is a field Home Assistant skips rather than an error either end sees.
 	want := wireFixed32
 	switch msgType {
-	case msgBinarySensorState:
+	case msgBinarySensorState, msgSwitchState:
 		want = wireVarint
 	case msgSelectState:
 		want = wireBytes
@@ -711,6 +715,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	}
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
+	s.micMute = func() (bool, bool) { return false, true }
 	// A reader of the device like the rest, and stubbed for the same reason:
 	// the container the tests run in has a /proc/net/tcp of its own.
 	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
@@ -719,7 +724,8 @@ func stubSensors(s *Server) map[uint32]float32 {
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0, s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
+		s.keySound: 0, s.keyMicMute: 0,
+		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
 		s.keyADB: 0,
 	}
 }
@@ -731,7 +737,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 // honest. It counts the entities that carry a state, which is the listing less
 // the action button: an event is not replayed to a subscriber, so no snapshot
 // ever carries one.
-const sensorCount = 11
+const sensorCount = 12
 
 // What the two pollers put into the published state, without their tickers.
 // Returns what they changed, for the tests that care.
@@ -766,9 +772,11 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a reading did not arrive: %v", err)
 		}
-		if msgType != msgSensorState && msgType != msgBinarySensorState && msgType != msgSelectState {
-			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d) or switch (%d) state",
-				msgType, msgSensorState, msgBinarySensorState, msgSelectState)
+		if msgType != msgSensorState && msgType != msgBinarySensorState &&
+			msgType != msgSelectState && msgType != msgSwitchState {
+			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d), select (%d) "+
+				"or switch (%d) state",
+				msgType, msgSensorState, msgBinarySensorState, msgSelectState, msgSwitchState)
 		}
 		key, value, missing := sensorReading(t, msgType, payload)
 		expected, known := want[key]
@@ -1893,6 +1901,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 			}{
 				s.keyJackOn:                       {"audio_jack", msgBinarySensorState},
 				s.keySound:                        {"speaker_playing", msgBinarySensorState},
+				s.keyMicMute:                      {"microphone_muted", msgSwitchState},
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
 				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
 				s.keyADB:                          {"network_adb", msgSelectState},
@@ -2530,6 +2539,7 @@ func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 		{"volumes", s.volumes, device.MusicVolumes},
 		{"jack", s.jack, device.JackOccupied},
 		{"sound", s.sound, device.SpeakerPlaying},
+		{"micMute", s.micMute, device.MicMuted},
 		{"cpu", s.cpu, device.CPUTemperature},
 		{"memory", s.memory, device.AvailableMemory},
 	} {
@@ -2539,5 +2549,56 @@ func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 			t.Errorf("%s is wired to %s, not to the reader of that name",
 				tt.name, runtime.FuncForPC(got).Name())
 		}
+	}
+}
+
+func TestAnUnreadableMicIsNotPublishedAtAll(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	s.micMute = func() (bool, bool) { return false, false }
+
+	for _, r := range s.readLive() {
+		if r.key == s.keyMicMute {
+			t.Errorf("a microphone that could not be read was published as %+v", r)
+		}
+	}
+
+	s.micMute = func() (bool, bool) { return true, true }
+	for _, r := range s.readLive() {
+		if r.key != s.keyMicMute {
+			continue
+		}
+		if r.kind != kindSwitch {
+			t.Errorf("the microphone went out as kind %d, want a switch (%d)", r.kind, kindSwitch)
+		}
+		return
+	}
+	t.Error("a microphone that could be read was not published")
+}
+
+func TestTheMicMuteIsPublishedWhenItChanges(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	muted := false
+	s.micMute = func() (bool, bool) { return muted, true }
+
+	pollAll(s)
+	if got := pollAll(s); len(got) != 0 {
+		t.Errorf("a microphone state equal to the published one was sent again: %v", got)
+	}
+
+	muted = true
+	got := pollAll(s)
+	if len(got) != 1 {
+		t.Fatalf("muting published %d readings, want 1", len(got))
+	}
+	if got[0].key != s.keyMicMute || got[0].value != 1 || !got[0].ok {
+		t.Errorf("the mute carried %+v, want the microphone (%d) at 1", got[0], s.keyMicMute)
 	}
 }

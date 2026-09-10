@@ -76,6 +76,12 @@ rather than for one key, so carrying on holds the grab with mute going nowhere,
 and nothing restarts a daemon that has not exited. Exiting releases the grab and
 the supervisor builds a new clone five seconds later.
 
+A key left down is a reset gesture, held. Alexa binds a regular factory reset to
+the action button alone at 20s, and an advanced one to mute and volume down
+together at 8s; docs/hardware.md carries the config and the thresholds. So the
+stake is a Dot that deregisters itself with nobody touching it, and exiting is
+what takes the key away, because the clone goes with the process.
+
 The clone is destroyed before the grab is released, and not the other way round.
 The read loop can still be running when the close comes, so the reverse order
 opens the same window: `event1` ungrabbed and the clone still live, and a key
@@ -274,14 +280,17 @@ Nothing rides the cheap ticks yet, so today the split costs the wakeups it adds
 and nothing else: a select and a look at whether anybody is subscribed, twice a
 second, and only while somebody is.
 
-So the short tick carries the volume, the temperature and the memory, and the
-minute tick carries the uptime and the signal. The uptime is on the minute
+So the short tick carries the volume, the temperature, the memory, the jack and
+whether the microphone is muted, and the minute tick carries the uptime and the
+signal. The uptime is on the minute
 because it changes on every read whatever the cadence, so a short tick would
 publish it twenty-four times as often for nothing; the signal is there because
 it is sixteen times the cost of reading `/proc/meminfo` and twenty-seven times
 `/proc/uptime`, and moves slowly.
-Three readings on the short tick cost about 12ms of a core every two and a half
-seconds, which is half a percent, and almost all of it is the volume's fork.
+Five readings on the short tick cost about 24ms of a core every two and a half
+seconds, which is one percent, and almost all of it is the two forks: the
+volume's 11.7ms and the microphone's 12ms, against a few hundred microseconds
+for the three procfs and sysfs reads together.
 
 The CPU temperature comes from `/sys/class/thermal`, in millidegrees: `41300`
 is 41.3 degrees.
@@ -434,10 +443,10 @@ withdrawal's clock alone, because that clock records the last time sound was
 withdrawal measure against 1970 and fire on the next sample, and moving it
 forward -- which is what the gap guard below does -- held the entity on across
 the failure and then reported it playing again, which reads as the speaker
-resuming. And `PollLive` is serial, so on one tick in five the volume's
-two-second budget can push the next sample out, measured at 2.0016s with that
-read stubbed to spend it, which `soundGap` catches at twice the interval and
-starts both clocks from. That one applies only where there is a reading to hang
+resuming. And `PollLive` is serial, so on one tick in five the forks
+it carries can push the next sample out -- up to 2.3s of budget between the
+volume, the microphone and the sound read itself -- which `soundGap` catches at
+twice the interval and starts both clocks from. That one applies only where there is a reading to hang
 it on, which is the first rule again: a clock is only moved by a sample that saw
 something. Neither changes what is reported, only when it can next change.
 
@@ -612,11 +621,21 @@ The bound is two numbers rather than one, and the deadline alone is not it.
 `exec.CommandContext` kills the child when the deadline passes, but `Output`
 then waits for the pipe to reach EOF, which a killed child does not close if it
 left one of its own behind. `cmd.WaitDelay` bounds that second wait. So the
-whole of one read is 1.5 seconds plus 0.5, and `VolumeReadBudget` is exported as
-the sum: a hundred and thirteen times what the call measures at, and inside the
-two and a half second tick that made it. `main_test.go` holds those two
+whole of one read is 1 second plus 0.5, and `VolumeReadBudget` is exported as
+the sum: a hundred and twenty-eight times what the call measures at, and inside
+the two and a half second tick that made it. `main_test.go` holds those two
 together, and it has to hold the sum, because a test against the deadline alone
 passes while the real worst case runs over.
+
+One read fitting is not the bound either, and that is what the deadline came
+down from 1.5 seconds for. The poll is serial, so a heavy tick spends its forks
+one after another: the volume, the speaker's track, and now the microphone. Each
+was inside the interval on its own while the sum was not -- two of them already
+came to 2.4 seconds against 2.5, and a third would have put the worst case past
+the tick that made it. So `main_test.go` holds the sum of the three rather than
+each apart, and the volume gave up half a second it had no measurement to
+justify: 11.7ms is what the call takes, and the second it now has is generous by
+two orders of magnitude.
 
 The budget and the command beside it are variables rather than constants so a
 test can shrink the wait and put a command there that never answers.
@@ -1174,6 +1193,91 @@ Uninstalling does not undo any of this, and cannot. The position lives in the
 property store and the INPUT chain rather than on disk, and deleting the rule
 would cut the connection the uninstall may be running over. So the script says
 so and leaves it to a reboot.
+
+## Whether the microphone is muted
+
+`internal/device/mic.go`, and a switch rather than a binary sensor: Home
+Assistant reads the microphone and mutes it.
+
+**The state is AudioFlinger's `mMicMute`.** It is what
+`AudioManager.setMicrophoneMute` reaches through `AudioSystem`, so the mute key
+and "Alexa, mute" both land there. No dumpsys prints it -- `dumpsys audio`'s
+`Mute count` is the per-stream *output* mute, zero on this Dot whatever the
+microphone is doing.
+
+So the reading is a binder call, `GET_MIC_MUTE` on `IAudioFlinger`, by number
+because binder offers no name. docs/hardware.md carries the transaction and the
+thresholds behind everything below.
+
+**What counts as a reading:**
+
+- The reply is one int32, read as the bool that crossed binder: `0` or `1`,
+  nothing else.
+- A call that failed is not a reading, and that is a separate check: `Output`
+  hands back what it captured alongside the error, so a child killed at its
+  deadline can return bytes that parse.
+- Either way it is published as nothing at all. A switch has no `missing_state`,
+  so the choice is the select's, and an invented "not muted" says the Dot is
+  listening.
+
+**Setting it presses the key.** `Interceptor.Press` puts a whole key through the
+clone, down and up, as the read loop re-emits one -- so the switch performs the
+button's mute, ring included, and Alexa remains the only writer of her own
+state. Writing `mMicMute` directly would leave her believing the microphone was
+live and her code would overwrite the value.
+
+The two halves differ:
+
+- The down does the work. A lone down mutes; a lone up does nothing.
+- The up is only the release. Losing it leaves Android holding the key, which is
+  a reset gesture running unattended.
+- A failed write cannot say which half landed, since `Emit` writes the key and
+  its SYN under one error and Android acts on the key as it arrives. Both are
+  `button.ErrKeyStuck`, and serve.go exits on it: the clone goes with the
+  process.
+
+**The switch is a toggle underneath**, so the worker reads before it presses:
+
+- The key says "change", not "be muted". A press aimed at a state somebody else
+  already reached puts the microphone back where it was not.
+- A device that could not be read is not pressed. Guessing there unmutes a
+  microphone that was deliberately muted.
+- A press that did not take is not repeated. The line says what the device is,
+  and the poll publishes the truth a tick later.
+- The settle is 250ms, which is slack: the mute lands inside the first read
+  after the press.
+
+**A command is turned away only when the last apply landed where it is aimed.**
+The published state cannot stand in for that -- it trails an apply by the settle
+and a poll turn, and a command disagreeing with it inside that window is
+somebody changing their mind rather than a repeat. A poll reading that disagrees
+with the last apply retires it, so the switch cannot latch on a position the
+device has left.
+
+**The wake goes to the live poll**, which is the one that reads the microphone.
+It rarely shortens anything: `PollLive` drops a wake inside `wakeGap` of its
+last read, and its last read is the sound sample half a second ago, so the state
+follows on the next heavy tick. Measured at 1.65-2.13s from command to state,
+which Home Assistant draws as a toggle that springs back and flips again. The
+gate bounds the poll rather than each group of forks in it; changing that
+touches every wake the poll takes.
+
+**It rides the heavy tick beside the volume**, under the volume's rule:
+somebody mutes the Dot and then looks to see whether it took. 12ms against the
+volume's 11.7ms.
+
+**What it costs is a guarantee.** Unmuting used to need a hand on the Dot. It
+needs the API key now, which is the whole of the access control, and an
+automation that misfires can turn the microphone back on.
+
+With `mute_button_mode` in `intercept` the physical button no longer mutes while
+the switch still does. The mode governs keys arriving from the real node; this
+press does not.
+
+**No `entity_category`**, which is the event entity's rule rather than the
+selects'. They are `config` because they change what the daemon does with a key;
+this is the microphone, and a categorised entity is filed away from the
+controls.
 
 ## Discovery
 

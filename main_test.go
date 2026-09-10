@@ -131,6 +131,11 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 		t.Errorf("the expensive readings run every %v and one may take %v, so a slow read "+
 			"delays the readings behind it", heavy, device.VolumeReadBudget())
 	}
+	stacked := device.VolumeReadBudget() + device.MicReadBudget() + device.SpeakerReadBudget()
+	if stacked >= heavy {
+		t.Errorf("one heavy tick can spend %v on its forks against an interval of %v, so a "+
+			"device that answers slowly pushes the next tick out", stacked, heavy)
+	}
 	// The split only means anything while there are ticks the heavy readings
 	// skip. At one it is the old single cadence wearing a multiplier.
 	if esphome.HeavyEvery < 2 {

@@ -14,6 +14,7 @@ const (
 	kindSensor = iota
 	kindBinary
 	kindSelect
+	kindSwitch
 )
 
 type reading struct {
@@ -141,20 +142,27 @@ func (s *Server) readSound() reading {
 
 // The heavy tick's readings, taken together because they are published
 // together. Measured on the Dot: 118us for the temperature, 111us for the
-// memory, 113us for the jack, and 11.7ms for the volume, which is the one that
-// forks and so is the whole of the tick's cost.
+// memory, 113us for the jack, 11.7ms for the volume and 12ms for the
+// microphone. The last two fork, and main_test.go holds their budgets as a sum
+// against the interval rather than one at a time.
 func (s *Server) readLive() []reading {
 	cpu, cpuOK := s.cpu()
 	memory, memoryOK := s.memory()
 	volumes := s.volumes()
 	occupied, jackOK := s.jack()
-	return []reading{
+	muted, micOK := s.micMute()
+	out := []reading{
 		{key: s.keyCPU, value: cpu, ok: cpuOK},
 		{key: s.keyMemory, value: memory, ok: memoryOK},
 		{key: s.keyVolume, value: volumes.Speaker, ok: volumes.SpeakerOK},
 		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
 		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
+	if micOK {
+		s.micObserved(muted)
+		out = append(out, reading{key: s.keyMicMute, value: boolValue(muted), ok: true, kind: kindSwitch})
+	}
+	return out
 }
 
 func boolValue(b bool) float32 {
@@ -182,6 +190,8 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 			msgType, payload = msgBinarySensorState, binaryState(r.key, r.value != 0, !r.ok)
 		case kindSelect:
 			msgType, payload = msgSelectState, selectState(r.key, r.text)
+		case kindSwitch:
+			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err
@@ -197,6 +207,13 @@ func selectState(key uint32, choice string) []byte {
 	var p pb
 	p.fixed32(1, key)
 	p.str(2, choice)
+	return p.b
+}
+
+func switchState(key uint32, on bool) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(2, on)
 	return p.b
 }
 

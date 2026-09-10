@@ -3,6 +3,7 @@
 package button
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,8 @@ type Interceptor struct {
 	node  *os.File
 	clone *evdev.Uinput
 	once  sync.Once
+
+	emitMu sync.Mutex
 
 	// The keys this end acts on, by keycode. Every other key the node carries
 	// is re-emitted untouched, which is what the clone is for. Written once by
@@ -190,7 +193,33 @@ func (i *Interceptor) Close() {
 // briefly, so it is measured in milliseconds and this is left as it is
 // deliberately rather than by oversight.
 func (i *Interceptor) Run(onDown func(uint16, Mode), onPress func(uint16, Mode, time.Duration)) error {
-	return i.route(i.node, i.clone.Emit, onDown, onPress)
+	return i.route(i.node, i.emit, onDown, onPress)
+}
+
+func (i *Interceptor) emit(code uint16, value int32) error {
+	i.emitMu.Lock()
+	defer i.emitMu.Unlock()
+
+	return i.clone.Emit(code, value)
+}
+
+func (i *Interceptor) Press(code uint16) error {
+	i.emitMu.Lock()
+	defer i.emitMu.Unlock()
+
+	return press(i.clone.Emit, code)
+}
+
+var ErrKeyStuck = errors.New("the key-up did not reach the clone")
+
+func press(emit func(uint16, int32) error, code uint16) error {
+	if err := emit(code, 1); err != nil {
+		return fmt.Errorf("%w: %w", ErrKeyStuck, err)
+	}
+	if err := emit(code, 0); err != nil {
+		return fmt.Errorf("%w: %w", ErrKeyStuck, err)
+	}
+	return nil
 }
 
 func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown func(uint16, Mode), onPress func(uint16, Mode, time.Duration)) error {

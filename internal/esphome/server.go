@@ -85,11 +85,14 @@ const (
 	msgListEntitiesReq   = 11
 	msgListBinarySensor  = 12
 	msgListSensor        = 16
+	msgListSwitch        = 17
 	msgListEntitiesDone  = 19
 	msgSubscribeStates   = 20
 	msgBinarySensorState = 21
 	msgSensorState       = 25
+	msgSwitchState       = 26
 	msgSubscribeLogs     = 28
+	msgSwitchCommand     = 33
 	msgSubscribeHAServ   = 34
 	msgHomeassistantAct  = 35
 	msgSubscribeHAStates = 38
@@ -164,15 +167,16 @@ type Server struct {
 
 	psk []byte
 
-	keyUptime uint32
-	keyWifi   uint32
-	keyVolume uint32
-	keyCPU    uint32
-	keyMemory uint32
-	keyJack   uint32
-	keyJackOn uint32
-	keySound  uint32
-	keyADB    uint32
+	keyUptime  uint32
+	keyWifi    uint32
+	keyVolume  uint32
+	keyCPU     uint32
+	keyMemory  uint32
+	keyJack    uint32
+	keyJackOn  uint32
+	keySound   uint32
+	keyMicMute uint32
+	keyADB     uint32
 
 	// The physical buttons, in the order they are listed. Each is an event
 	// entity, which reports a moment rather than a value and so is never
@@ -193,6 +197,7 @@ type Server struct {
 	// and can never be asked for again, so an operator watching a stale rule
 	// has no way to drive it out from the dropdown.
 	adbSettled bool
+
 	// What the last apply landed on, which is what adbSettled says is still
 	// true. The published state is not that: the worker wakes the poll rather
 	// than publishing, so published trails a successful apply by a whole poll
@@ -201,6 +206,12 @@ type Server struct {
 	// applied all the way through that window and buy a restart of adbd each
 	// time, which is the cost the guard exists to refuse.
 	adbLive device.ADBMode
+
+	micWorking    bool
+	micHasPending bool
+	micPending    bool
+	micSettled    bool
+	micLive       bool
 
 	// PollLive's alone, and unlocked because of it.
 	soundOn  bool
@@ -222,9 +233,11 @@ type Server struct {
 	volumes func() device.MusicVolume
 	jack    func() (bool, bool)
 	sound   func() (bool, bool)
+	micMute func() (bool, bool)
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
 
+	micPress    func() error
 	adbMode     func() (device.ADBMode, bool)
 	adbSet      func(device.ADBMode) error
 	adbSecureOK func() bool
@@ -236,6 +249,7 @@ type Server struct {
 	pingWait      time.Duration
 	wakeGap       time.Duration
 	adbSettle     time.Duration
+	micSettle     time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -261,26 +275,31 @@ type Server struct {
 
 func NewServer(name, model, mac string, psk []byte) *Server {
 	return &Server{
-		name:          name,
-		model:         model,
-		mac:           mac,
-		psk:           psk,
-		keyUptime:     entityKey("uptime"),
-		keyWifi:       entityKey("wifi_signal"),
-		keyVolume:     entityKey("volume"),
-		keyCPU:        entityKey("cpu_temperature"),
-		keyMemory:     entityKey("memory_available"),
-		keyJack:       entityKey("jack_volume"),
-		keyJackOn:     entityKey("audio_jack"),
-		keySound:      entityKey("speaker_playing"),
-		keyADB:        entityKey("network_adb"),
-		buttons:       newButtons(),
-		uptime:        device.UptimeSeconds,
-		wifi:          device.WifiSignal,
-		volumes:       device.MusicVolumes,
-		jack:          device.JackOccupied,
-		sound:         device.SpeakerPlaying,
-		cpu:           device.CPUTemperature,
+		name:       name,
+		model:      model,
+		mac:        mac,
+		psk:        psk,
+		keyUptime:  entityKey("uptime"),
+		keyWifi:    entityKey("wifi_signal"),
+		keyVolume:  entityKey("volume"),
+		keyCPU:     entityKey("cpu_temperature"),
+		keyMemory:  entityKey("memory_available"),
+		keyJack:    entityKey("jack_volume"),
+		keyJackOn:  entityKey("audio_jack"),
+		keySound:   entityKey("speaker_playing"),
+		keyMicMute: entityKey("microphone_muted"),
+		keyADB:     entityKey("network_adb"),
+		buttons:    newButtons(),
+		uptime:     device.UptimeSeconds,
+		wifi:       device.WifiSignal,
+		volumes:    device.MusicVolumes,
+		jack:       device.JackOccupied,
+		sound:      device.SpeakerPlaying,
+		cpu:        device.CPUTemperature,
+		micMute:    device.MicMuted,
+		micPress: func() error {
+			return fmt.Errorf("no button to press: the switch is not wired to one")
+		},
 		adbMode:       device.CurrentADBMode,
 		adbSet:        device.SetADBMode,
 		adbSecureOK:   device.ADBSecureAvailable,
@@ -291,6 +310,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		pingWait:      pingAfter,
 		wakeGap:       minLiveReadGap,
 		adbSettle:     adbSettleFor,
+		micSettle:     micSettleFor,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
@@ -673,6 +693,24 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}
 		return nil
 
+	case msgSwitchCommand:
+		var key uint32
+		var on bool
+		if err := walk("SwitchCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				on = f.num != 0
+			}
+		}); err != nil {
+			return err
+		}
+		if key == s.keyMicMute {
+			s.setMicLocked(conn, on)
+		}
+		return nil
+
 	case msgSubscribeHAServ:
 		conn.services = true
 		return nil
@@ -870,6 +908,106 @@ func (s *Server) adbObserved(mode device.ADBMode) {
 
 	if s.adbSettled && s.adbLive != mode {
 		s.adbSettled = false
+	}
+}
+
+func (s *Server) UseMicMute(press func() error) {
+	s.micPress = press
+}
+
+func micWord(muted bool) string {
+	if muted {
+		return "muted"
+	}
+	return "live"
+}
+
+func (s *Server) setMicLocked(conn *conn, want bool) {
+	if s.micHasPending || s.micWorking {
+		if s.micPending == want {
+			return
+		}
+	} else if s.micSettled && s.micLive == want {
+		return
+	}
+	conn.noted = fmt.Sprintf("esphome api: %s set the microphone to %s",
+		conn.sock.RemoteAddr(), micWord(want))
+	s.micPending, s.micHasPending = want, true
+	if s.micWorking {
+		return
+	}
+	s.micWorking = true
+	go s.micWorker()
+}
+
+func (s *Server) micWorker() {
+	for {
+		s.mu.Lock()
+		if !s.micHasPending {
+			s.micWorking = false
+			s.mu.Unlock()
+			return
+		}
+		want := s.micPending
+		s.micHasPending = false
+		s.mu.Unlock()
+
+		s.setMic(want)
+	}
+}
+
+const micSettleFor = 250 * time.Millisecond
+
+func (s *Server) setMic(want bool) {
+	muted, settled := s.applyMic(want)
+
+	s.mu.Lock()
+	s.micSettled = settled
+	if settled {
+		s.micLive = muted
+	}
+	s.mu.Unlock()
+
+	select {
+	case s.liveWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) applyMic(want bool) (muted, settled bool) {
+	muted, known := s.micMute()
+	if !known {
+		s.peerLogf("microphone: asked for %s, and the device could not be read", micWord(want))
+		return false, false
+	}
+	if muted == want {
+		return muted, true
+	}
+	if err := s.micPress(); err != nil {
+		s.peerLogf("microphone: %v", err)
+		return false, false
+	}
+	time.Sleep(s.micSettle)
+
+	muted, known = s.micMute()
+	switch {
+	case !known:
+		s.peerLogf("microphone: asked for %s, and the device could not be read back", micWord(want))
+		return false, false
+	case muted != want:
+		s.peerLogf("microphone: asked for %s, device is %s", micWord(want), micWord(muted))
+		return muted, false
+	}
+	s.peerLogf("microphone: %s", micWord(muted))
+	return muted, true
+}
+
+func (s *Server) micObserved(muted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.micSettled && s.micLive != muted {
+		s.micSettled = false
 	}
 }
 

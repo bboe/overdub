@@ -238,15 +238,19 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
+| `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
 | `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
 
 Uptime and signal are read once a minute, and again when Home Assistant
-subscribes. Both volumes, the jack, the temperature and the memory are read
-every two and a half seconds, whether the speaker is playing every half second, and
-all of it only while something is subscribed.
+subscribes. Both volumes, the jack, the temperature, the memory and the
+microphone are read every two and a half seconds, whether the speaker is playing
+every half second, and all of it only while something is subscribed.
+
+The microphone switch carries one caution: unmuting needs only the API key, not
+a hand on the Dot, so anything holding that key can turn the microphone back on.
 Everything is sent only when it changes, so the uptime arrives every minute,
 the others when they move, and a quiet short tick costs the reads and no
 traffic at all.

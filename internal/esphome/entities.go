@@ -19,6 +19,8 @@ const (
 
 	speakerIcon = "mdi:speaker"
 
+	micIcon = "mdi:microphone-off"
+
 	// A select renders a dropdown, so unlike a binary sensor its icon is not
 	// what shows the state. That frees it to say which entity this is, which is
 	// the job an icon has among a device's others.
@@ -159,6 +161,17 @@ func (s *Server) listEntities(conn *conn) error {
 		if err := s.send(conn, msgListBinarySensor, entity.b); err != nil {
 			return err
 		}
+	}
+
+	var mic pb
+	mic.str(1, "microphone_muted")
+	mic.fixed32(2, s.keyMicMute)
+	mic.str(3, "Microphone muted")
+	mic.str(5, micIcon)
+	mic.boolean(6, false)
+	mic.boolean(7, false)
+	if err := s.send(conn, msgListSwitch, mic.b); err != nil {
+		return err
 	}
 
 	// The only entities Home Assistant writes to. Config rather than

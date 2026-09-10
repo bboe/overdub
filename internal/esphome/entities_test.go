@@ -77,7 +77,8 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		// these ones, and reading them with this table would compare the wrong
 		// numbers.
 		switch entity[0].num {
-		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent):
+		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent),
+			uint64(msgListSwitch):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
@@ -207,6 +208,9 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		{"BinarySensorStateResponse", msgBinarySensorState, 21},
 		{"SelectStateResponse", msgSelectState, 53},
 		{"SelectCommandRequest", msgSelectCommand, 54},
+		{"ListEntitiesSwitchResponse", msgListSwitch, 17},
+		{"SwitchStateResponse", msgSwitchState, 26},
+		{"SwitchCommandRequest", msgSwitchCommand, 33},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
 		{"ENTITY_CATEGORY_CONFIG", entityCategoryConfig, 1},
 		{"ENTITY_CATEGORY_DIAGNOSTIC", entityCategoryDiagnostic, 2},
@@ -285,5 +289,43 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 	}
 	if found != 1 {
 		t.Errorf("%d audio_jack entities were listed, want 1", found)
+	}
+}
+
+func TestTheMicrophoneIsListedAsASwitch(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+
+	found := 0
+	for _, entity := range listed(t, s) {
+		if entity[0].num != uint64(msgListSwitch) {
+			continue
+		}
+		found++
+		if got := string(entity[1].data); got != "microphone_muted" {
+			t.Errorf("the switch has object_id %q, want microphone_muted", got)
+		}
+		if uint32(entity[2].num) != s.keyMicMute {
+			t.Errorf("microphone_muted has key %d, want %d", entity[2].num, s.keyMicMute)
+		}
+		if entity[2].wire != wireFixed32 {
+			t.Errorf("microphone_muted sent its key as wire type %d, want fixed32 (%d)",
+				entity[2].wire, wireFixed32)
+		}
+		if got := string(entity[3].data); got != "Microphone muted" {
+			t.Errorf("microphone_muted is named %q", got)
+		}
+		if got := string(entity[5].data); got != "mdi:microphone-off" {
+			t.Errorf("microphone_muted has icon %q, want mdi:microphone-off", got)
+		}
+		if entity[6].num != 0 {
+			t.Error("microphone_muted claims an assumed state, and it reads the device")
+		}
+		if _, categorised := entity[8]; categorised {
+			t.Errorf("microphone_muted carries entity_category %d, and it is a control "+
+				"rather than a setting", entity[8].num)
+		}
+	}
+	if found != 1 {
+		t.Errorf("%d switch entities were listed, want 1", found)
 	}
 }

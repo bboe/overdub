@@ -644,3 +644,54 @@ func (f *flipsBeforeTheRelease) Read(p []byte) (int, error) {
 	}
 	return f.r.Read(p)
 }
+
+func TestAPressIsBothHalvesOfAKey(t *testing.T) {
+	var got []evdev.Event
+	err := press(func(code uint16, value int32) error {
+		got = append(got, evdev.Event{Code: code, Value: value})
+		return nil
+	}, 113)
+	if err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	want := []evdev.Event{{Code: 113, Value: 1}, {Code: 113, Value: 0}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("press emitted %v, want a down then an up: %v", got, want)
+	}
+}
+
+func TestAPressThatCannotStartDoesNotEmitTheRelease(t *testing.T) {
+	calls := 0
+	err := press(func(uint16, int32) error {
+		calls++
+		return errors.New("uinput: write: bad file descriptor")
+	}, 113)
+	if err == nil {
+		t.Fatal("a press whose key-down failed reported success")
+	}
+	if calls != 1 {
+		t.Errorf("the press made %d calls, want to stop after the down that failed", calls)
+	}
+}
+
+func TestAReleaseThatFailedIsAStuckKey(t *testing.T) {
+	calls := 0
+	err := press(func(uint16, int32) error {
+		calls++
+		if calls == 2 {
+			return errors.New("uinput: write: bad file descriptor")
+		}
+		return nil
+	}, 113)
+	if !errors.Is(err, ErrKeyStuck) {
+		t.Errorf("a press whose release failed gave %v, want an ErrKeyStuck the caller can act on", err)
+	}
+
+	err = press(func(uint16, int32) error {
+		return errors.New("uinput: write: bad file descriptor")
+	}, 113)
+	if !errors.Is(err, ErrKeyStuck) {
+		t.Errorf("a press whose key-down failed gave %v, want an ErrKeyStuck: the SYN may "+
+			"have been the half that failed, and Android acts on the key before it", err)
+	}
+}

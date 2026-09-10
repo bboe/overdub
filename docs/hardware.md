@@ -65,6 +65,71 @@ calling `setStreamMute` would produce it; nothing on this device does.
 A volume key pressed while Alexa-muted releases the mute and restores a level,
 so a probe that presses one is not a read-only observation of a muted Dot.
 
+**What a held key is worth.** Alexa's key handling is in
+`/system/priv-app/SpeechInteractionManager/SpeechInteractionManager.apk`, and two
+of its assets say what a hold does.
+
+`assets/keyConfig/key_config.json`:
+
+```json
+keys:    uber=110, mute=91, volumeUp=24, volumeDown=25
+keySets: "uber" = [uber],  "factoryReset" = [mute, volumeDown]
+```
+
+`assets/factoryResetConfig/factory_reset_key_press_value.json` binds resets to
+those sets by `KeyState` ordinal, where the enum runs `UNKNOWN, PRE_DOWN, DOWN,
+UP, SHORT, LONG, VERY_LONG, SUPER_LONG, EXTREME_LONG, REPEAT`:
+
+| entry | key set | state | gesture |
+|---|---|---|---|
+| `reset` | `uber` | 8 | action button alone, `STATE_EXTREME_LONG` |
+| `advancedReset` | `factoryReset` | 7 | **mute and volume down together**, `STATE_SUPER_LONG` |
+
+Thresholds, from the `timeInMs` each `KeyListener` line carries -- read them
+from there rather than from wall-clock around the test:
+
+| state | after the key-down |
+|---|---|
+| `STATE_VERY_LONG` | 5.0s |
+| `STATE_SUPER_LONG` | 8.0s |
+| `STATE_EXTREME_LONG` | 20.0s |
+
+- A stranded action button wipes the Dot 20s later.
+- A stranded mute is half the advanced-reset combo from 8s, and this daemon does
+  not grab `event2`, so the volume half comes from the user's own hand.
+- Mute alone is inert here and safe to hold: `MuteButtonHandler.onButtonPress`
+  has no reset path, and its one long-hold branch is behind
+  `hasSystemFeature("com.amazon.edge.enable_toggle_offline")`, which this Dot
+  does not have.
+
+A key left down lasts as long as the daemon. `dumpsys input` reports `KeyDowns`
+per device; killing the daemon takes the input device away, and the clone the
+supervisor builds arrives holding nothing. `sendevent ... 1 113 0` clears it
+without waiting. `pkill -f` does not work on this toolbox and reports nothing
+when it fails, so take the pid from `ps` and check it changed.
+
+**Whether the microphone is muted.** The state is AudioFlinger's `mMicMute` and
+no dumpsys prints it, so the read is a binder call: `GET_MIC_MUTE` is the
+eighteenth transaction on `IAudioFlinger` and the reply is one int32.
+
+```sh
+adb shell 'su -c "service call media.audio_flinger 18"'   # Parcel(00000000) live, 00000001 muted
+```
+
+- About 12ms a call, measured at 500 calls in 6 seconds.
+- The mute fires on the key-**down**: a lone `1` mutes, a lone `0` does nothing,
+  and a second `1` while the key is held does nothing either.
+- `dumpsys audio`'s `Mute count` is not this: it is the per-stream *output*
+  mute, 0 whatever the microphone is doing.
+
+Injecting the key is a real mute, so it silences the microphone until it is
+pressed again:
+
+```sh
+adb shell 'su -c "sendevent /dev/input/event1 1 113 1; sendevent /dev/input/event1 0 0 0;
+                  sendevent /dev/input/event1 1 113 0; sendevent /dev/input/event1 0 0 0"'
+```
+
 **What the device says about itself:**
 
 ```sh
