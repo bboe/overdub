@@ -12,48 +12,21 @@ const (
 
 	sensorAccuracyDecimals = 0
 
-	// Home Assistant draws a sensor with no device_class as mdi:eye, and there
-	// is no class for a volume percentage. Both volumes carry the same icon
-	// because their names already say which is which.
 	volumeIcon = "mdi:volume-high"
 
 	speakerIcon = "mdi:speaker"
 
 	micIcon = "mdi:microphone-off"
 
-	// A select renders a dropdown, so unlike a binary sensor its icon is not
-	// what shows the state. That frees it to say which entity this is, which is
-	// the job an icon has among a device's others.
 	buttonModeIcon = "mdi:gesture-tap-button"
 
-	// A name Home Assistant cannot resolve is not an error anywhere: the field
-	// is sent, the frontend finds nothing, and the entity is drawn with no icon
-	// at all. mdi:android-debug-bridge was the obvious name and does not exist
-	// -- Material Design Icons dropped its Android brand icons -- so this one
-	// was checked against the library rather than guessed. Nothing here can
-	// test it: the set of real names lives in the frontend.
 	adbIcon = "mdi:console-network"
 )
 
-// What the action button can be told to do, and the whole of what a
-// SelectCommandRequest may name. First is what a Dot ships in: the daemon
-// exists to take the button, so a device nobody has configured keeps it.
-// docs/architecture.md says what each one means.
 var buttonModes = []string{"intercept", "monitor", "pass through"}
 
-// What a press can turn out to be. Home Assistant refuses an event whose type
-// the listing did not advertise, so the types it is told and the types FirePress
-// is given have to be the same set. A type of its own is what holds that at the
-// call site: actionEvents is both what the listing sends and the whole of what
-// this package defines, so a caller reaching FirePress with anything else has
-// to write the conversion that says so.
 type EventType string
 
-// Home Assistant's ButtonEventType verbatim. None of the six are mandatory: an
-// integration maps what its hardware produces. press_start is out because the
-// decision that approved the set dropped it as a trigger. multi_press_ongoing is
-// out because it costs a message per press for a signal nothing here uses, and a
-// run's count is not settled until the run closes.
 const (
 	EventPressEnd       EventType = "press_end"
 	EventMultiEnd       EventType = "multi_press_end"
@@ -65,9 +38,6 @@ var actionEvents = []EventType{
 	EventPressEnd, EventMultiEnd, EventLongPressStart, EventLongPressEnd,
 }
 
-// What Home Assistant shows as the device's firmware version. Sent twice, in
-// DeviceInfoResponse and in the mDNS TXT record, and the two have to agree:
-// docs/architecture.md says what the number is for.
 const esphomeVersion = "2026.8.0"
 
 func (s *Server) deviceInfo() []byte {
@@ -83,10 +53,6 @@ func (s *Server) deviceInfo() []byte {
 }
 
 func (s *Server) listEntities(conn *conn) error {
-	// The buttons themselves, and the only entities here that are not readings
-	// or controls: each reports a moment rather than a value, so it has no
-	// state and no category. Home Assistant draws an event entity from its
-	// device_class, so it carries no icon, for the reason the jack does not.
 	for _, b := range s.buttons {
 		var action pb
 		action.str(1, b.objectID)
@@ -143,9 +109,6 @@ func (s *Server) listEntities(conn *conn) error {
 		deviceClass string
 		icon        string
 	}{
-		// plug is Home Assistant's own class for this: on is plugged in, off is
-		// unplugged. The field numbers are ESPHome's ListEntitiesBinarySensor,
-		// which is not the sensor message with a different name.
 		{"audio_jack", s.keyJackOn, "Audio jack", "plug", ""},
 		{"speaker_playing", s.keySound, "Speaker playing", "", speakerIcon},
 	} {
@@ -174,15 +137,6 @@ func (s *Server) listEntities(conn *conn) error {
 		return err
 	}
 
-	// The only entities Home Assistant writes to. Config rather than
-	// diagnostic: they change what the device does rather than reporting what
-	// it is doing. Their field numbers are a select's own -- options is 6,
-	// where 6 on a switch is assumed_state and on a sensor is the unit.
-	//
-	// Each is named for its button with "mode" on the end. Home Assistant sets
-	// has_entity_name and builds the entity id from the device name and this,
-	// so the bare name would put two entities of that name on the device page:
-	// this one and the event entity it belongs to.
 	for _, b := range s.buttons {
 		var mode pb
 		mode.str(1, b.objectID+"_mode")
@@ -199,11 +153,6 @@ func (s *Server) listEntities(conn *conn) error {
 		}
 	}
 
-	// A select of the device rather than of this daemon: the others say what
-	// overdub does with a key, and this one turns a port on. Secure is offered
-	// only when there is a key to authenticate against, because an option that
-	// cannot work is worse than one that is not there -- Home Assistant would
-	// show it, accept it, and land on Off.
 	var adb pb
 	adb.str(1, "network_adb")
 	adb.fixed32(2, s.keyADB)

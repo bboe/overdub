@@ -17,8 +17,6 @@ func listed(t *testing.T, s *Server) []map[int]pbField {
 			done = true
 			continue
 		}
-		// aioesphomeapi stops collecting at ListEntitiesDone, so anything listed
-		// after it is an entity Home Assistant never sees.
 		if done {
 			t.Errorf("an entity of type %d was listed after ListEntitiesDone; "+
 				"Home Assistant stops reading there", f.msgType)
@@ -36,9 +34,6 @@ func listed(t *testing.T, s *Server) []map[int]pbField {
 	return out
 }
 
-// The listed entities that carry a state. An event entity has none, and that is
-// what makes it an event: it reports a moment rather than a value, so no poll
-// publishes it and no snapshot replays it to a client that arrives afterwards.
 func listedWithState(t *testing.T, s *Server) []map[int]pbField {
 	t.Helper()
 	var out []map[int]pbField
@@ -72,10 +67,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, entity := range listed(t, s) {
-		// Binary sensors, the switch and the event are listed under their own
-		// message types and checked by their own tests: their fields are not
-		// these ones, and reading them with this table would compare the wrong
-		// numbers.
 		switch entity[0].num {
 		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent),
 			uint64(msgListSwitch):
@@ -95,9 +86,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		if uint32(entity[2].num) != expect.key {
 			t.Errorf("%s has key %d, want %d", objectID, entity[2].num, expect.key)
 		}
-		// A key sent as a varint decodes to the same number here and to nothing
-		// in Home Assistant, which skips the field and files the entity under
-		// key zero along with every other one.
 		if entity[2].wire != wireFixed32 {
 			t.Errorf("%s sent its key as wire type %d, want fixed32 (%d)",
 				objectID, entity[2].wire, wireFixed32)
@@ -108,10 +96,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		if got := string(entity[6].data); got != expect.unit {
 			t.Errorf("%s has unit %q, want %q", objectID, got, expect.unit)
 		}
-		// A sensor with neither a device_class nor an icon is drawn as mdi:eye,
-		// so the two volumes carry one. The rest take the icon their class
-		// implies, which is why an icon set on them would be a regression
-		// rather than a decoration.
 		if got := string(entity[5].data); got != expect.icon {
 			t.Errorf("%s has icon %q, want %q", objectID, got, expect.icon)
 		}
@@ -147,9 +131,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	}
 }
 
-// The second binary sensor. running rather than sound because sound's own
-// words are "Detected" and "Clear", which on a device with microphones reads as
-// the mic having heard something.
 func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 
@@ -169,8 +150,6 @@ func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
 		if got := string(entity[3].data); got != "Speaker playing" {
 			t.Errorf("speaker_playing is named %q", got)
 		}
-		// Deliberately none: every device_class renames the states, and this
-		// one is meant to read "On" and "Off".
 		if got := string(entity[5].data); got != "" {
 			t.Errorf("speaker_playing has device_class %q, which renames its states away "+
 				"from On and Off", got)
@@ -178,9 +157,6 @@ func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
 		if entity[9].num != entityCategoryDiagnostic {
 			t.Error("speaker_playing is not diagnostic; it would sit among the device's controls")
 		}
-		// Static, unlike the jack's, and only because the pair it replaces is
-		// Home Assistant's generic one rather than anything about audio. The
-		// literal rather than the constant, which would assert nothing.
 		if got := string(entity[8].data); got != "mdi:speaker" {
 			t.Errorf("speaker_playing has icon %q, want mdi:speaker", got)
 		}
@@ -190,10 +166,6 @@ func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
 	}
 }
 
-// Numbers on the wire are ESPHome's, not ours. A test that compares one against
-// the constant it was built from asserts nothing, and every one of these is
-// silent when wrong: the entity is filed under the wrong heading, or Home
-// Assistant never learns it exists at all.
 func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	for _, tt := range []struct {
 		what string
@@ -224,9 +196,6 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	}
 }
 
-// A binary sensor is a different message with different field numbers, not a
-// sensor with a bool in it. Home Assistant reads the fields by number, so one
-// borrowed from ListEntitiesSensor lands in the wrong place silently.
 func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 
@@ -242,15 +211,12 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 		if uint32(entity[2].num) != s.keyJackOn {
 			t.Errorf("audio_jack has key %d, want %d", entity[2].num, s.keyJackOn)
 		}
-		// A key sent as a varint decodes to the same number here and to nothing
-		// in Home Assistant, which files every entity under key zero.
 		if entity[2].wire != wireFixed32 {
 			t.Errorf("audio_jack sent its key as wire type %d, want fixed32 (%d)", entity[2].wire, wireFixed32)
 		}
 		if got := string(entity[3].data); got != "Audio jack" {
 			t.Errorf("audio_jack is named %q, want \"Audio jack\"", got)
 		}
-		// Field 5 on this message, where a sensor's device_class is field 9.
 		if got := string(entity[5].data); got != "plug" {
 			t.Errorf("audio_jack has device_class %q, want plug", got)
 		}
@@ -263,11 +229,6 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 		if entity[9].num != entityCategoryDiagnostic {
 			t.Error("audio_jack is not diagnostic; it would sit among the device's controls")
 		}
-		// The two messages disagree about what these numbers mean, so a field
-		// copied from the sensor listing lands somewhere real and wrong. 6 is
-		// unit_of_measurement on a sensor and is_status_binary_sensor here, so
-		// the wire type separates them; 13 is the sensor's entity_category and
-		// nothing at all here.
 		if entity[6].wire != wireVarint {
 			t.Errorf("audio_jack sent field 6 as wire type %d, want varint (%d): a unit "+
 				"borrowed from the sensor message would arrive here as a string",
@@ -277,11 +238,6 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 			t.Error("audio_jack sets field 13, which is a sensor's entity_category and " +
 				"unassigned on a binary sensor")
 		}
-		// Home Assistant draws a binary sensor's two states with two icons of
-		// the device_class's own -- mdi:power-plug-off unplugged and
-		// mdi:power-plug plugged in. An icon of ours is used for both states
-		// instead, so setting one here trades that pair for a picture that
-		// never changes. Field 8, not the 5 the sensor message keeps it in.
 		if got := string(entity[8].data); got != "" {
 			t.Errorf("audio_jack carries icon %q, which replaces the plugged and unplugged "+
 				"icons with one that never changes", got)

@@ -177,11 +177,6 @@ func TestUserDevMatchesTheKernelStruct(t *testing.T) {
 	}
 }
 
-// Each field lands where the kernel struct says, and each carries what the real
-// node reported rather than a constant. Android reads all four: the bus decides
-// IsExternal, and vendor and product are what a keylayout is looked up by
-// before the name is tried. Biscuit's own values, so a field written to the
-// wrong offset is visible as a number that belongs somewhere else.
 func TestUserDevPlacesTheNameAndTheIDItWasGiven(t *testing.T) {
 	id := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
 	buf := userDev("mtk-kpd", id)
@@ -210,9 +205,6 @@ func TestUserDevPlacesTheNameAndTheIDItWasGiven(t *testing.T) {
 	}
 }
 
-// Each field is read from its own offset, in the kernel's order. Biscuit's own
-// values, so a field read from the wrong one shows up as a number belonging to
-// another field rather than as a plausible one.
 func TestIDFromBytesReadsTheKernelOrder(t *testing.T) {
 	buf := []byte{0x19, 0x00, 0x54, 0x24, 0x00, 0x65, 0x10, 0x00}
 	want := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
@@ -221,10 +213,6 @@ func TestIDFromBytesReadsTheKernelOrder(t *testing.T) {
 	}
 }
 
-// The decode and the encode are the same four fields in the same order, so a
-// change to one and not the other lands here rather than on the device, where
-// it would surface as Android resolving a different keylayout and nothing
-// saying so.
 func TestTheIDSurvivesTheRoundTrip(t *testing.T) {
 	want := InputID{Bus: 0x0019, Vendor: 0x2454, Product: 0x6500, Version: 0x0010}
 	if got := idFromBytes(userDev("mtk-kpd", want)[80:88]); got != want {

@@ -47,9 +47,6 @@ func TestPresentSeparatesAbsentFromBroken(t *testing.T) {
 		wantErr bool
 	}{
 		{"rule is there", func(...string) ([]byte, error) { return nil, nil }, true, false},
-		// iptables exits 1 for "no such rule". Anything else means the check itself
-		// failed, and treating that as "absent" appends a duplicate every time. 2 is
-		// "bad argument", which is what an iptables too old for -C gives.
 		{"rule is absent", func(...string) ([]byte, error) { return nil, exitWith(t, 1) }, false, false},
 		{"check is broken", func(...string) ([]byte, error) { return nil, exitWith(t, 2) }, false, true},
 	} {

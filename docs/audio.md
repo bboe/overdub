@@ -54,6 +54,22 @@ stock here, so a native binary -- or cgo inside the daemon -- can create a track
 like any app. Measured, ours plays cleanly while device 23 stays `RUNNING`
 throughout and Alexa's stream is undisturbed.
 
+There can be one player. The OpenSL ES engine, the player and the buffer queue
+are C globals, so a second `Chime` would overwrite the first's handles, and
+closing either would then destroy the other's player and free PCM its queue
+still points into. `NewChime` refuses the second rather than documenting the
+rule, and `Close` is safe to call twice, because the caller's signal handler and
+its defer can both reach it.
+
+`audio_init` unwinds what it built; `Play` does not, so a failed enqueue costs
+one chime rather than every chime after it. The whole clip is queued at once
+rather than refilled by a callback, so it has to fit the queue, and that is
+checked before the player is built rather than truncated at the enqueue -- a
+chime that outgrew the queue would otherwise play its first half for ever.
+`SLAndroidConfigurationItf` is asked for and not required: it only sets the
+stream type, so a ROM without it still chimes rather than leaving the daemon
+permanently silent.
+
 `docs/architecture.md` says what the daemon does with that, and why the build
 target is `GOOS=android`.
 

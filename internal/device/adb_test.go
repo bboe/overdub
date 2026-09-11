@@ -134,11 +134,6 @@ func swapADBKeyPaths(src, dir, file string) func() {
 	return func() { ADBKeySource, adbKeyDir, adbKeyFile = oldSrc, oldDir, oldFile }
 }
 
-// netd rebuilds the INPUT chain and drops what it finds, so the rule has to be
-// put back -- but only for a port something is answering on. The question is
-// whether adbd is listening rather than what CurrentADBMode reports: that
-// answer folds the rule into itself and says Off once the rule is gone, so a
-// re-assert gated on it would stop at the moment it is needed.
 func TestHoldADBOpenAsksWhetherADBDIsListening(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
@@ -161,9 +156,6 @@ func TestHoldADBOpenAsksWhetherADBDIsListening(t *testing.T) {
 			if err := HoldADBOpen(); err != nil {
 				t.Fatalf("HoldADBOpen: %v", err)
 			}
-			// AllowTCP checks and returns when the rule is there, so one call
-			// is the whole of it: what this counts is whether iptables was
-			// reached at all.
 			if calls != tt.wantCalls {
 				t.Errorf("iptables was run %d times, want %d", calls, tt.wantCalls)
 			}
@@ -177,9 +169,6 @@ func swapADBListens(listening bool) func() {
 	return func() { adbListens = was }
 }
 
-// adbd's network transport binds the wildcard. Something else answering on
-// loopback is not it, and taking it for adbd opens the firewall to the subnet
-// for a port nothing off the device can reach.
 func TestHasListenerIgnoresALoopbackOnlyPort(t *testing.T) {
 	loopback := `   0: 0100007F:15B3 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1 0
 `
@@ -193,15 +182,12 @@ func TestHasListenerIgnoresALoopbackOnlyPort(t *testing.T) {
 	}
 }
 
-// The loop ends on iptables reporting that it matched nothing. One that answered
-// 0 for a delete that removed nothing would spin holding chainMu, which stops
-// tcp/6053 being re-asserted and takes the API away at netd's next rebuild.
 func TestDenyTCPGivesUpRatherThanSpinning(t *testing.T) {
 	was := iptablesRun
 	calls := 0
 	iptablesRun = func(args ...string) ([]byte, error) {
 		calls++
-		return nil, nil // a -D that reports success and removes nothing
+		return nil, nil
 	}
 	defer func() { iptablesRun = was }()
 
@@ -217,9 +203,6 @@ func TestDenyTCPGivesUpRatherThanSpinning(t *testing.T) {
 	}
 }
 
-// A getprop that failed says nothing about ro.adb.secure, and the mode built on
-// it is no reading either. Collapsing the two would publish Insecure for a Dot
-// that is in Secure, which is a security posture nobody measured.
 func TestAFailedSecureReadIsNoReading(t *testing.T) {
 	defer func(r func(string) (string, error), l func() bool, i func(...string) ([]byte, error)) {
 		readProp, adbListens, iptablesRun = r, l, i
@@ -233,18 +216,12 @@ func TestAFailedSecureReadIsNoReading(t *testing.T) {
 		t.Errorf("CurrentADBMode() = %v, true; want a reading nobody took", mode)
 	}
 
-	// The control: the same device with a getprop that answers is Secure.
 	readProp = func(string) (string, error) { return "1", nil }
 	if mode, known := CurrentADBMode(); !known || mode != ADBSecure {
 		t.Errorf("CurrentADBMode() = %v, %v; want Secure, true", mode, known)
 	}
 }
 
-// The close sets the properties before it touches the chain. A rule taken out
-// in front of a property that did not take leaves adbd listening with nothing
-// in the chain to say so, and the poll re-asserts on whether adbd is listening
-// -- so it puts the rule back and the Dot the operator asked to close is
-// serving the subnet again within the minute.
 func TestACloseThatFailedLeavesTheRuleAlone(t *testing.T) {
 	defer func(s func(string, string) error, i func(...string) ([]byte, error)) {
 		setProp, iptablesRun = s, i
@@ -274,10 +251,6 @@ func TestACloseThatFailedLeavesTheRuleAlone(t *testing.T) {
 	}
 }
 
-// DenyADB is the close the worker runs after its settle, and it takes the lock
-// SetADBMode and HoldADBOpen share. Without it a re-assert that read
-// "listening" a moment earlier can land its AllowTCP afterwards, and the chain
-// keeps an ACCEPT for a port the select truthfully reports as closed.
 func TestDenyADBWaitsForTheModeLock(t *testing.T) {
 	defer func(i func(...string) ([]byte, error)) { iptablesRun = i }(iptablesRun)
 	iptablesRun = func(...string) ([]byte, error) { return nil, nil }

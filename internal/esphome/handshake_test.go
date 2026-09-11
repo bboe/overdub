@@ -48,8 +48,6 @@ func dial(t *testing.T, s *Server, psk []byte) (*client, error) {
 		s.serveConn(far)
 		close(done)
 	}()
-	// Joined, not just closed: a serveConn still running into the next test writes
-	// its disconnect line into that test's log buffer.
 	t.Cleanup(func() {
 		near.Close()
 		select {
@@ -62,9 +60,6 @@ func dial(t *testing.T, s *Server, psk []byte) (*client, error) {
 	return handshakeOver(t, near, psk)
 }
 
-// The client half of the handshake over a connection somebody else made, so a
-// test that needs its own socket underneath the server does not have to repeat
-// it.
 func handshakeOver(t *testing.T, near net.Conn, psk []byte) (*client, error) {
 	t.Helper()
 	_ = near.SetDeadline(time.Now().Add(testTimeout))
@@ -153,20 +148,12 @@ func (c *client) recv() (int, []byte, error) {
 	if len(plain) < 4 {
 		return 0, nil, fmt.Errorf("reply of %d bytes has no inner header", len(plain))
 	}
-	// Checked here rather than in a test of its own, so every reply any test
-	// receives pins it. Home Assistant slices the payload by this field, so a
-	// server writing the wrong number there is a device that connects and then
-	// shows nothing, and mirroring the server's own arithmetic would not notice.
 	if said := int(binary.BigEndian.Uint16(plain[2:4])); said != len(plain)-4 {
 		return 0, nil, fmt.Errorf("inner header says %d bytes, payload is %d", said, len(plain)-4)
 	}
 	return int(binary.BigEndian.Uint16(plain[0:2])), plain[4:], nil
 }
 
-// Both of these are one byte from a panic: the frame after them is indexed
-// without being measured again. A peer reaches the first with no key at all, so
-// what it costs is the daemon, and the supervisor restarting it five seconds
-// later with the button ungrabbed each time.
 func TestAnEmptyHandshakeMessageIsRefusedRatherThanIndexed(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.handshakeWait = time.Second
@@ -184,7 +171,6 @@ func TestAnEmptyHandshakeMessageIsRefusedRatherThanIndexed(t *testing.T) {
 	if _, err := readNoiseFrame(r, maxDataFrame); err != nil {
 		t.Fatalf("server hello: %v", err)
 	}
-	// The second empty frame is the one that would be indexed at [0].
 	if err := writeNoiseFrame(w, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +188,6 @@ func TestAShortDecryptedMessageIsRefusedRatherThanSliced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One byte inside the encryption, where four are the smallest legal header.
 	sealed, err := c.out.Encrypt(nil, nil, []byte{0x00})
 	if err != nil {
 		t.Fatal(err)
@@ -218,10 +203,6 @@ func TestAShortDecryptedMessageIsRefusedRatherThanSliced(t *testing.T) {
 	}
 }
 
-// The read deadline does not reach this: the server is blocked writing, not
-// reading. Without a write deadline a peer that sends its hello and then never
-// reads holds one of the eight slots for the life of the daemon, which is worse
-// than the whole idle budget a replay would have bought.
 func TestAPeerThatNeverReadsDoesNotHoldItsSlot(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.handshakeWait = 300 * time.Millisecond
@@ -233,8 +214,6 @@ func TestAPeerThatNeverReadsDoesNotHoldItsSlot(t *testing.T) {
 	}()
 	defer near.Close()
 
-	// net.Pipe is unbuffered, so writing the client hello and then never reading
-	// parks the server inside its reply.
 	go func() {
 		w := bufio.NewWriter(near)
 		_ = writeNoiseFrame(w, nil)
@@ -313,11 +292,6 @@ func TestAServerWithNoKeyRefusesEveryone(t *testing.T) {
 }
 
 func TestAServerWithAShortKeyRefusesEveryone(t *testing.T) {
-	// The client dials with a valid key, so the refusal is the server's own and
-	// not the client refusing to start. What refuses is flynn/noise rather than
-	// noiseAccept's length check: it rejects every key length but 32, and this
-	// test passes with that check deleted. Zero is the length it accepts in
-	// silence, and TestAServerWithNoKeyRefusesEveryone is what pins that.
 	short := make([]byte, noisePSKLen-1)
 	c, err := dial(t, testServer(t, short), testPSK(t))
 	if err == nil && c != nil && c.out != nil {
@@ -335,9 +309,6 @@ func TestARequestSentInsteadOfAHandshakeIsRefused(t *testing.T) {
 		s.serveConn(far)
 		close(served)
 	}()
-	// Joined for the reason dial joins: a serveConn still running into the next
-	// test writes its parting lines into that test's captured log, and the log
-	// budgets there are exactly what that corrupts.
 	defer func() {
 		near.Close()
 		select {
@@ -351,25 +322,17 @@ func TestARequestSentInsteadOfAHandshakeIsRefused(t *testing.T) {
 	w := bufio.NewWriter(near)
 	r := bufio.NewReader(near)
 
-	// Past the hello, so what follows is read as a handshake message rather than
-	// refused for being a non-empty first frame. Sent straight away, the request
-	// below only ever exercises that emptiness check.
 	_ = writeNoiseFrame(w, nil)
 	_ = w.Flush()
 	if _, err := readNoiseFrame(r, maxDataFrame); err != nil {
 		t.Fatalf("server hello: %v", err)
 	}
 
-	// A well-formed request, framed as the encrypted transport frames one, but
-	// sent by a peer that never did the handshake. It has to be refused where a
-	// handshake message was expected, not handled.
 	inner := make([]byte, 4)
 	binary.BigEndian.PutUint16(inner[0:2], uint16(msgListEntitiesReq))
 	_ = writeNoiseFrame(w, inner)
 	_ = w.Flush()
 
-	// The entity list is the whole of what this server discloses, so nothing
-	// coming back is the property under test.
 	if payload, err := readNoiseFrame(r, maxDataFrame); err == nil {
 		if !bytes.Contains(payload, []byte(noiseMACFailure)) {
 			t.Fatalf("an unauthenticated frame was answered with %d bytes", len(payload))
@@ -377,9 +340,6 @@ func TestARequestSentInsteadOfAHandshakeIsRefused(t *testing.T) {
 	}
 }
 
-// The preamble is a wire-conformance check with the key on the other side of
-// it: the message behind a wrong one still decrypts, so nothing but this
-// refuses it, and a client ESPHome would reject would be accepted here.
 func TestAHandshakeWithAWrongPreambleIsRefused(t *testing.T) {
 	psk := testPSK(t)
 	hs, err := noise.NewHandshakeState(noise.Config{
@@ -411,7 +371,6 @@ func TestAHandshakeWithAWrongPreambleIsRefused(t *testing.T) {
 		t.Fatalf("server hello: %v", err)
 	}
 
-	// The right message behind the wrong first byte.
 	_ = writeNoiseFrame(w, append([]byte{0x01}, msg1...))
 	_ = w.Flush()
 	if _, err := readNoiseFrame(r, maxDataFrame); err == nil {
@@ -419,9 +378,6 @@ func TestAHandshakeWithAWrongPreambleIsRefused(t *testing.T) {
 	}
 }
 
-// Two seconds each, and only when a writer goroutine was actually started. A
-// connection refused before then has nothing to drain, and waiting for a
-// channel that will never close costs that wait on every refusal.
 func TestARefusedConnectionDoesNotWaitForAWriterItNeverStarted(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.handshakeWait = 200 * time.Millisecond
@@ -433,7 +389,6 @@ func TestARefusedConnectionDoesNotWaitForAWriterItNeverStarted(t *testing.T) {
 	}()
 	defer near.Close()
 
-	// Refused at the handshake: a non-empty first frame, answered by nothing.
 	w := bufio.NewWriter(near)
 	_ = writeNoiseFrame(w, []byte{0x42})
 	_ = w.Flush()
@@ -456,9 +411,6 @@ func TestPlaintextClientIsAnsweredAndRefused(t *testing.T) {
 		testServer(t, psk).serveConn(far)
 		close(served)
 	}()
-	// Joined for the reason dial joins: a serveConn still running into the next
-	// test writes its parting lines into that test's captured log, and the log
-	// budgets there are exactly what that corrupts.
 	defer func() {
 		near.Close()
 		select {
@@ -488,20 +440,12 @@ func TestTheWireConstantsAreWhatESPHomeExpects(t *testing.T) {
 	if noiseCipherName != "Noise_NNpsk0_25519_ChaChaPoly_SHA256" {
 		t.Errorf("noiseCipherName = %q", noiseCipherName)
 	}
-	// Built the way flynn/noise builds it, from the suite and pattern this
-	// daemon actually hands it, so swapping the hash or the pattern fails here
-	// rather than on the device with a MAC error that names nothing.
 	built := "Noise_" + noise.HandshakeNN.Name + "psk0_" + string(noiseSuite.Name())
 	if built != noiseCipherName {
 		t.Errorf("the configured suite gives %q, want %q", built, noiseCipherName)
 	}
 }
 
-// Finishing the handshake proves nothing on its own. Message 1 is sealed under
-// the key, but nothing fresh from the responder goes into it, so a passive
-// listener can replay it verbatim and Noise will not refuse it. What a replayer
-// cannot do is send a frame that decrypts, so that is what has to buy the
-// idle deadline. Eight replays would otherwise hold every slot.
 func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	psk := make([]byte, noisePSKLen)
 	if _, err := rand.Read(psk); err != nil {
@@ -524,7 +468,6 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A replayer with no key at all, sending those exact bytes.
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", psk)
 	s.handshakeWait = 600 * time.Millisecond
 	near, far := net.Pipe()
@@ -533,9 +476,6 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		s.serveConn(far)
 		close(served)
 	}()
-	// Joined for the reason dial joins: a serveConn still running into the next
-	// test writes its parting lines into that test's captured log, and the log
-	// budgets there are exactly what that corrupts.
 	defer func() {
 		near.Close()
 		select {
@@ -555,20 +495,13 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		t.Fatalf("server hello: %v", err)
 	}
 
-	// The stall is what separates one pre-authentication budget from two. Sent
-	// straight away, a replay is dropped at the handshake wait whichever the
-	// server keeps; sent most of the way through that wait, a second budget
-	// started after the handshake shows up as a hold of nearly twice it.
 	time.Sleep(4 * s.handshakeWait / 5)
 	_ = writeNoiseFrame(w, msg1)
 	_ = w.Flush()
-	// The replay is accepted at the handshake, and that is not the property under
-	// test: NNpsk0 cannot refuse it, and real ESPHome does not either.
 	if _, err := readNoiseFrame(r, maxDataFrame); err != nil {
 		t.Fatalf("the replay was refused at the handshake: %v", err)
 	}
 
-	// Now go quiet, and measure from when the slot opened rather than from here.
 	done := make(chan error, 1)
 	go func() { _, err := near.Read(make([]byte, 1)); done <- err }()
 	select {
@@ -583,12 +516,6 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	}
 }
 
-// Both handshake reads happen before a peer has proved anything, so what it can
-// make the daemon reserve at either is ESPHome's handshake bound and not the
-// 64 KiB the length field is able to name. The refusal has to be read from the
-// reason rather than from the connection dropping: an oversize frame fails the
-// checks that follow it too, and those would refuse it with no bound in place
-// at all, after allocating every byte it claimed.
 func TestAnOversizeHandshakeFrameIsRefusedForItsSize(t *testing.T) {
 	for _, afterHello := range []bool{false, true} {
 		name := "client hello"
@@ -647,14 +574,9 @@ func TestAnOversizeHandshakeFrameIsRefusedForItsSize(t *testing.T) {
 	}
 }
 
-// deadSocket completes a handshake and then refuses every write, reading on
-// regardless. That is a peer whose socket is still up and whose receive window
-// has shut: the write fails, and only the close in the write loop ends the
-// connection. Without that close the read loop waits out the whole idle
-// deadline still holding a slot.
 type deadSocket struct {
 	net.Conn
-	fail   chan struct{} // closed when writes should start failing
+	fail   chan struct{}
 	once   sync.Once
 	closed chan struct{}
 }
@@ -691,7 +613,6 @@ func TestAFailedWriteClosesTheSocketRatherThanWaitingOutTheIdleDeadline(t *testi
 	}
 	close(dead.fail)
 
-	// A request whose reply the write loop cannot deliver.
 	if err := c.send(msgListEntitiesReq, nil); err != nil {
 		t.Fatal(err)
 	}

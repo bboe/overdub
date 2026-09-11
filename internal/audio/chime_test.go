@@ -25,8 +25,6 @@ func TestChimeIsTheLengthItClaims(t *testing.T) {
 	}
 }
 
-// A waveform that starts or ends away from zero is a click on the speaker,
-// which is what the attack ramp and the decay envelope are for.
 func TestChimeStartsAndEndsSilent(t *testing.T) {
 	s := samples(t)
 	const quiet = 300 // of 32767, about -40dB
@@ -38,8 +36,6 @@ func TestChimeStartsAndEndsSilent(t *testing.T) {
 	}
 }
 
-// Loud enough to hear over a room, and short of the ceiling the clamp imposes:
-// a chime that rails is one the gain is wrong for rather than one that is loud.
 func TestChimeIsAudibleWithoutRailing(t *testing.T) {
 	s := samples(t)
 	var peak, railed int

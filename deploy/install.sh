@@ -15,17 +15,9 @@ cd "$(dirname "$0")/.."
 boot_script=""
 keyfile=""
 staged=0
-# Set while the key is on the device and not yet shown. An interrupt in that
-# window would otherwise leave a live key nobody has seen: the local copy goes
-# with the trap, and the next install finds the device's and keeps it.
 key_landed=0
-# The adb key's staging directory, and whether an unverified copy of that key is
-# sitting where the daemon looks for it. Both are the same shape as the two
-# above: a window an interrupt can land in, which nothing downstream reports.
 adb_staged=0
 adb_key_landed=0
-# The device half matters as much as the host half: an interrupt between the
-# push and the move leaves a second live copy of the key on the device.
 cleanup() {
   rm -f "$boot_script" "$keyfile"
   if [ "$key_landed" = 1 ]; then
@@ -41,7 +33,6 @@ cleanup() {
   fi
   if [ "$staged" = 1 ]; then
     adb shell 'su -c "rm -rf /data/local/tmp/overdub-install"' >/dev/null 2>&1 || true
-    # Said rather than assumed: a staged copy left behind is the key at 0666.
     if [ -z "$(adb shell 'su -c "[ -e /data/local/tmp/overdub-install ] || echo gone"' 2>/dev/null |
          tr -d "\r" | grep -x gone || true)" ]; then
       echo "WARNING: could not confirm the staged key is gone from" >&2
@@ -87,10 +78,7 @@ if ! adb shell 'su -c "id"' | tr -d '\r' | grep -q 'uid=0'; then
   exit 1
 fi
 
-# The key as the device has it, matched by shape rather than taken whole.
 device_key() {
-  # The sentinel separates "the file says this" from "the device did not answer";
-  # the advice on a bad key is to delete it, so the two must not be confused.
   answer=$(adb shell 'su -c "cat /data/local/bin/.overdub-noise-key; echo --read-ok--"' | tr -d "\r")
   printf '%s\n' "$answer" | grep -qx -- '--read-ok--' || return 1
   body=$(printf '%s\n' "$answer" | grep -vx -- '--read-ok--' || true)
@@ -98,30 +86,18 @@ device_key() {
   found=$(printf '%s\n' "$body" |
     sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
     grep -Ex '[A-Za-z0-9+/]{43}=' || true)
-  # Stripped because the daemon trims the file before decoding it, so a key with
-  # a stray space is one it starts with.
   if [ "$(printf '%s\n' "$found" | grep -Ecx '[A-Za-z0-9+/]{43}=')" = 1 ]; then
     printf '%s\n' "$found"
     return 0
   fi
-  # Go's base64 skips newlines, so a key wrapped across lines is one the daemon
-  # starts with; two copies join into 88 characters and are refused, as it
-  # refuses them. Neither look can tell a stray line from su apart from a stray
-  # line in the file, so a key file carrying a comment passes here and the daemon
-  # rejects it, loudly and with a message README quotes.
   printf '%s' "$body" | tr -d "[:space:]" | grep -Ex '[A-Za-z0-9+/]{43}=' || true
 }
 
-# The device's answer to a test, or a failure if it did not give one: silence and
-# "no" must not read alike.
 probe() {
   adb shell "su -c '[ $1 ] && echo yes || echo no'" | tr -d "\r" |
     grep -m1 -x -e yes -e no || return 1
 }
 
-# Repaired rather than only reported, and on both paths: the mode is what keeps
-# the key from every other uid, and one that arrived another way has never had it
-# set.
 check_key_mode() {
   adb shell 'su -c "chmod 600 /data/local/bin/.overdub-noise-key"'
   key_mode=$(adb shell 'su -c "ls -l /data/local/bin/.overdub-noise-key"' |
@@ -133,13 +109,6 @@ check_key_mode() {
   esac
 }
 
-# A key this script wrote and could not verify has to go, not stay: it was never
-# printed, and the next run would find it and keep it, leaving the Dot serving an
-# API under a key that exists nowhere. Only ever called on the generate branch.
-# An adb public key that was pushed and not verified is one the daemon would
-# offer Secure against, so it goes rather than staying for the next run to trust.
-# ADBSecureAvailable only stats the path: nothing downstream looks at what is in
-# it.
 discard_adb_key() {
   adb shell 'su -c "rm -f /data/local/bin/adb_keys"' >/dev/null 2>&1 || true
   if [ -z "$(adb shell 'su -c "[ -f /data/local/bin/adb_keys ] || echo gone"' 2>/dev/null |
@@ -152,9 +121,6 @@ discard_adb_key() {
 
 discard_new_key() {
   adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"' >/dev/null 2>&1 || true
-  # Reported as it really went. This runs because something already failed, and
-  # the usual reason is a device that stopped answering, which is the same reason
-  # the rm cannot land.
   if [ -n "$(adb shell 'su -c "[ -f /data/local/bin/.overdub-noise-key ] || echo gone"' |
        tr -d "\r" | grep -x gone || true)" ]; then
     echo "The unverified key was removed. Run install.sh again to generate one." >&2
@@ -165,13 +131,6 @@ discard_new_key() {
   echo "  adb shell 'su -c \"rm -f /data/local/bin/.overdub-noise-key\"'" >&2
 }
 
-# Before anything is pushed, so a device whose key cannot be settled keeps the
-# binary and boot script it already had, and "Nothing was changed" is true.
-
-# Only when there is none: a device that already has a key keeps it, so
-# reinstalling does not lock Home Assistant out of a Dot it was talking to.
-# This is the only check in either script whose failure is destructive, so it
-# demands one of two definite answers and treats anything else as fatal.
 key_present=$(adb shell 'su -c "if [ -f /data/local/bin/.overdub-noise-key ]; then echo yes; else echo no; fi"' |
   tr -d "\r" | grep -Ex 'yes|no' || true)
 case "$key_present" in
@@ -182,8 +141,6 @@ case "$key_present" in
 esac
 
 if [ "$key_present" = yes ]; then
-  # A present but unreadable key leaves the daemon refusing to start, and the
-  # check above would keep it through any number of reinstalls.
   if ! existing=$(device_key); then
     echo "INSTALL FAILED: could not read the key off the device." >&2
     echo "Nothing was changed. Check that adb and su still work, and try again." >&2
@@ -202,18 +159,11 @@ if [ "$key_present" = yes ]; then
 else
   keyfile=$(mktemp)
   head -c 32 /dev/urandom | base64 > "$keyfile"
-  # Measured before it goes anywhere: head is the left half of a pipe, so a
-  # failed read leaves an empty file and a zero status, and every check after
-  # this one compares that file against itself.
   if ! grep -Exq '[A-Za-z0-9+/]{43}=' "$keyfile"; then
     echo "INSTALL FAILED: could not generate a 32-byte key from /dev/urandom." >&2
     echo "Nothing was changed." >&2
     exit 1
   fi
-  # 0700 and not /data/local/tmp, which any uid can walk into; without su, so
-  # shell still owns it and adb push can write; and mkdir without -p, so an
-  # existing one fails here and this doubles as the lock against a second
-  # install. docs/pitfalls.md has the measurement.
   if ! adb shell 'mkdir /data/local/tmp/overdub-install 2>/dev/null && chmod 700 /data/local/tmp/overdub-install && echo made' |
      tr -d "\r" | grep -qx made; then
     echo "INSTALL FAILED: /data/local/tmp/overdub-install already exists, so either" >&2
@@ -223,8 +173,6 @@ else
     exit 1
   fi
   staged=1
-  # Read back before the key goes in: the mode is the whole point of the
-  # directory, and nothing downstream would notice its absence.
   stage_mode=$(adb shell 'ls -ld /data/local/tmp/overdub-install' |
     tr -d "\r" | grep -E '^d' | head -1 | awk '{print $1}')
   case "$stage_mode" in
@@ -234,8 +182,6 @@ else
        exit 1 ;;
   esac
   adb push "$keyfile" /data/local/tmp/overdub-install/k.txt
-  # Armed before the write, not after: an interrupt arrives during the call, so
-  # a flag set on the next line is one that never runs.
   key_landed=1
   adb shell 'su -c "
     umask 077
@@ -244,8 +190,6 @@ else
     chmod 600 /data/local/bin/.overdub-noise-key
     rm -rf /data/local/tmp/overdub-install
   "'
-  # A staging copy that outlived the rm is the live key at 0666, and the flag
-  # below is what tells the trap to try again, so it is not cleared on faith.
   if [ -z "$(adb shell 'su -c "[ -e /data/local/tmp/overdub-install ] || echo gone"' |
        tr -d "\r" | grep -x gone || true)" ]; then
     echo "INSTALL FAILED: could not confirm the staged key is gone from" >&2
@@ -279,29 +223,11 @@ else
   keyfile=""
 fi
 
-# The public half of the operator's adb key, which is what the Secure position
-# of the Network ADB control authenticates against. Not a secret, but not
-# staged in the shared directory either: adb push lands a file 0666 and
-# /data/local/tmp is o+x, so any uid could substitute a key of its own between
-# the push and the copy. The read-back below would catch that and fail the
-# install, having already put a stranger's key where the daemon looks for it.
-# So it goes through a 0700 directory of ours, the way the API key does.
-#
-# What this cannot do is revoke. adbd authenticates against
-# /data/misc/adb/adb_keys, which only the daemon writes and only on Secure, and
-# ro.adb.secure is not persistent -- so an install with no key stops Secure
-# being offered from here on, and a Dot already in Secure keeps honouring the
-# key it was given until it reboots.
 adbkey="${ADBKEY:-$HOME/.android/adbkey.pub}"
 if [ -f "$adbkey" ] && grep -q 'PRIVATE KEY' "$adbkey" 2>/dev/null; then
   echo "$adbkey looks like a PRIVATE key; ADBKEY wants the .pub" >&2
   exit 2
 fi
-# An empty file is not a key, and it is the one shape that would pass every
-# check below: the read-back greps for the file's own content, and an empty
-# pattern matches the blank line the device echoes. Installed, it would set
-# ro.adb.secure against a key that authenticates nobody, which reaches USB too
-# and locks the operator out of a Dot with no screen to say so.
 if [ -f "$adbkey" ] && ! grep -Eq '^(ssh-|[A-Za-z0-9+/]{32,})' "$adbkey"; then
   echo "$adbkey is empty or does not look like an adb public key" >&2
   exit 2
@@ -316,10 +242,6 @@ if [ -f "$adbkey" ]; then
     exit 1
   fi
   adb_staged=1
-  # Read back before the key goes in, for the reason the API key's is: the mode
-  # is the whole point of the directory, and nothing downstream would notice its
-  # absence -- the verification below catches a substituted key only after it
-  # has been copied to where the daemon looks.
   adb_stage_mode=$(adb shell 'ls -ld /data/local/tmp/overdub-adbkey' |
     tr -d "\r" | grep -E '^d' | head -1 | awk '{print $1}')
   case "$adb_stage_mode" in
@@ -329,8 +251,6 @@ if [ -f "$adbkey" ]; then
        exit 1 ;;
   esac
   adb push "$adbkey" /data/local/tmp/overdub-adbkey/k.pub
-  # Armed before the write for the reason the API key's flag is: an interrupt
-  # arrives during the call, so a flag set on the next line never runs.
   adb_key_landed=1
   adb shell 'su -c "
     cp /data/local/tmp/overdub-adbkey/k.pub /data/local/bin/adb_keys
@@ -338,13 +258,6 @@ if [ -f "$adbkey" ]; then
     rm -rf /data/local/tmp/overdub-adbkey
   "'
   adb_staged=0
-  # The key's own line rather than the whole stream, and a sentinel to end it:
-  # adb merges the device's stderr into its stdout, so a linker warning from su
-  # would fail an equality test on a key that landed perfectly. docs/pitfalls.md
-  # has the rule.
-  # The bare echo is load-bearing: adbkey.pub carries no trailing newline, so
-  # without it the sentinel lands on the end of the key's own line and neither
-  # of the two greps below can match.
   answer=$(adb shell 'su -c "cat /data/local/bin/adb_keys; echo; echo --read-ok--"' | tr -d "\r")
   if ! printf '%s\n' "$answer" | grep -qx -- --read-ok--; then
     echo "INSTALL FAILED: could not read the adb public key back from the device." >&2
@@ -364,8 +277,6 @@ if [ -f "$adbkey" ]; then
   echo "adb key verified on device; Network ADB will offer Secure"
 else
   adb shell 'su -c "rm -f /data/local/bin/adb_keys"'
-  # A decision rather than a value, for the reason above: an empty read and a
-  # dropped cable are the same string.
   if [ "$(probe '-f /data/local/bin/adb_keys')" != "no" ]; then
     echo "INSTALL FAILED: an old adb public key is still on the device," >&2
     echo "  or the device did not answer. Network ADB would offer Secure" >&2
@@ -409,8 +320,6 @@ elif [ "$answer" != yes ]; then
 fi
 echo "binary verified on device ($built_md5)"
 
-# By hash rather than by diffing the stream, so a warning line from su cannot
-# fail this and blame the Magisk layout for it.
 boot_md5=$(local_md5 "$boot_script")
 installed_boot_md5=$(adb shell 'su -c "md5 /sbin/.core/img/.core/service.d/overdub.sh"' |
   tr -d "\r" | grep -Eo '^[0-9a-f]{32}' | head -1)
@@ -457,10 +366,6 @@ else
   echo "Installed, and restarted: pid $old_pid -> $new_pid, running the binary above."
 fi
 
-# Asked of the daemon rather than inferred from the script on disk. The
-# supervisor read its arguments at boot, so a second install with the same new
-# name finds the script already in place and would report nothing, while the
-# daemon still runs under the old one.
 if [ -n "$new_pid" ]; then
   running=$(adb shell "su -c 'cat /proc/$new_pid/cmdline'" 2>/dev/null |
     tr -d "\r" | tr "\0" " ")

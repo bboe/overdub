@@ -44,9 +44,6 @@ adb shell "su -c '
 '"
 sleep 6   # the supervisor recreates the log every 5
 
-# Matched against the paths themselves, and the loop says when it finished so an
-# empty answer cannot pass for a clean device. This is the check standing between
-# the operator and being told the key is gone. docs/pitfalls.md says why.
 answer=$(adb shell "su -c '
   for path in $BOOT $BIN ${BIN}.new $KEY $STAGE $LOG; do
     [ -e \"\$path\" ] && echo \"\$path\"
@@ -76,8 +73,6 @@ done
 still=$(overdub_pid) || { echo "UNINSTALL FAILED: adb went away during the check" >&2; exit 1; }
 if [ -n "$still" ]; then
   echo "STILL RUNNING: overdub is pid $still." >&2
-  # Conditional, because the reassuring version holds only when the removals
-  # worked, and the supervisor respawns for as long as the binary is there.
   if [ -n "$left" ]; then
     echo "  Things above are still on the device, so it will start again, at the" >&2
     echo "  next respawn or the next boot. Fix those and run this script again." >&2
@@ -89,15 +84,12 @@ if [ -n "$still" ]; then
 fi
 [ "$fail" = 1 ] && { echo "UNINSTALL INCOMPLETE" >&2; exit 1; }
 
-# Only now the daemon is gone: it re-asserts this rule every thirty seconds, so
-# a deletion while it lived would be undone before the next line ran.
 adb shell "su -c '
   while iptables -w -C INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT 2>/dev/null; do
     iptables -w -D INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT || break
   done
 '" >/dev/null 2>&1 || true
 
-# Same sentinel: silence would otherwise read as a chain with no rule in it.
 rule_answer=$(adb shell "su -c 'iptables -L INPUT -n | grep 6053; echo checked'" | tr -d '\r')
 rule=$(printf '%s\n' "$rule_answer" | grep -E 'dpt:6053' || true)
 if ! printf '%s\n' "$rule_answer" | grep -qx checked; then
@@ -110,20 +102,12 @@ if [ -n "$rule" ]; then
   echo "  disk, so a reboot clears it." >&2
 fi
 
-# The key went with the rest, and Home Assistant is still holding it. Said here
-# because nothing else reports it: the integration simply stops connecting, and
-# a fresh install generates a key rather than restoring the old one, which is
-# only recoverable from Home Assistant's own config entry.
 echo
 echo "Home Assistant can no longer talk to this device: the API key it was"
 echo "configured with is gone. Installing again generates a NEW key and prints"
 echo "it once. Give that to the ESPHome integration, which asks for it when the"
 echo "handshake fails."
 
-# Not touched, and not by oversight. Network ADB lives in the property store and
-# the INPUT chain rather than on disk, so this script cannot undo it -- and
-# deleting the rule here would cut the connection this script may be running
-# over, which is the whole point of having turned it on.
 echo
 echo "Reboot to finish. Whatever Network ADB was last set to is still in force:"
 echo "it lives in the property store and the firewall chain rather than on disk."

@@ -10,18 +10,13 @@ import (
 	"github.com/bboe/overdub/internal/device"
 )
 
-// A fake adbd: what it was asked for, and what the device turns out to be
-// afterwards, which are two different things and the whole reason setADBMode
-// reads the device back instead of trusting its own call.
 type fakeADB struct {
 	mu     sync.Mutex
 	asked  []device.ADBMode
 	live   device.ADBMode
 	became func(device.ADBMode) device.ADBMode
 	done   chan struct{}
-	// Closed to let a blocked apply finish. adbd takes seconds to restart, and
-	// the window this opens is the one a second command actually lands in.
-	gate chan struct{}
+	gate   chan struct{}
 
 	denies int
 	setErr error
@@ -74,10 +69,6 @@ func (f *fakeADB) askedFor() []device.ADBMode {
 	return append([]device.ADBMode(nil), f.asked...)
 }
 
-// The worker runs off the connection's goroutine, so a test has to wait for it
-// rather than read straight after the command. Waiting on what was asked rather
-// than on what the device now is: Off is the zero value, so a wait for that
-// state is satisfied before anything has happened at all.
 func (f *fakeADB) waitAsked(t *testing.T, n int) []device.ADBMode {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -91,8 +82,6 @@ func (f *fakeADB) waitAsked(t *testing.T, n int) []device.ADBMode {
 	return nil
 }
 
-// The lines come after the call that provoked them, so a test that read the log
-// the moment the device moved would be reading it too early.
 func waitForLog(t *testing.T, out *lockedBuffer, want string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -122,8 +111,6 @@ func TestEachOfferedADBModeReachesTheDevice(t *testing.T) {
 	}
 }
 
-// The listing is what Home Assistant was told it could pick from, so anything
-// else is a peer inventing an option rather than somebody choosing one.
 func TestAnADBModeThatWasNeverOfferedIsRefused(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -142,9 +129,6 @@ func TestAnADBModeThatWasNeverOfferedIsRefused(t *testing.T) {
 	}
 }
 
-// Secure without a key is not a weaker Secure, it is Insecure: adbd comes up
-// listening and authenticates nobody. Refusing it is the same rule as refusing
-// a word that was never listed, since the listing leaves it out for this reason.
 func TestSecureIsRefusedWithoutAKeyToAuthenticateAgainst(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -161,9 +145,6 @@ func TestSecureIsRefusedWithoutAKeyToAuthenticateAgainst(t *testing.T) {
 	}
 }
 
-// The gap between setting the property and adbd coming up is where this can go
-// wrong in the one direction that matters: asked to authenticate and listening
-// without doing so. The port is closed rather than left open and reported.
 func TestSecureThatCameUpInsecureIsClosedInstead(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -189,9 +170,6 @@ func TestSecureThatCameUpInsecureIsClosedInstead(t *testing.T) {
 	waitForLog(t, &out, "closed instead")
 }
 
-// A dropdown dragged through three positions is three commands and one device
-// that takes seconds to answer. Landing on the last is the point; visiting the
-// ones in between is a port opened because somebody's finger passed over it.
 func TestRapidMovesCollapseToTheLastOne(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -199,8 +177,6 @@ func TestRapidMovesCollapseToTheLastOne(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.adbSettle = time.Millisecond
 	f := wireFakeADB(s, true)
-	// Held so the worker cannot start until every command is in, which is the
-	// case this collapses: the lock is what handle holds across each one.
 	s.mu.Lock()
 	for _, choice := range []device.ADBMode{device.ADBInsecure, device.ADBSecure, device.ADBOff} {
 		s.setADBLocked(&conn{sock: fakeAddr{}}, choice.String())
@@ -211,11 +187,6 @@ func TestRapidMovesCollapseToTheLastOne(t *testing.T) {
 	}
 }
 
-// netd rebuilds the INPUT chain and discards what it finds, so a rule added
-// once does not stay. This holds the wiring: the poll is what puts it back, on
-// every turn. Whether there is a port worth holding open is the device's
-// question, and TestHoldADBOpenAsksWhetherADBDIsListening in internal/device
-// holds that half -- a stub here would answer it for the code under test.
 func TestTheSensorPollPutsTheRuleBack(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -231,10 +202,6 @@ func TestTheSensorPollPutsTheRuleBack(t *testing.T) {
 	}
 
 	go s.PollSensors(MinSensorTick)
-	// The poll asserts once before its first wait, and this channel is
-	// buffered, so that first call is already sitting in it. Drained here:
-	// without this the receive below is satisfied by the startup call, and
-	// moving the re-assert out of the loop entirely would leave this green.
 	select {
 	case <-f.done:
 	case <-time.After(5 * time.Second):
@@ -246,10 +213,6 @@ func TestTheSensorPollPutsTheRuleBack(t *testing.T) {
 	s.mu.Unlock()
 	f.waitAsked(t, 1)
 
-	// Woken rather than waited for. The rule is put back on a turn of this
-	// poll, and a test that sat out a real one would spend a minute proving
-	// something a wake proves in a moment. device.SetADBMode opens the port
-	// itself, so what this holds is the re-assert after netd's rebuild.
 	select {
 	case s.sensorWake <- struct{}{}:
 	default:
@@ -261,11 +224,6 @@ func TestTheSensorPollPutsTheRuleBack(t *testing.T) {
 	}
 }
 
-// Changing position restarts adbd, which drops every live adb session. Home
-// Assistant resends a select's own value readily enough, and a peer holding the
-// key can do it on a connection it already has -- which the eight slots do not
-// bound and the poll's wake gap does not either, since neither is on this path.
-// So a command asking for where the device already is stops here.
 func TestARepeatedADBCommandDoesNotRestartAdbd(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -285,11 +243,6 @@ func TestARepeatedADBCommandDoesNotRestartAdbd(t *testing.T) {
 	s.mu.Unlock()
 	f.waitAsked(t, 1)
 
-	// Idle first, so the in-flight half of the guard cannot be what turns the
-	// repeats away: what is under test here is the settled half, the position
-	// the last apply landed on. The publish is what a poll turn would have done
-	// by the time Home Assistant could send a second command at all, and the
-	// test above covers the window before it.
 	waitADBIdle(t, s)
 	s.publish("sensors", s.readTicked())
 
@@ -304,12 +257,6 @@ func TestARepeatedADBCommandDoesNotRestartAdbd(t *testing.T) {
 	}
 }
 
-// The same guard while the worker is mid-restart, which is the window the
-// published state cannot answer for: it still says where the device was, and
-// the worker has already taken the pending mode off the slot. A second command
-// naming that mode has asked for nothing new, and letting it through queues
-// another adbd restart behind the one in flight -- which a peer can keep doing
-// on a connection it already holds.
 func TestAnADBCommandRepeatingTheOneInFlightIsDropped(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -325,8 +272,6 @@ func TestAnADBCommandRepeatingTheOneInFlightIsDropped(t *testing.T) {
 	s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
 	s.mu.Unlock()
 
-	// Wait until the worker is inside the apply: pending has been taken, so
-	// only the in-flight half of the guard can turn the next command away.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		s.mu.Lock()
@@ -376,11 +321,6 @@ func waitADBIdle(t *testing.T, s *Server) {
 	t.Fatal("the adb worker never went idle")
 }
 
-// adbd goes down on its own schedule after ctl.restart, so the sensor poll can
-// find it still listening and put the rule back after the close took it out.
-// Once adbd is gone nothing else would ever remove it: the mode reads Off, so
-// no poll re-asserts it, the guard turns away a repeated Off, and uninstall.sh
-// leaves this port alone on purpose.
 func TestClosingTheportDeletesTheRuleAgainAfterTheSettle(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -407,10 +347,6 @@ func TestClosingTheportDeletesTheRuleAgainAfterTheSettle(t *testing.T) {
 	t.Error("the rule was never deleted again after the port was closed")
 }
 
-// A position that half-took must stay askable. SetADBMode deletes the rule
-// first and reports that failure last, so the properties can succeed while the
-// rule stays behind -- and the device then reads Off, which is what the no-op
-// guard would compare against for ever.
 func TestAPositionThatFailedCanBeAskedForAgain(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -438,8 +374,6 @@ func TestAPositionThatFailedCanBeAskedForAgain(t *testing.T) {
 	}
 }
 
-// "adbd is listening" lags a restart it was asked for, so a re-assert landing
-// inside a transition puts back the rule the worker has just taken out.
 func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -457,7 +391,7 @@ func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	}
 
 	s.mu.Lock()
-	s.adbWorking = true // a worker in flight, without running one
+	s.adbWorking = true
 	s.mu.Unlock()
 	select {
 	case s.sensorWake <- struct{}{}:
@@ -483,9 +417,6 @@ func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	}
 }
 
-// A select carries no missing_state, so a mode that could not be read is not
-// published at all: the choice is between the last value Home Assistant holds
-// and one invented here, and the invented one says the port is shut.
 func TestAModeThatCouldNotBeReadIsNotPublished(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	stubSensors(s)
@@ -509,12 +440,6 @@ func TestAModeThatCouldNotBeReadIsNotPublished(t *testing.T) {
 	}
 }
 
-// The window between a successful apply and the poll turn that publishes it.
-// The worker wakes the poll rather than publishing, so the published state
-// trails by a wake gap, an iptables pair that waits on netd, and the tick's own
-// reads -- tens of seconds on a busy device. A guard reading it lets a peer
-// resend the mode just applied all the way through, buying an adbd restart each
-// time, which drops every live adb session.
 func TestARepeatBeforeTheStateIsPublishedDoesNotRestartAdbd(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -535,9 +460,6 @@ func TestARepeatBeforeTheStateIsPublishedDoesNotRestartAdbd(t *testing.T) {
 	f.waitAsked(t, 1)
 	waitADBIdle(t, s)
 
-	// Nothing is published here, which is the point: this is the state Home
-	// Assistant is in the moment the worker finishes, and the moment a peer
-	// resending its position would land in.
 	for range 3 {
 		s.mu.Lock()
 		s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
@@ -549,10 +471,6 @@ func TestARepeatBeforeTheStateIsPublishedDoesNotRestartAdbd(t *testing.T) {
 	}
 }
 
-// adbd can go down for reasons nothing here asked for, and the guard believes
-// the last apply. Without a reading that can retire that belief the select
-// latches shut: it sits on a position the device is not in and turns away the
-// one command that would bring it back.
 func TestAModeTheDeviceLeftCanBeAskedForAgain(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -573,8 +491,6 @@ func TestAModeTheDeviceLeftCanBeAskedForAgain(t *testing.T) {
 	f.waitAsked(t, 1)
 	waitADBIdle(t, s)
 
-	// adbd dies on its own, so the device is Off with nothing here having asked
-	// for it, and the poll is what finds out.
 	f.mu.Lock()
 	f.live = device.ADBOff
 	f.mu.Unlock()
@@ -588,9 +504,6 @@ func TestAModeTheDeviceLeftCanBeAskedForAgain(t *testing.T) {
 	}
 }
 
-// The line an operator reads after a Secure attempt was reverted. A mode that
-// could not be read is ADBOff and a false beside it, so printing the mode alone
-// reports a closed port on a reading nobody took.
 func TestTheRevertLineDoesNotInventAMode(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -612,8 +525,6 @@ func TestTheRevertLineDoesNotInventAMode(t *testing.T) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		reads++
-		// The first read is the settle that finds Insecure and provokes the
-		// revert; the read after the revert is the one that fails.
 		if reads > 1 {
 			return device.ADBOff, false
 		}

@@ -33,18 +33,8 @@ const (
 
 	addressPoll = 30 * time.Second
 
-	// RFC 6762 section 6: a record must not go out on an interface more often
-	// than this. It is also the only unbounded thing a peer can make this daemon
-	// do, and every other peer-driven path here is capped: a 40-byte query draws
-	// an answer of 328 bytes at the shortest name and 700 at the longest -name
-	// permits, aimed at every host on the segment.
 	multicastEvery = time.Second
 
-	// A unicast reply reaches only the address the querier gave, which is also
-	// why it is worth bounding: a spoofed source makes this daemon a reflector
-	// pointed at somebody else, measured at eight to seventeen times
-	// amplification over the query that triggers it.
-	// Discovery needs a handful a second and never a flood.
 	unicastBurst  = 20
 	unicastWindow = time.Second
 
@@ -76,12 +66,6 @@ func (m *Responder) address() net.IP {
 	return m.ip
 }
 
-// Kept rather than logged where it happens. A reply goes out because something
-// on the network asked, so a line there is one an unauthenticated peer can
-// repeat; docs/pitfalls.md gives the size of that hazard. The next address poll
-// reports it instead, at most once per rebuild.
-// Unicast replies are not throttled: they go to the host that asked, so they
-// are neither the flood the RFC is about nor a way to reach anyone else.
 func (m *Responder) mayMulticast() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -106,10 +90,6 @@ func (m *Responder) mayUnicast() bool {
 	return true
 }
 
-// Only a failure to reach the group is this socket's problem. A unicast reply
-// goes where the querier said, and a querier can name somewhere unroutable --
-// port zero does it -- so counting that as our own failure hands anyone on the
-// subnet a rebuild every poll, each one writing a line to the log.
 func (m *Responder) noteReplyFailure(dst, group *net.UDPAddr, err error) {
 	if dst.IP.Equal(group.IP) && dst.Port == group.Port {
 		m.noteSendFailure(err)
@@ -176,9 +156,6 @@ func (m *Responder) Run() {
 		m.mu.Unlock()
 
 		if err := m.serve(); err != nil {
-			// Said once per run of failures, for the reason the address wait
-			// above is: Run never returns, so nothing truncates this log, and a
-			// line every thirty seconds for the life of the boot buries it.
 			if !failing {
 				log.Printf("mdns: %v; retrying every 30s", err)
 				failing = true
@@ -282,7 +259,6 @@ func (m *Responder) serve() error {
 		if err := m.announce(conn, group); err != nil {
 			select {
 			case <-done:
-				// The socket was closed under it on purpose; not a failure.
 			default:
 				log.Printf("mdns: announce failed: %v", err)
 				m.noteSendFailure(err)
@@ -315,17 +291,12 @@ func (m *Responder) serve() error {
 	}
 }
 
-// Cleared for the new socket: both flags belong to the cycle that set them, and
-// carried over they tear down a replacement that is working, reading as a
-// deliberate rebuild so nothing says why.
 func (m *Responder) beginCycle() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.restart, m.sendFailed = false, nil
 }
 
-// Every reason not to answer, in one place a test can reach: serve() holds a
-// socket, so a decision left inside its loop is one nothing exercises.
 func (m *Responder) replyTo(src, group *net.UDPAddr, packet []byte) (*net.UDPAddr, bool) {
 	if !m.onLink(src.IP) {
 		return nil, false
@@ -334,8 +305,6 @@ func (m *Responder) replyTo(src, group *net.UDPAddr, packet []byte) (*net.UDPAdd
 	if !wanted {
 		return nil, false
 	}
-	// A query already in the socket buffer when the goodbye went out would
-	// otherwise be answered with live TTLs, re-advertising what was withdrawn.
 	m.mu.Lock()
 	withdrawn := m.gone
 	m.mu.Unlock()
@@ -390,10 +359,6 @@ func (m *Responder) watchAddress(conn *net.UDPConn, done <-chan struct{}) {
 			continue
 		}
 
-		// Re-checked after the poll, which is a netlink round trip: serve() can
-		// have returned for its own reason while it ran, and a flag written into
-		// a dead cycle is read by the next one, where it turns a real failure
-		// into a silent deliberate rebuild.
 		select {
 		case <-done:
 			return
@@ -418,8 +383,6 @@ func (m *Responder) wants(packet []byte) (unicast bool, wanted bool) {
 		return false, false
 	}
 
-	// Every question, not just up to the match: the answer section begins after
-	// all of them, and the known-answer check below reads from there.
 	matched := false
 	for {
 		question, err := parser.Question()
@@ -446,10 +409,6 @@ func (m *Responder) wants(packet []byte) (unicast bool, wanted bool) {
 	return unicast, true
 }
 
-// RFC 6762 section 7.1: a query carrying our own PTR in its answer section, at
-// half its TTL or better, is one that must not be answered. python-zeroconf's
-// browser puts it there on every repeat, so without this every refresh from
-// every Home Assistant on the segment draws a full multicast reply.
 func (m *Responder) alreadyKnown(parser *dnsmessage.Parser) bool {
 	for {
 		answer, err := parser.AnswerHeader()
@@ -477,9 +436,6 @@ func (m *Responder) records(ttl uint32) []byte {
 	if hostTTL > ttlHost {
 		hostTTL = ttlHost
 	}
-	// Shared: every ESPHome device on the segment answers this name, so the
-	// cache-flush bit would expire all of theirs on each of our announcements.
-	// The other three are ours alone and carry it.
 	const shared = dnsmessage.ClassINET
 	const unique = dnsmessage.Class(dnsClassIN | dnsCacheFlush)
 
@@ -537,8 +493,6 @@ func (m *Responder) txt() []string {
 	mac := strings.ToLower(strings.ReplaceAll(m.MAC, ":", ""))
 	return []string{
 		"mac=" + mac,
-		// What a real device publishes when it has a key, and the one TXT key
-		// Home Assistant reads that decides whether it probes in plaintext first.
 		"api_encryption=" + noiseCipherName,
 		"version=" + esphomeVersion,
 		"friendly_name=" + m.Instance,
@@ -548,8 +502,6 @@ func (m *Responder) txt() []string {
 	}
 }
 
-// A goodbye is the same records at TTL zero: that is what retires the name.
-// Any other TTL leaves it advertised for that long after the daemon is gone.
 func (m *Responder) goodbyeRecords() []byte { return m.records(0) }
 
 func (m *Responder) Goodbye() {
@@ -561,10 +513,6 @@ func (m *Responder) Goodbye() {
 	conn := m.conn
 	m.mu.Unlock()
 
-	// A socket of its own when serve() has none, which is every second of the
-	// thirty it backs off for after a failure and the five it waits an address
-	// out. Without one a daemon told to stop during either withdraws nothing,
-	// and Home Assistant holds the device for the PTR's full 4500 seconds.
 	if conn == nil {
 		opened, err := m.open()
 		if err != nil {
@@ -575,11 +523,6 @@ func (m *Responder) Goodbye() {
 		conn = opened
 	}
 
-	// Twice a second apart, which is RFC 6762 section 10.1 and also the only
-	// spacing that works: python-zeroconf drops a byte-identical packet inside
-	// a one-second window, so a goodbye sent twice back to back is read once.
-	// The deadline is per write, because this runs on the way out of the process
-	// with the button still grabbed and a write that blocked would hold it.
 	for i := 0; i < 2; i++ {
 		if i > 0 {
 			time.Sleep(goodbyeGap)

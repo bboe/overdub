@@ -28,6 +28,13 @@ Without the stamp the same tree always gives the same bytes, measured across
 repeat builds, a different directory, a checkout with no `.git`, and a dirty
 tree.
 
+The different directory is the one that needs help. `build.sh` makes the empty
+`libpthread` stub archives that Bionic ships no library for, and the `-L` it
+hands cgo has to stay **relative**: an absolute path lands in cgo's action hash,
+so the same commit built from two directories would produce two different
+binaries and break the promise above quietly. The `cd` at the top of the script
+is what makes a relative path resolve.
+
 That last one is the one to say out loud, so `install.sh` does. Reproducibility
 here means the binary cannot tell you what it was built from, and `git checkout`
 carries modified files across a branch change: the checkout reads as a revert,
@@ -63,6 +70,13 @@ and both append it. The `-D` that closes a port removes one copy, so the chain
 keeps an ACCEPT nothing will ever delete for a port the select truthfully
 reports as closed. The chain is not ours alone either, so nothing tidies it up
 later. One mutex over both mutations is the whole fix.
+
+`DenyTCP` deletes until iptables reports that it matched nothing, because one
+`-D` removes one copy and a chain that is not ours alone may hold two. What ends
+that loop is iptables' own refusal, so it is bounded at sixteen passes as well:
+an iptables that answered 0 for a delete that removed nothing would spin there
+holding the chain mutex, which stops `tcp/6053` being re-asserted and takes the
+API away at netd's next rebuild. Sixteen is far past any real duplicate.
 
 `-w` on this iptables takes no seconds argument: it waits for the xtables lock
 for as long as it takes, and netd holds that lock constantly. Ten seconds, so a

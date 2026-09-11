@@ -17,9 +17,7 @@ const (
 
 	synReport = 0x00
 
-	// EV_KEY values. 2 is autorepeat, which the read loop drops only for a
-	// press it is consuming: every other key's repeats are re-emitted, and so
-	// are the consumed key's while it is being passed through.
+	// EV_KEY values; 2 is autorepeat.
 	KeyRelease = 0
 	KeyPress   = 1
 
@@ -50,8 +48,6 @@ const (
 	EventSize = 16 // sec(4) + usec(4) + type(2) + code(2) + value(4)
 )
 
-// syscall.Timeval is 8 bytes only on a 32-bit target: a wrong-arch build
-// is a compile error, not a daemon that misreads every event.
 const _ = uint(8 - unsafe.Sizeof(syscall.Timeval{}))
 
 type Event struct {
@@ -90,9 +86,6 @@ func ioctl(fd uintptr, req uint, arg uintptr) error {
 	return nil
 }
 
-// InputID is struct input_id: what a device tells the kernel it is. Android
-// reads all four, so the clone copies the original's rather than inventing one.
-// docs/architecture.md says what each field decides.
 type InputID struct {
 	Bus     uint16
 	Vendor  uint16
@@ -100,8 +93,6 @@ type InputID struct {
 	Version uint16
 }
 
-// Read from the node for the reason the key bitmap is: it is what the device
-// actually says, rather than what this end believes about one model of Dot.
 func DeviceID(f *os.File) (InputID, error) {
 	buf := make([]byte, idBytes)
 	if err := ioctl(f.Fd(), eviocgid, uintptr(unsafe.Pointer(&buf[0]))); err != nil {
@@ -110,9 +101,6 @@ func DeviceID(f *os.File) (InputID, error) {
 	return idFromBytes(buf), nil
 }
 
-// Split from the ioctl for the reason keysFromBitmap is split from EVIOCGBIT:
-// the decode is the half that can be got wrong and the half a test can reach,
-// since the other needs a real node open.
 func idFromBytes(buf []byte) InputID {
 	return InputID{
 		Bus:     binary.LittleEndian.Uint16(buf[0:]),

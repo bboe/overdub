@@ -41,9 +41,6 @@ func (p *pb) str(field int, s string) {
 	p.b = append(p.b, s...)
 }
 
-// A length-delimited field carrying a message rather than a string. The two are
-// the same wire type, and the difference is only what the bytes are: str is
-// given text and this is given something already encoded.
 func (p *pb) sub(field int, msg []byte) {
 	p.tag(field, wireBytes)
 	p.uvarint(uint64(len(msg)))

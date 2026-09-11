@@ -13,18 +13,12 @@ import (
 
 const iptables = "/system/bin/iptables"
 
-// AllowTCP checks and then appends, which is two calls rather than one, so two
-// ports opened at once can both find their rule missing and both append. The
-// chain is not ours alone either, so a duplicate is not something a later pass
-// tidies up. One port needed no lock; the adb select is the second.
 var chainMu sync.Mutex
 
 var iptablesRun = func(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, iptables, append([]string{"-w"}, args...)...)
-	// Killing the child does not close a descendant's copy of the pipe, and
-	// CombinedOutput waits for EOF, so without this the deadline is not a bound.
 	cmd.WaitDelay = 2 * time.Second
 	return cmd.CombinedOutput()
 }
@@ -63,23 +57,10 @@ func AllowTCP(port int) error {
 	return nil
 }
 
-// DenyTCP removes the rule AllowTCP added. A rule that is not there is not an
-// error: iptables exits 1 for a delete that matched nothing, which is the
-// ordinary case after netd has rebuilt the chain, and the port is closed either
-// way by the INPUT policy.
 func DenyTCP(port int) error {
 	chainMu.Lock()
 	defer chainMu.Unlock()
 
-	// Until it is gone rather than once: the chain is not ours alone, and two
-	// opens racing a rebuild can leave two copies of the rule. One -D removes
-	// one of them, so a single pass reports a closed port that is still
-	// permitted. uninstall.sh loops over the API's rule for the same reason.
-	// Bounded, because the exit that ends this loop is iptables reporting that
-	// it matched nothing. An iptables that answered 0 for a delete that removed
-	// nothing would spin here for ever holding chainMu, which stops tcp/6053
-	// being re-asserted and takes the API away at netd's next rebuild. Sixteen
-	// is far past any real duplicate.
 	r := inputRule(port)
 	for range 16 {
 		_, err := iptablesRun(append([]string{"-D"}, r...)...)

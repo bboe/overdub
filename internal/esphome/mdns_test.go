@@ -74,9 +74,6 @@ func TestTXTCarriesTheMAC(t *testing.T) {
 	}
 }
 
-// The tests build queries as raw bytes on purpose: a packet is what a peer
-// sends, and constructing one with the same library that parses it would hide
-// a disagreement between them.
 func encodeName(name string) []byte {
 	var out []byte
 	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
@@ -172,11 +169,6 @@ func TestWantsRejectsMalformed(t *testing.T) {
 	}
 }
 
-// The shapes the wire format forbids, fed through the only door a peer has.
-// The parser behind it is x/net/dns/dnsmessage rather than something here, so
-// what is worth pinning is no longer how a name is read but that none of these
-// draws a reply or takes the daemon down: a panic here is a restart with the
-// button ungrabbed, and one peer repeating one packet is a reboot loop.
 func TestWantsSurvivesWhatTheWireFormatForbids(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 
@@ -189,11 +181,7 @@ func TestWantsSurvivesWhatTheWireFormatForbids(t *testing.T) {
 	question := append(encodeName(esphomeService), 0, dnsTypePTR, 0, dnsClassIN)
 
 	tests := []struct {
-		name string
-		// A question this daemon cannot read is not one it answers. A question
-		// it can read is answered even when what follows is rubbish, which is
-		// no worse than the plain query it already answers: RFC 6762 asks for
-		// suppression when a known answer is present, not when one is claimed.
+		name     string
 		mayReply bool
 		packet   []byte
 	}{
@@ -280,8 +268,6 @@ func TestStaleRebuildsAfterASendFailedAtTheSameAddress(t *testing.T) {
 	if !strings.Contains(reason, "send failed") {
 		t.Errorf("reason = %q, want it to name the send", reason)
 	}
-	// The error is carried here rather than logged where it happened, so it has
-	// to survive the trip or the diagnosis is lost with the line that had it.
 	if !strings.Contains(reason, "network is unreachable") {
 		t.Errorf("reason = %q, want it to carry the error", reason)
 	}
@@ -314,14 +300,13 @@ func TestStaleStillRebuildsOnAChangedAddress(t *testing.T) {
 	}
 }
 
-// walkRecords yields the type and TTL of every resource record in a response.
 type parsedRecord struct {
 	name   string
 	rrType uint16
 	class  uint16
 	ttl    uint32
-	port   uint16 // SRV only
-	points string // the name in the rdata of a PTR or SRV
+	port   uint16
+	points string
 }
 
 func walkRecords(t *testing.T, packet []byte) []parsedRecord {
@@ -365,10 +350,6 @@ func walkRecords(t *testing.T, packet []byte) []parsedRecord {
 	return out
 }
 
-// Which name owns which record is the whole of DNS-SD, and getting it wrong is
-// invisible to everything that only reads types and TTLs: the browser follows
-// PTR to the instance, SRV from the instance to the host, and A at the host. A
-// record hung off the wrong name leaves Home Assistant resolving forever.
 func TestEveryRecordIsOwnedByTheNameThatShouldOwnIt(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	responder.mu.Lock()
@@ -403,9 +384,6 @@ func TestEveryRecordIsOwnedByTheNameThatShouldOwnIt(t *testing.T) {
 	}
 }
 
-// The names and numbers on the wire are Home Assistant's, not ours, so a test
-// that compares them against the constants they came from asserts nothing. A
-// typo in any of these breaks discovery completely and says nothing about why.
 func TestTheWireConstantsAreTheOnesHomeAssistantUses(t *testing.T) {
 	if esphomeService != "_esphomelib._tcp.local." {
 		t.Errorf("esphomeService = %q; Home Assistant browses for _esphomelib._tcp.local.", esphomeService)
@@ -416,8 +394,6 @@ func TestTheWireConstantsAreTheOnesHomeAssistantUses(t *testing.T) {
 	if mdnsPort != 5353 {
 		t.Errorf("mdnsPort = %d, want 5353", mdnsPort)
 	}
-	// python-zeroconf drops a byte-identical packet seen inside one second, so
-	// a goodbye sent twice any faster than this is read once.
 	if goodbyeGap != time.Second {
 		t.Errorf("goodbyeGap = %v, want 1s; python-zeroconf suppresses duplicates inside that window", goodbyeGap)
 	}
@@ -458,7 +434,6 @@ func TestSRVAndACarryTheShortHostTTL(t *testing.T) {
 	for _, r := range walkRecords(t, responder.records(ttlShared)) {
 		switch r.rrType {
 		case dnsTypeSRV, dnsTypeA:
-			// Both name a host, and RFC 6762 section 10 asks for the short TTL there.
 			if r.ttl != ttlHost {
 				t.Errorf("type %d has TTL %d, want %d", r.rrType, r.ttl, ttlHost)
 			}
@@ -470,11 +445,6 @@ func TestSRVAndACarryTheShortHostTTL(t *testing.T) {
 	}
 }
 
-// A query carrying our own PTR as a known answer, the way python-zeroconf's
-// browser sends it on every repeat.
-// The question and the known answer carry separate owner names, because
-// suppression turns on both: the answer has to be a PTR for the service that
-// was asked about, and not merely a PTR whose target happens to be ours.
 func queryWithKnownAnswer(name, alias string, ttl uint32) []byte {
 	return queryWithKnownAnswerOwnedBy(name, name, alias, ttl)
 }
@@ -500,10 +470,6 @@ func queryWithKnownAnswerOwnedBy(question, owner, alias string, ttl uint32) []by
 	return packet
 }
 
-// A browse that asks for several service types at once puts our question
-// somewhere in the middle. The answer section starts after all of them, so a
-// reader that walked only as far as the match reads the questions it has not
-// reached yet as records, and the suppression stops happening.
 func TestAKnownAnswerSuppressesTheReplyWhereverTheQuestionSits(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	others := []string{"_printer._tcp.local.", "_airplay._tcp.local."}
@@ -538,11 +504,6 @@ func TestAKnownAnswerSuppressesTheReplyWhereverTheQuestionSits(t *testing.T) {
 	}
 }
 
-// Home Assistant browses about ninety service types in one packet, and where
-// _esphomelib sits in that list is not ours to choose: it is alphabetical, and
-// every integration added above it moves ours further down. A label budget that
-// an ordinary browse can exhaust is a Dot that stops being discoverable, with
-// nothing logged to say why.
 func TestARealBrowseIsAnsweredWhereverOurQuestionSits(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	const types = 90
@@ -566,12 +527,6 @@ func TestARealBrowseIsAnsweredWhereverOurQuestionSits(t *testing.T) {
 	}
 }
 
-// The class word and the header are the two things python-zeroconf reads before
-// it reads anything else, and getting either wrong is silent. A cleared QR bit
-// makes the announcement a query, which its listener never hands to the record
-// manager: discovery simply never happens. Cache-flush on the shared PTR makes
-// that rrset unique, and its record manager then expires every *other* ESPHome
-// device on the segment each time this Dot announces.
 func TestTheHeaderAndTheClassesAreWhatZeroconfReads(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	responder.mu.Lock()
@@ -606,9 +561,6 @@ func TestTheHeaderAndTheClassesAreWhatZeroconfReads(t *testing.T) {
 	}
 }
 
-// RFC 6762 section 7.1. Without this every browser refresh on the segment draws
-// a full multicast reply, which is what makes the flood an everyday event
-// rather than an attack.
 func TestAKnownAnswerSuppressesTheReply(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 
@@ -616,26 +568,20 @@ func TestAKnownAnswerSuppressesTheReply(t *testing.T) {
 	if _, wanted := responder.wants(full); wanted {
 		t.Error("answered a query that already carried our PTR at the full TTL")
 	}
-	// Half the TTL is the floor, so just under it must still be answered.
 	stale := queryWithKnownAnswer(esphomeService, responder.serviceName(), ttlShared/2-1)
 	if _, wanted := responder.wants(stale); !wanted {
 		t.Error("suppressed on a known answer that had aged past half its TTL")
 	}
-	// Somebody else's PTR is not ours.
 	other := queryWithKnownAnswer(esphomeService, "elsewhere."+esphomeService, ttlShared)
 	if _, wanted := responder.wants(other); !wanted {
 		t.Error("suppressed on another device's known answer")
 	}
-	// Nor is our own instance name hung off a service we do not answer for.
 	elsewhere := queryWithKnownAnswerOwnedBy(esphomeService, "_printer._tcp.local.", responder.serviceName(), ttlShared)
 	if _, wanted := responder.wants(elsewhere); !wanted {
 		t.Error("suppressed on a known answer owned by a service that is not ours")
 	}
 }
 
-// RFC 6762 section 6, and the only unbounded thing a peer can ask this daemon
-// for: a 40-byte query draws 328 bytes back at the shortest name this allows
-// and 700 at the longest, aimed at the whole segment.
 func TestTheMulticastRateLimitIsOneASecond(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 
@@ -653,8 +599,6 @@ func TestTheMulticastRateLimitIsOneASecond(t *testing.T) {
 	}
 }
 
-// Home Assistant reads this key to decide whether to probe in plaintext first,
-// and a real device with a key publishes it.
 func TestTXTAnnouncesTheEncryption(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	want := "api_encryption=" + noiseCipherName
@@ -666,9 +610,6 @@ func TestTXTAnnouncesTheEncryption(t *testing.T) {
 	t.Errorf("txt() = %q, want it to carry %q", responder.txt(), want)
 }
 
-// The flag belongs to the socket that failed. Carried into the next cycle it
-// tears down a replacement that is working, and the teardown reads as
-// deliberate so nothing says why.
 func TestServeClearsTheFlagsOfThePreviousCycle(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", Iface: "wlan0", Port: 6053}
 	responder.mu.Lock()
@@ -690,10 +631,6 @@ func TestServeClearsTheFlagsOfThePreviousCycle(t *testing.T) {
 	}
 }
 
-// Goodbye is the daemon on its way out, so it has to stop the responder
-// answering as well as withdraw: a query already in the socket buffer would
-// otherwise be answered with a 4500-second TTL and re-advertise what was just
-// retired.
 func TestGoodbyeMarksTheResponderGone(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Iface: "wlan0", Port: 6053}
 
@@ -704,9 +641,6 @@ func TestGoodbyeMarksTheResponderGone(t *testing.T) {
 		t.Fatal("a fresh responder was already gone")
 	}
 
-	// A socket of the test's own. Left without one, Goodbye opens a real
-	// multicast socket and withdraws kitchen._esphomelib._tcp.local. from every
-	// cache on whatever network the machine running the tests is attached to.
 	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("no loopback socket: %v", err)
@@ -726,8 +660,6 @@ func TestGoodbyeMarksTheResponderGone(t *testing.T) {
 	}
 }
 
-// The withdrawal has to be the same record set, or it retires something other
-// than what was advertised. That the TTLs are zero is TestGoodbyeRetiresEveryRecord.
 func TestAGoodbyeIsTheAnnouncementWithTheTTLsChanged(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", MAC: "00:00:5E:00:53:2A", Port: 6053}
 	responder.mu.Lock()
@@ -744,10 +676,6 @@ func TestAGoodbyeIsTheAnnouncementWithTheTTLsChanged(t *testing.T) {
 	}
 }
 
-// The four reasons the read loop declines to answer, which used to live inside
-// serve() where a socket was needed to reach them. Each is deleted by a one-line
-// mutation, and each one deleted is a different way for the responder to answer
-// something it should not.
 func TestReplyToDeclinesForEachReason(t *testing.T) {
 	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 	_, subnet, err := net.ParseCIDR("192.0.2.0/24")
@@ -788,8 +716,6 @@ func TestReplyToDeclinesForEachReason(t *testing.T) {
 	if _, ok := limited.replyTo(onLink, group, ask); ok {
 		t.Error("a second multicast reply inside the window was allowed")
 	}
-	// A unicast reply goes to the host that asked, so it is not held to the
-	// multicast rate limit -- but it has its own, or a spoofed source reflects.
 	unicastAsk := query(1, []string{esphomeService}, dnsTypePTR, dnsClassIN|dnsUnicastResponse)
 	if dst, ok := limited.replyTo(onLink, group, unicastAsk); !ok || !dst.IP.Equal(onLink.IP) {
 		t.Errorf("a unicast reply was rate limited with the multicast one: dst=%v ok=%v", dst, ok)
@@ -807,11 +733,6 @@ func TestReplyToDeclinesForEachReason(t *testing.T) {
 	}
 }
 
-// A querier names where its unicast reply goes, and can name somewhere that
-// cannot be reached: port zero does it. Counting that as this socket's failure
-// handed anyone on the subnet a rebuild every poll, each writing to the log.
-// The reply's destination arrives back from replyTo, and what makes it "the
-// group" is the address rather than the identity of the pointer carrying it.
 func TestAFailedMulticastCountsEvenThroughACopiedAddress(t *testing.T) {
 	responder := &Responder{Instance: "kitchen", Iface: "wlan0", Port: 6053}
 	responder.mu.Lock()

@@ -26,10 +26,6 @@ func TestDecodeNoisePSK(t *testing.T) {
 		t.Errorf("decoded % x, want % x", got, raw)
 	}
 
-	// A space rather than a newline, because encoding/base64 skips \r and \n by
-	// contract: a newline decodes with or without the TrimSpace, so asserting on
-	// one asserts nothing. A stray space is what TrimSpace actually buys, and a
-	// hand-edited key file is where one comes from.
 	if _, err := DecodeNoisePSK(key + " \n"); err != nil {
 		t.Errorf("trailing whitespace was rejected: %v", err)
 	}
@@ -93,10 +89,6 @@ func TestReadNoiseFrameRejectsTruncated(t *testing.T) {
 	}
 }
 
-// Whether the stream is still at a frame boundary is what decides if a read can
-// be taken over rather than dropped, so every return that has already taken the
-// header off the socket has to say so. A return added later that does not is a
-// resume three bytes into a frame.
 func TestEveryErrorPastTheHeaderSaysTheStreamIsMidFrame(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -132,9 +124,6 @@ func TestNoiseMACFailureStringIsExact(t *testing.T) {
 	}
 }
 
-// endless supplies bytes forever, so a rejected length fails for the length
-// rather than for running out of payload. The base commit's frame test passed
-// with its cap deleted for exactly that reason.
 type endless struct{}
 
 func (endless) Read(p []byte) (int, error) {
@@ -172,10 +161,6 @@ func TestReadNoiseFrameAcceptsTheLimitItself(t *testing.T) {
 	}
 }
 
-// The handshake runs before a peer has proved anything, so what it can make the
-// daemon reserve is the number that matters. ESPHome allows 128 bytes there and
-// 32768 after; the product of the data bound and the connection cap has to fit
-// a 512 MiB device besides.
 func TestTheFrameBoundsAreESPHomesAndFitTheDevice(t *testing.T) {
 	if maxHandshakeFrame != 128 || maxDataFrame != 32768 {
 		t.Errorf("bounds are %d and %d, want ESPHome's 128 and 32768", maxHandshakeFrame, maxDataFrame)
@@ -188,11 +173,6 @@ func TestTheFrameBoundsAreESPHomesAndFitTheDevice(t *testing.T) {
 	}
 }
 
-// Deliberate, not an oversight: a peer that lies in the inner length field is
-// read by the outer length, which is bounded, so both a larger and a smaller
-// claim are harmless. Home Assistant's own client ignores the field for the same
-// reason, and ESPHome's firmware only refuses a claim larger than the frame, so
-// insisting the two agree would be stricter than either end of the real protocol.
 func TestALyingInnerLengthIsIgnoredTheWayTheRealClientIgnoresIt(t *testing.T) {
 	for _, said := range []uint16{0, 1, 0xffff} {
 		psk := testPSK(t)

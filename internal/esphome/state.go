@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// Which state message carries a reading. ESPHome reads fields by
-// number and the numbers are per message, so this picks an encoding rather than
-// labelling one.
 const (
 	kindSensor = iota
 	kindBinary
@@ -20,18 +17,11 @@ const (
 type reading struct {
 	key   uint32
 	value float32
-	// A select's state is a word rather than a number, and this is the only
-	// kind that carries one. Comparable like the rest of the struct, so the
-	// published state still tells a changed reading from an unchanged one.
-	text string
-	ok   bool
-	// A field here rather than a published map per kind, because one published
-	// state is what makes a subscriber and the polls agree.
-	kind int
+	text  string
+	ok    bool
+	kind  int
 }
 
-// The minute's readings: an uptime that changes on every read whatever the
-// cadence, and a signal that costs 1.8ms to take.
 func (s *Server) readTicked() []reading {
 	up, upOK := s.uptime()
 	signal, signalOK := s.wifi()
@@ -39,25 +29,9 @@ func (s *Server) readTicked() []reading {
 		{key: s.keyUptime, value: up, ok: upOK},
 		{key: s.keyWifi, value: signal, ok: signalOK},
 	}
-	// Not readings of the device -- this end owns them -- and they ride this
-	// poll for two things the other paths cannot give them. They are published
-	// before any connection exists, because PollSensors publishes once before
-	// its first wait; and a mode change reaches Home Assistant by waking this
-	// poll, which is what handle can do with the server lock held and
-	// publishing is not.
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
 	}
-	// This one is a reading of the device rather than of this end, and it is
-	// the reason it rides the minute rather than the live tick. Off costs a
-	// procfs read and nothing else, because nothing is asked about a port that
-	// is not listening; open, it is two forks, one of them an iptables call
-	// that waits on a lock netd holds constantly. So the cheap answer is the
-	// ordinary one, the same shape as the speaker's substream gate.
-	// Nothing is published for a mode that could not be read. A select carries
-	// no missing_state, so the choice is between the last value Home Assistant
-	// was given and a position invented here, and the invented one says the
-	// port is shut.
 	if mode, known := s.adbMode(); known {
 		s.adbObserved(mode)
 		out = append(out, reading{key: s.keyADB, text: mode.String(), ok: true, kind: kindSelect})
@@ -65,29 +39,11 @@ func (s *Server) readTicked() []reading {
 	return out
 }
 
-// SoundOnDelay and SoundOffDelay are how long sound has to last before it is
-// reported, and how long it has to be gone before that is withdrawn. Exported
-// so main_test.go can hold them against the interval they are sampled on.
 const (
 	SoundOnDelay  = time.Second
 	SoundOffDelay = time.Second
 )
 
-// Unlike the other readers this one remembers, so only PollLive may call it.
-// Called on the first tick that finds nobody subscribed, because the stretch
-// that follows has no bound -- Home Assistant can be away for an hour -- so
-// nothing measured before it means anything. Nothing wakes the poll on a
-// disconnect, so a Home Assistant back inside that tick keeps the reading, which
-// is half a second old rather than stale. The sampling gap guard inside readSound is the bounded
-// case and deliberately keeps the reading.
-//
-// The published reading goes with the hysteresis, and that is the half that
-// reaches Home Assistant: a subscriber is answered from the published state
-// before the poll has read anything, so a value left there is one a returning
-// Home Assistant is told before the first fresh reading can correct it, which
-// fires anything triggered on the speaker turning on. Dropping it is only safe
-// here, with nobody subscribed: published is otherwise exactly what every
-// subscriber holds.
 func (s *Server) forgetSound() {
 	s.soundOn = false
 	s.soundSince, s.soundLastOn, s.soundSeen = time.Time{}, time.Time{}, time.Time{}
@@ -99,27 +55,12 @@ func (s *Server) forgetSound() {
 func (s *Server) readSound() reading {
 	playing, ok := s.sound()
 	now := time.Now()
-	// A delay is only two readings if the readings were taken when they were
-	// meant to be. PollLive is serial, so a heavy tick whose fork runs long
-	// pushes the next sample out, and one sample either side of that gap would
-	// otherwise decide an edge on its own.
 	gapped := s.soundGap > 0 && !s.soundSeen.IsZero() && now.Sub(s.soundSeen) > s.soundGap
 	s.soundSeen = now
 	if !ok {
-		// soundLastOn is the last time sound was seen, and a read that failed
-		// is not a sighting of silence. Zeroing it made the off test measure
-		// against the zero time, which is past any delay; moving it forward,
-		// which is what the gap guard does, held the entity on across the
-		// failure and reported it as playing again afterwards.
 		s.soundSince = time.Time{}
 		return reading{key: s.keySound, kind: kindBinary}
 	}
-	// Only once there is a reading to hang them on. Carrying the withdrawal's
-	// clock forward says sound was seen at a moment nothing was looking, so it
-	// is only done while that claim is smaller than the withdrawal itself. A
-	// longer gap is the poll having been asleep -- nothing subscribed, and no
-	// bound on how long -- and holding the reading on across that reports the
-	// speaker as playing for a delay after Home Assistant returns.
 	if gapped {
 		s.soundSince, s.soundLastOn = time.Time{}, now
 	}
@@ -140,11 +81,6 @@ func (s *Server) readSound() reading {
 	return reading{key: s.keySound, value: boolValue(s.soundOn), ok: true, kind: kindBinary}
 }
 
-// The heavy tick's readings, taken together because they are published
-// together. Measured on the Dot: 118us for the temperature, 111us for the
-// memory, 113us for the jack, 11.7ms for the volume and 12ms for the
-// microphone. The last two fork, and main_test.go holds their budgets as a sum
-// against the interval rather than one at a time.
 func (s *Server) readLive() []reading {
 	cpu, cpuOK := s.cpu()
 	memory, memoryOK := s.memory()
@@ -172,8 +108,6 @@ func boolValue(b bool) float32 {
 	return 0
 }
 
-// What a subscriber is told when it arrives: the published state as it stands,
-// and never a reading of its own. Caller holds mu.
 func (s *Server) snapshot() []reading {
 	readings := make([]reading, 0, len(s.published))
 	for _, r := range s.published {
@@ -200,9 +134,6 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 	return nil
 }
 
-// SelectStateResponse. Its missing_state is field 3 as a sensor's is, but a
-// select is what this end last set it to and there is no read of the device to
-// have failed, so nothing here sends one.
 func selectState(key uint32, choice string) []byte {
 	var p pb
 	p.fixed32(1, key)
@@ -233,8 +164,6 @@ func floatState(key uint32, v float32, missing bool) []byte {
 	return p.b
 }
 
-// Returns what it could not send to rather than logging it, because the caller
-// holds the server lock and the log is a file on /data.
 func (s *Server) eachConn(what string, wants func(*conn) bool, send func(*conn) error) []string {
 	var failed []string
 	for conn := range s.conns {
@@ -255,18 +184,10 @@ func wantsStates(c *conn) bool { return c.states }
 
 func wantsServices(c *conn) bool { return c.services }
 
-// The one way a reading reaches anybody. It records what it sends and sends
-// only what it has not already recorded, so the published state is exactly what
-// every subscriber holds. The snapshot sends too, but only what this has
-// already published. The log write waits until the lock is dropped, because the
-// lock gates the accept path and every other connection's handler.
 func (s *Server) publish(what string, readings []reading) []reading {
 	s.mu.Lock()
 	var changed []reading
 	for _, r := range readings {
-		// told rather than the zero reading standing for "not published": every
-		// key here is a hash that happens never to be zero, so the two are
-		// distinguishable without it, but that is not a thing to rest it on.
 		if was, told := s.published[r.key]; told && was == r {
 			continue
 		}
@@ -286,14 +207,6 @@ func (s *Server) publish(what string, readings []reading) []reading {
 	return changed
 }
 
-// FirePress tells every subscriber what the action button just did. An event is
-// not a state: nothing is published, because there is nothing for a subscriber
-// to be told on arrival, and a press it was not connected for is one it missed.
-// That is what makes it an event rather than a reading.
-//
-// Called from the timers that recognise a gesture and from the read loop, which
-// mute passes through, so it does what publish does: the lock covers only the
-// queueing, and what could not be queued is logged after it is dropped.
 func (s *Server) FirePress(objectID string, eventType EventType, count int, holdFor time.Duration) {
 	b := s.button(objectID)
 	if b == nil {
@@ -303,32 +216,14 @@ func (s *Server) FirePress(objectID string, eventType EventType, count int, hold
 	event.fixed32(1, b.keyEvent)
 	event.str(2, string(eventType))
 
-	// The same gesture again, carrying the numbers the event cannot. The
-	// esphome. prefix is Home Assistant's rule rather than a convention: it
-	// fires an is_event call as a bus event only for its own domain.
-	//
-	// The two map fields differ. Field 2, data, arrives as the string it is.
-	// Home Assistant renders field 3, data_template, and a render ends in
-	// _parse_result, which turns a numeric string back into a number. So the
-	// numbers go in 3 and reach an automation as integers.
-	//
-	// The strings stay in 2, device especially: it is the operator's -name, and
-	// Home Assistant evaluates a data_template value carrying Jinja markers. A
-	// number this end formatted cannot carry one.
 	var action pb
 	action.str(1, "esphome.overdub_pressed")
 	action.sub(2, kv("event_type", string(eventType)))
 	action.sub(2, kv("device", s.name))
-	// Which button, because one service name now carries several of them and an
-	// automation filtering only on device_id would fire for every one.
 	action.sub(2, kv("button", b.objectID))
-	// Named for the attribute Home Assistant would have used, had the transport
-	// had room for one. Only multi_press_end has a count.
 	if count > 0 {
 		action.sub(3, kv("multi_press_count", strconv.Itoa(count)))
 	}
-	// Only a hold has one. A run has several durations and no single one, so the
-	// key is absent rather than zero: a zero read as a measurement is p2p0.
 	if holdFor > 0 {
 		action.sub(3, kv("held_ms", strconv.FormatInt(holdFor.Milliseconds(), 10)))
 	}
@@ -338,8 +233,6 @@ func (s *Server) FirePress(objectID string, eventType EventType, count int, hold
 	failed := s.eachConn("event", wantsStates, func(c *conn) error {
 		return s.send(c, msgEventState, event.b)
 	})
-	// A different subscription, so a peer that asked only for states gets the
-	// gesture and not the numbers. Home Assistant asks for both.
 	failed = append(failed, s.eachConn("event count", wantsServices, func(c *conn) error {
 		return s.send(c, msgHomeassistantAct, action.b)
 	})...)
@@ -356,14 +249,11 @@ func kv(key, value string) []byte {
 	return p.b
 }
 
-// Starts a poll for every sensor listEntities names.
 func (s *Server) Poll(sensorTick, liveTick time.Duration) {
 	go s.PollSensors(sensorTick)
 	go s.PollLive(liveTick)
 }
 
-// Published once before the wait, so a subscriber arriving in the first minute
-// is not told nothing at all: time.Tick fires after the interval, not at it.
 func (s *Server) PollSensors(every time.Duration) {
 	if every < MinSensorTick {
 		log.Printf("esphome api: sensor tick of %v raised to the %v floor", every, MinSensorTick)
@@ -372,18 +262,6 @@ func (s *Server) PollSensors(every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
-		// Before the readings, so the rule is back before the mode that needs
-		// it is reported. netd rebuilds the INPUT chain on its own schedule and
-		// discards what it finds there, the same hazard tcp/6053 answers with
-		// HoldTCPOpen -- but this port is held open only while adbd is
-		// listening, which is a question the device answers, so nothing here
-		// remembers an intention across a restart of this daemon. Nothing is
-		// logged: a failure is reported by the mode the next read finds.
-		// Not while a position is being applied. "adbd is listening" lags a
-		// restart it was asked for, so a re-assert landing inside a transition
-		// puts back a rule the worker has just taken out. It also waits on the
-		// same lock the worker holds for the whole apply, which would park this
-		// serial poll -- and the button modes publish from here.
 		if !s.adbBusy() {
 			_ = s.adbHold()
 		}
@@ -392,17 +270,6 @@ func (s *Server) PollSensors(every time.Duration) {
 		select {
 		case <-tick.C:
 		case <-s.sensorWake:
-			// Both things that wake this poll are things a peer asks for:
-			// subscribing, which needs a new connection each time and so is
-			// bounded by the eight slots, and moving the button switch, which
-			// needs neither. Without this wait one peer sets this poll's rate,
-			// buying a procfs read and a push to every subscriber per message.
-			//
-			// Waited out rather than skipped, which is where this differs from
-			// PollLive. There a dropped wake costs half a second, because the
-			// tick comes round again; here the tick is a minute away, so
-			// dropping one leaves the value it was going to correct wrong for
-			// that long.
 			if left := s.wakeGap - time.Since(read); left > 0 {
 				time.Sleep(left)
 			}
@@ -411,17 +278,10 @@ func (s *Server) PollSensors(every time.Duration) {
 }
 
 func (s *Server) PollLive(every time.Duration) {
-	// time.NewTicker panics rather than returning an error, and this poll has no
-	// floor of its own for a caller to have been stopped by.
 	if every <= 0 {
 		log.Printf("esphome api: live tick of %v raised to %v", every, minLiveReadGap)
 		every = minLiveReadGap
 	}
-	// Twice the interval sound is sampled on: a sample that late means one was
-	// missed, and anything less is the jitter of an ordinary tick. Written
-	// under the lock because a test reads it from outside this goroutine. What
-	// makes readSound's own read of it safe is not the lock: this goroutine is
-	// its only writer, and readSound runs on it.
 	s.mu.Lock()
 	s.soundGap = 2 * every * SoundEvery
 	s.mu.Unlock()
@@ -432,8 +292,6 @@ func (s *Server) PollLive(every time.Duration) {
 	ticks := 0
 	watched := false
 	for {
-		// One locked look, used by both the edge below and the gate under it,
-		// so the two cannot disagree about the same iteration.
 		listening := s.anyStateSubscriber()
 		if listening != watched {
 			if !listening {
@@ -443,8 +301,6 @@ func (s *Server) PollLive(every time.Duration) {
 		}
 		if listening && (!woken || time.Since(last) >= s.wakeGap) {
 			last = time.Now()
-			// All of them for a subscriber that has just arrived, rather than
-			// making it wait out the counts.
 			var readings []reading
 			if woken || ticks%SoundEvery == 0 {
 				readings = append(readings, s.readSound())
@@ -472,7 +328,6 @@ func (s *Server) anyStateSubscriber() bool {
 	return s.stateSubscriberBesides(nil)
 }
 
-// Whether anybody but this connection is subscribed. Caller holds mu.
 func (s *Server) stateSubscriberBesides(except *conn) bool {
 	for conn := range s.conns {
 		if conn != except && conn.states {

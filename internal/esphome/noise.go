@@ -15,16 +15,12 @@ import (
 	"github.com/flynn/noise"
 )
 
-// The lead byte that opens every frame; ESPHome uses 0x00 for plaintext.
 const leadEncrypted = 0x01
 
 var noisePrologue = []byte("NoiseAPIInit\x00\x00")
 
-// Hardcoded in Home Assistant's client, and mixed into the handshake hash by
-// both ends: agreement rather than negotiation.
 const noiseCipherName = "Noise_NNpsk0_25519_ChaChaPoly_SHA256"
 
-// A package-level var so a test can build the name above from it.
 var noiseSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashSHA256)
 
 const noiseMACFailure = "Handshake MAC failure"
@@ -53,18 +49,11 @@ func writeNoiseFrame(w io.Writer, payload []byte) error {
 	return nil
 }
 
-// What ESPHome's own firmware bounds a frame to before allocating for it, in
-// api_frame_helper_noise.cpp. docs/architecture.md says why the 16-bit length
-// field is not the bound.
 const (
 	maxHandshakeFrame = 128
 	maxDataFrame      = 32768
 )
 
-// errMidFrame marks an error left with the stream no longer at a frame
-// boundary, because part of one is already off the socket. Every return below
-// that follows the header read carries it. docs/architecture.md says why such a
-// read cannot be retried.
 var errMidFrame = errors.New("stream left mid-frame")
 
 func readNoiseFrame(r *bufio.Reader, limit int) ([]byte, error) {
@@ -93,8 +82,8 @@ type noiseRW struct {
 	sock   net.Conn
 	reader *bufio.Reader
 	writer *bufio.Writer
-	in     *noise.CipherState // decrypts what Home Assistant sends
-	out    *noise.CipherState // encrypts what we send
+	in     *noise.CipherState
+	out    *noise.CipherState
 }
 
 func noiseAccept(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, name string, psk []byte, deadline time.Time) (*noiseRW, error) {
@@ -115,8 +104,6 @@ func noiseAccept(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, name
 		return nil, fmt.Errorf("noise setup: %w", err)
 	}
 
-	// The caller's deadline, not a wait of our own: SECURITY.md gives one number
-	// for the pre-authentication phase.
 	_ = conn.SetWriteDeadline(deadline)
 	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 
@@ -180,14 +167,10 @@ func (n *noiseRW) read() (int, []byte, error) {
 	if len(plain) < 4 {
 		return 0, nil, fmt.Errorf("decrypted message of %d bytes is too short", len(plain))
 	}
-	// plain[2:4] is read past rather than trusted, which is what aioesphomeapi
-	// does with it. docs/architecture.md says why insisting it agree would be
-	// stricter than either end of the real protocol.
 	msgType := int(binary.BigEndian.Uint16(plain[0:2]))
 	return msgType, plain[4:], nil
 }
 
-// What is left of a data frame once the inner header and Poly1305 tag are out.
 const maxNoiseMessage = maxDataFrame - 20
 
 func (n *noiseRW) write(msgType int, payload []byte) error {

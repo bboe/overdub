@@ -1,7 +1,3 @@
-// OpenSL ES, which is the layer AudioFlinger mixes. That is what lets the
-// chime coexist with Alexa: her speech is a track like ours, not an owner of
-// the device. Writing to ALSA directly reaches the speaker and wedges the
-// driver, which docs/audio.md records.
 
 #include "audio.h"
 
@@ -23,8 +19,6 @@ static SLAndroidSimpleBufferQueueItf player_queue;
 		if ((expr) != SL_RESULT_SUCCESS) return -1; \
 	} while (0)
 
-// Init unwinds what it built. Play does not: a failed enqueue should cost one
-// chime rather than every chime after it.
 #define TRY_INIT(expr)                   \
 	do {                                 \
 		if ((expr) != SL_RESULT_SUCCESS) { \
@@ -54,9 +48,6 @@ int audio_init(const unsigned char *pcm, size_t len, int rate, int channels) {
 	size_t usable = len - (len % (size_t)frame_bytes);
 	if (usable == 0) return -1;
 
-	// The whole clip is queued at once rather than streamed by a callback, so
-	// it has to fit. Checked here rather than truncated there: a chime that
-	// outgrew the queue would otherwise play its first half for ever.
 	if (usable > (size_t)CHUNK * NUM_BUFFERS) return -1;
 
 	clip = pcm;
@@ -81,9 +72,6 @@ int audio_init(const unsigned char *pcm, size_t len, int rate, int channels) {
 	SLDataLocator_OutputMix omix = {SL_DATALOCATOR_OUTPUTMIX, mix_obj};
 	SLDataSink sink = {&omix, NULL};
 
-	// The configuration interface is asked for but not required, and the get
-	// below is guarded to match: it only sets the stream type, so a ROM without
-	// it should still chime rather than leave the daemon permanently silent.
 	const SLInterfaceID ids[] = {SL_IID_BUFFERQUEUE, SL_IID_ANDROIDCONFIGURATION};
 	const SLboolean req[] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_FALSE};
 	TRY_INIT((*engine)->CreateAudioPlayer(engine, &player_obj, &src, &sink, 2, ids, req));
@@ -102,10 +90,6 @@ int audio_init(const unsigned char *pcm, size_t len, int rate, int channels) {
 	return 0;
 }
 
-// Stopped and cleared first, so a press during the previous chime restarts it
-// rather than queueing a second copy behind it. No callback refills this: the
-// clip fits the queue, so every buffer it will need is enqueued here, on this
-// thread, and there is no in-flight refill for the clear to race.
 int audio_play(void) {
 	if (player_play == NULL) return -1;
 	TRY((*player_play)->SetPlayState(player_play, SL_PLAYSTATE_STOPPED));
@@ -137,8 +121,6 @@ void audio_close(void) {
 		(*engine_obj)->Destroy(engine_obj);
 		engine_obj = NULL;
 	}
-	// Dropped last: the queue held a pointer into it, and the caller frees it
-	// once this returns.
 	clip = NULL;
 	clip_len = 0;
 }

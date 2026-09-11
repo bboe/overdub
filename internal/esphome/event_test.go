@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// The listing is the only place the event types are declared, and Home
-// Assistant refuses one it was not told about. Repeated fields are why this
-// walks the payload itself rather than going through listed(), which keeps one
-// field per number.
 func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 	t.Helper()
 	c := &conn{out: make(chan frame, 32)}
@@ -26,7 +22,6 @@ func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 		if f.msgType != msgListEvent {
 			continue
 		}
-		// Only the action button's; the listing now carries one per button.
 		if !bytes.Contains(f.payload, []byte("action_button")) ||
 			bytes.Contains(f.payload, []byte("mute_button")) {
 			continue
@@ -48,9 +43,6 @@ func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 	return fields, eventTypes
 }
 
-// An event entity is its own message with its own set of field numbers, and
-// every one of them is silent when wrong: 8 is device_class here and a binary
-// sensor's icon, 9 is event_types here and device_class on a sensor.
 func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	entity, eventTypes := listedEvent(t, s)
@@ -61,8 +53,6 @@ func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
 	if uint32(entity[2].num) != s.button("action_button").keyEvent {
 		t.Errorf("action_button has key %d, want %d", entity[2].num, s.button("action_button").keyEvent)
 	}
-	// A key sent as a varint decodes to the same number here and to nothing in
-	// Home Assistant, which files every entity under key zero.
 	if entity[2].wire != wireFixed32 {
 		t.Errorf("action_button sent its key as wire type %d, want fixed32 (%d)",
 			entity[2].wire, wireFixed32)
@@ -73,9 +63,6 @@ func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
 	if entity[6].num != 0 {
 		t.Error("action_button is disabled_by_default; it would not appear until somebody enabled it")
 	}
-	// The one entity here that is neither a reading nor a control, so neither
-	// category fits: a categorised entity is filed away from the device's
-	// controls, and this is the device's whole point.
 	if entity[7].num != entityCategoryNone {
 		t.Errorf("action_button has entity_category %d, want none (%d)",
 			entity[7].num, entityCategoryNone)
@@ -83,24 +70,16 @@ func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
 	if got := string(entity[8].data); got != "button" {
 		t.Errorf("action_button has device_class %q, want button", got)
 	}
-	// Home Assistant draws an event entity's icon from its device_class, so one
-	// sent here would replace it and say no more than the class already does.
 	if _, ok := entity[5]; ok {
 		t.Error("action_button sends an icon, which replaces the one its device_class gives it")
 	}
 
-	// Spelled out rather than compared against actionEvents, which is what
-	// builds the listing: a test that reads the same slice asserts nothing about
-	// what Home Assistant is told.
 	if want := []string{"press_end", "multi_press_end",
 		"long_press_start", "long_press_end"}; !reflect.DeepEqual(eventTypes, want) {
 		t.Errorf("action_button advertises %v, want %v", eventTypes, want)
 	}
 }
 
-// The names on the wire, and the names main uses to pick between them. A type
-// Home Assistant was not told about is dropped at its end, with the press lost
-// and nothing here to say so.
 func TestTheEventNamesAndNumbersAreESPHomeS(t *testing.T) {
 	for _, tt := range []struct {
 		what string
@@ -114,8 +93,6 @@ func TestTheEventNamesAndNumbersAreESPHomeS(t *testing.T) {
 			t.Errorf("%s is %d, want %d", tt.what, tt.got, tt.want)
 		}
 	}
-	// ButtonEventType verbatim. A near miss files the event under no standard
-	// trigger, and nothing reports that.
 	for _, tt := range []struct {
 		got  EventType
 		want string
@@ -173,10 +150,6 @@ func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
 	}
 }
 
-// A press is a moment rather than a value, so there is nothing for a client
-// that arrives afterwards to be told. Publishing one would make the snapshot
-// replay it, and a Home Assistant reconnecting would fire every automation
-// hanging off a press nobody made.
 func TestAPressIsNotPublished(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	s.FirePress("action_button", EventPressEnd, 0, 0)
@@ -196,11 +169,6 @@ func TestAPressIsNotPublished(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 
-	// Read by key rather than by message type, because the message a published
-	// press comes back as is not the one it went out as. The snapshot encodes
-	// by reading.kind, and a press stored as a reading would carry the zero
-	// kind, so it would arrive as a sensor state carrying keyAction and never as
-	// an EventResponse: a test watching for the event message alone cannot fail.
 	close(late.out)
 	for f := range late.out {
 		var key uint32
@@ -217,10 +185,6 @@ func TestAPressIsNotPublished(t *testing.T) {
 	}
 }
 
-// Every value in a HomeassistantServiceMap is a string, so this reads the pairs
-// back as the automation receives them: text, cast at the far end.
-// Reads both map fields and keeps them apart: which one a key arrives in decides
-// its type. Field 2 stays a string; Home Assistant parses a number out of 3.
 func actionData(t *testing.T, payload []byte) (service string, isEvent bool, data, templated map[string]string) {
 	t.Helper()
 	data, templated = map[string]string{}, map[string]string{}
@@ -257,8 +221,6 @@ func actionData(t *testing.T, payload []byte) (service string, isEvent bool, dat
 	return service, isEvent, data, templated
 }
 
-// EventResponse carries a key and a type and nothing else, so the count rides a
-// service call beside it. This is the shape the blueprint reads.
 func TestThePressCountRidesAServiceCall(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true, services: true}
@@ -281,21 +243,12 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 	}
 	service, isEvent, data, templated := actionData(t, f.payload)
 
-	// Home Assistant fires an is_event service call as a bus event only for its
-	// own esphome domain and drops everything else, so the prefix is a rule
-	// rather than a name somebody chose.
 	if service != "esphome.overdub_pressed" {
 		t.Errorf("the service call is named %q, want esphome.overdub_pressed", service)
 	}
 	if !isEvent {
 		t.Error("the service call is not is_event, so Home Assistant calls a service instead of firing an event")
 	}
-	// The strings stay strings. device is the operator's -name, and Home
-	// Assistant renders data_template, so a name with Jinja markers would be a
-	// template this daemon asked it to run.
-	// button is the discriminator: every button fires this one service name, so
-	// an automation filtering on the device alone runs for all of them. The
-	// blueprint filters on this key.
 	for key, value := range map[string]string{
 		"event_type": "multi_press_end",
 		"device":     "kitchen",
@@ -308,8 +261,6 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 			t.Errorf("%s is sent in data_template, where Home Assistant would evaluate it", key)
 		}
 	}
-	// The count is not a string by the time an automation sees it: field 3 is
-	// rendered, and a rendered number parses back to a number.
 	if templated["multi_press_count"] != "7" {
 		t.Errorf("the count is %q in data_template, want %q", templated["multi_press_count"], "7")
 	}
@@ -318,8 +269,6 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 	}
 }
 
-// Separate subscriptions, and Home Assistant asks for both. A client that asked
-// only for states gets the gesture and not the numbers.
 func TestTheCountGoesOnlyToAClientThatAskedForServices(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	states := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
@@ -347,9 +296,6 @@ func TestTheCountGoesOnlyToAClientThatAskedForServices(t *testing.T) {
 	}
 }
 
-// The request that turns the count on, and the number it arrives as.
-// SubscribeHomeassistantServicesRequest is 34 and the response is 35; a wrong
-// number here is a message Home Assistant ignores, with no error at either end.
 func TestSubscribingToServicesIsWhatTurnsTheCountOn(t *testing.T) {
 	if msgSubscribeHAServ != 34 {
 		t.Errorf("SubscribeHomeassistantServicesRequest is %d, want 34", msgSubscribeHAServ)
@@ -377,9 +323,6 @@ func TestSubscribingToServicesIsWhatTurnsTheCountOn(t *testing.T) {
 	}
 }
 
-// Each extra key belongs to the gesture that has one. A count on a single press,
-// or a duration on a run, is a number Home Assistant would draw as a
-// measurement.
 func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 	for _, tt := range []struct {
 		what      string
@@ -421,8 +364,6 @@ func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 	}
 }
 
-// The discriminator names the button that fired, not always the first one. Two
-// buttons sharing one service name is the whole reason it is there.
 func TestTheServiceCallNamesTheButtonThatFired(t *testing.T) {
 	for _, objectID := range []string{"action_button", "mute_button"} {
 		s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)

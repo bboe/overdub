@@ -36,16 +36,10 @@ func TestSendDropsRatherThanBlockingOnAStalledClient(t *testing.T) {
 			t.Error("send accepted a frame with no room; a stalled client would grow without bound")
 		}
 	case <-time.After(5 * time.Second):
-		// send runs under Server.mu. Blocking here parks every press, state and
-		// command behind one client that stopped reading.
 		t.Fatal("send blocked on a full queue")
 	}
 }
 
-// handle reports a DisconnectRequest as an error, and the read loop is what acts
-// on it. Covering the error being produced is not the same as covering it being
-// obeyed: a loop that ignored it would answer the goodbye and then hold the
-// connection open until the idle deadline.
 func TestTheReadLoopActsOnHandlesError(t *testing.T) {
 	psk := testPSK(t)
 	s := testServer(t, psk)
@@ -60,8 +54,6 @@ func TestTheReadLoopActsOnHandlesError(t *testing.T) {
 		t.Fatalf("the goodbye was not answered: %v", err)
 	}
 
-	// Decided by the read returning rather than by a deadline: the connection has
-	// a full idle budget left, so only the teardown can end it this quickly.
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := c.recv()
@@ -86,10 +78,6 @@ func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// net.Pipe delivers nothing until someone reads, so not reading yet leaves the
-	// writer parked mid-write while serveConn is tearing the connection down. That
-	// is the interleaving that matters: closing the socket there turns the goodbye
-	// into an EOF, and Home Assistant logs a failed disconnect on every reconnect.
 	time.Sleep(200 * time.Millisecond)
 
 	msgType, _, err := c.recv()
@@ -101,10 +89,6 @@ func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
 	}
 }
 
-// serveOne wires a client end to a live serveConn, the way Listen does.
-// Joined at cleanup, not just closed: a serveConn still running when its test
-// ends writes its parting lines into the next test's captured log, and the log
-// budgets here are exactly what that corrupts.
 func serveOne(t *testing.T, s *Server) net.Conn {
 	t.Helper()
 	client, server := net.Pipe()
@@ -129,7 +113,6 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 	for i := 0; i < maxConns; i++ {
 		serveOne(t, s)
 	}
-	// Give the admissions above time to land in s.conns.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s.mu.Lock()
@@ -145,25 +128,14 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 	}
 
 	over := serveOne(t, s)
-	// The refusal closes the pipe, and a deadline cannot be set on one that is
-	// already closed: net.Pipe answers io.ErrClosedPipe. That is the refusal
-	// arriving before this line rather than a failure, and it is what the
-	// server is being asked to do, so treating it as fatal made this test fail
-	// on exactly the behaviour it asserts -- measured, once, under qemu on CI.
-	// Any other error is a real one.
 	if err := over.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil &&
 		!errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
-	// A pipe the far end closed then reads as io.EOF -- measured, rather than
-	// the ErrClosedPipe the line above answers -- and EOF is neither nil nor a
-	// timeout, so both checks below still say what they mean.
 	_, err := over.Read(make([]byte, 1))
 	if err == nil {
 		t.Fatalf("connection %d was served; the cap does not hold", maxConns+1)
 	}
-	// A refused connection is closed at once. An admitted one just sits there, so
-	// a read that times out means the cap let it in rather than turning it away.
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() {
 		t.Errorf("connection %d was admitted and left open; the cap does not hold",
@@ -218,8 +190,6 @@ func TestAClientThatHasSentAFrameKeepsItsSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// One frame that decrypts, which is what a replayed handshake cannot manage.
-	// Home Assistant sends a HelloRequest the moment the handshake is done.
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +197,6 @@ func TestAClientThatHasSentAFrameKeepsItsSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Past the handshake wait. A client that has proved it has the key is allowed
-	// to go quiet: Home Assistant holds the connection open between pings.
 	time.Sleep(3 * s.handshakeWait)
 
 	if err := c.send(msgPingRequest, nil); err != nil {
@@ -243,8 +211,6 @@ func TestAClientThatHasSentAFrameKeepsItsSlot(t *testing.T) {
 	}
 }
 
-// Bytes are not a handshake. Eight peers dribbling a frame each would otherwise
-// hold every slot without ever proving they have the key.
 func TestAnUnfinishedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	psk := testPSK(t)
 	s := testServer(t, psk)
@@ -254,8 +220,6 @@ func TestAnUnfinishedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The client hello, and then nothing: the handshake is begun and never
-	// finished.
 	w := bufio.NewWriter(client)
 	if err := writeNoiseFrame(w, nil); err != nil {
 		t.Fatal(err)
@@ -267,10 +231,6 @@ func TestAnUnfinishedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		t.Fatalf("the server hello did not arrive: %v", err)
 	}
 
-	// Decided by the select below rather than by a read deadline: a deadline
-	// expiring is indistinguishable from the server holding on, which is the
-	// whole question here. The connection deadline set above is 10s, far past
-	// this, so it cannot be what answers.
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.Read(make([]byte, 1))
@@ -286,9 +246,6 @@ func TestAnUnfinishedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 	}
 }
 
-// The log is a file on /data, and every byte below arrives from a peer that has
-// the key. %q renders each of these bytes as four characters, so a full frame of
-// client_info would quote to four times the frame.
 func TestALongClientNameIsCutBeforeItReachesTheLog(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -309,9 +266,6 @@ func TestALongClientNameIsCutBeforeItReachesTheLog(t *testing.T) {
 		t.Fatalf("hello was not answered: %v", err)
 	}
 
-	// The reply is queued by handle, but the log line is written after handle
-	// returns, so the reply arriving proves nothing about the log. A second round
-	// trip does: the read loop writes the hello line before it reads again.
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -319,22 +273,11 @@ func TestALongClientNameIsCutBeforeItReachesTheLog(t *testing.T) {
 		t.Fatalf("ping was not answered: %v", err)
 	}
 
-	// Bounded, rather than proportional to what arrived: the ceiling is the
-	// truncation, not the frame.
 	if n := len(out.String()); n > 1024 {
 		t.Errorf("one hello wrote %d bytes of log for a %d byte name", n, maxNoiseMessage-16)
 	}
 }
 
-// Two rules at once, and the second is what the published state rests on: the
-// pollers are the only readers of the device, and they read outside the lock.
-// A reading taken on a connection's goroutine would be a second reader, and one
-// taken under the lock would stall the accept path and every other connection,
-// since handle holds that lock for its whole body.
-//
-// Driven through PollSensors rather than through a helper that calls publish
-// the way it does. A helper cannot say where the real poll takes the lock, and
-// a suite that only asks the helper stays green with the read moved inside it.
 func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -349,11 +292,6 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		return func() (float32, bool) {
 			mu.Lock()
 			reads++
-			// Retried rather than asked once. TryLock reports whether anybody
-			// holds the lock, not whether this goroutine does, and a handler
-			// holding it for its own body would otherwise read as this poll
-			// holding it. A caller that really holds it fails every attempt,
-			// because the lock is not reentrant; a passing handler does not.
 			locked := false
 			for i := 0; i < 200; i++ {
 				if s.mu.TryLock() {
@@ -389,14 +327,8 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		return muted != 0, true
 	}
 
-	// Ticks far enough away that every read below is either the sensor poll's
-	// startup publish or one a subscriber woke.
 	go s.Poll(MinSensorTick, time.Hour)
 
-	// Waited for the publish rather than for a read. The stub signals on every
-	// reader call, so taking the count at the first one samples the startup
-	// publish half done: measured, that failed one run in thirteen with the
-	// ceiling below derived from half a poll.
 	for deadline := time.Now().Add(3 * time.Second); ; {
 		s.mu.Lock()
 		published := len(s.published)
@@ -433,13 +365,6 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		}
 	}
 
-	// Subscribing wakes both polls, so the reads it is allowed are the woken
-	// ones: what must not happen is a reading taken on the connection's own
-	// goroutine, which is what the lock check above would catch and what the
-	// count below bounds. polled is one sensor poll's worth, since only the
-	// startup publish had run when it was taken, so the ceiling is that again
-	// plus one cycle of the live poll. Written out rather than asked of the
-	// server, because the stubs take this same lock and would deadlock.
 	const liveReaders = 5 // cpu, memory, volumes, jack, sound
 	mu.Lock()
 	defer mu.Unlock()
@@ -465,10 +390,6 @@ func TestTheLogRateLimitCapsWhatOnePeerCanWrite(t *testing.T) {
 	}
 }
 
-// Every line the api writes is caused by a peer, and eight of them can be in
-// handlers at once. What catches a missing lock here is the race detector rather
-// than the count below, so this one earns its keep only under -race, which CI
-// runs natively because GOARCH=arm has no detector.
 func TestTheRateLimitHoldsAcrossConcurrentPeers(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -492,17 +413,12 @@ func TestTheRateLimitHoldsAcrossConcurrentPeers(t *testing.T) {
 	}
 }
 
-// The rate limit alone bounds bytes per minute, not bytes: nothing truncates
-// this log while the daemon runs, so a peer that keeps at it for a week would
-// still fill /data.
 func TestPeerLoggingStopsAtItsCeilingForTheRun(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < logTotal+logBurst*3; i++ {
-		// Past the window each time, so the rate limit never refuses: the total
-		// is what has to stop it.
 		s.logMu.Lock()
 		s.logWindowEnd = time.Time{}
 		s.logMu.Unlock()
@@ -514,8 +430,6 @@ func TestPeerLoggingStopsAtItsCeilingForTheRun(t *testing.T) {
 	}
 }
 
-// Answering would mean replying to whatever was scraped out of the message
-// before the parse went wrong.
 func TestAMalformedHelloIsNotAnswered(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -530,8 +444,6 @@ func TestAMalformedHelloIsNotAnswered(t *testing.T) {
 	}
 }
 
-// Goroutines left running by earlier tests still log, so the buffer is locked
-// and the previous writer is put back rather than assumed to be stderr.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -556,8 +468,6 @@ func restoreLog(t *testing.T, buf *lockedBuffer) func() {
 	return func() { log.SetOutput(was) }
 }
 
-// Every line the api writes is caused by a peer, so a peer that reconnects in a
-// loop must not be able to write one apiece: the log is a file on /data.
 func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -565,10 +475,6 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 	psk := testPSK(t)
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", psk)
 
-	// Three ways to churn, because they reach different lines. Closing before
-	// the lead byte never leaves the accept path; an empty hello and then a
-	// close reaches "handshake failed", which needs no key at all. Both are a
-	// peer's to repeat for as long as it likes.
 	for i := 0; i < 200; i++ {
 		client, server := net.Pipe()
 		done := make(chan struct{})
@@ -587,9 +493,6 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 			lines, 2*logBurst)
 	}
 
-	// The third is a session that succeeds, which needs the key and so is not a
-	// stranger's to repeat. It still goes through the same limit, and the burst
-	// above is spent: the line has to be suppressed rather than written.
 	before := out.String()
 	if _, err := dial(t, s, psk); err != nil {
 		t.Fatal(err)
@@ -604,11 +507,6 @@ type fakeAddr struct{ net.Conn }
 
 func (fakeAddr) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1234} }
 
-// A client that is still talking fills the deadline by itself, and the ping is
-// for one that has stopped. aioesphomeapi's timer is fixed and repeating rather
-// than reset by traffic, so a message buys one tick and the longest a healthy
-// client stays quiet is two of them. Ping sooner than that and every connection
-// is asked something it was already about to say.
 func TestAClientThatIsStillTalkingIsNeverPinged(t *testing.T) {
 	if quiet := 2 * clientKeepalive; pingAfter <= quiet {
 		t.Errorf("pingAfter is %v, but a client that is talking normally can be quiet for %v",
@@ -616,9 +514,6 @@ func TestAClientThatIsStillTalkingIsNeverPinged(t *testing.T) {
 	}
 }
 
-// The constant is exported as a contract, so the package has to hold it rather
-// than leave it to a test on the caller: a second caller, or a flag, would get
-// no protection from a test that compares two constants.
 func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -627,8 +522,6 @@ func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	done := make(chan struct{})
 	go func() { s.PollSensors(time.Millisecond); close(done) }()
 
-	// It raises the tick to the floor rather than refusing, so the goroutine
-	// stays alive; what is observable is the line saying so.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(out.String(), "raised to") {
@@ -639,10 +532,6 @@ func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	t.Errorf("a 1ms tick was accepted; the log says %q", out.String())
 }
 
-// Every state is a key and a value, and the key is what tells Home Assistant
-// which entity it belongs to. Sensors and binary sensors are different messages
-// with different encodings for that value: fixed32 against a varint bool. A
-// helper that assumed one would read the other's bytes as whatever it expected.
 func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, bool) {
 	t.Helper()
 	var key uint32
@@ -661,8 +550,6 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 					value = 1
 				}
 			case msgSelectState:
-				// A word rather than a number. Callers that want it use
-				// selectReading; this one only needs the key.
 			default:
 				value = math.Float32frombits(uint32(f.num))
 			}
@@ -672,14 +559,9 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 	}); err != nil {
 		t.Fatalf("state did not parse: %v", err)
 	}
-	// The key is fixed32 on both messages. Sent as a varint it decodes to the
-	// same number here and to nothing at all in Home Assistant, which skips the
-	// field it cannot read and files every reading under key zero.
 	if seen[1] != wireFixed32 {
 		t.Errorf("the key went out as wire type %d, want fixed32 (%d)", seen[1], wireFixed32)
 	}
-	// Each state message encodes its value differently, and the wrong wire type
-	// is a field Home Assistant skips rather than an error either end sees.
 	want := wireFixed32
 	switch msgType {
 	case msgBinarySensorState, msgSwitchState:
@@ -693,8 +575,6 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 	return key, value, missing
 }
 
-// The volumes reader, from a speaker-level function. The jack is held still, so
-// a test that moves the speaker sees one push rather than two.
 func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
 	return func() device.MusicVolume {
 		v, ok := read()
@@ -702,9 +582,6 @@ func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
 	}
 }
 
-// Every sensor the server pushes, stubbed to a value nothing else would
-// produce, so a reading filed under the wrong key is visible rather than
-// plausible. A sensor added later is a line here and a line in want().
 func stubSensors(s *Server) map[uint32]float32 {
 	s.uptime = func() (float32, bool) { return 1234, true }
 	s.wifi = func() (float32, bool) { return -48, true }
@@ -716,11 +593,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
 	s.micMute = func() (bool, bool) { return false, true }
-	// A reader of the device like the rest, and stubbed for the same reason:
-	// the container the tests run in has a /proc/net/tcp of its own.
 	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
-	// Not a reader of the device, so it is left at the shipped default rather
-	// than stubbed: what the tests below count is reads, and this is not one.
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
@@ -730,17 +603,8 @@ func stubSensors(s *Server) map[uint32]float32 {
 	}
 }
 
-// How many readings a subscriber's snapshot carries once everything has been
-// polled. A constant rather than a call: the tests that count device reads stub
-// the readers, so anything that asks the server how many sensors it has would
-// be counted as a read of its own. TestTheSensorCountMatchesTheListing keeps it
-// honest. It counts the entities that carry a state, which is the listing less
-// the action button: an event is not replayed to a subscriber, so no snapshot
-// ever carries one.
 const sensorCount = 12
 
-// What the two pollers put into the published state, without their tickers.
-// Returns what they changed, for the tests that care.
 func pollAll(s *Server) []reading {
 	changed := s.publish("sensors", s.readTicked())
 	changed = append(changed, s.publish("live", s.readLive())...)
@@ -764,9 +628,6 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Counted rather than ranged: deleting from a map inside a range over it
-	// may end the loop early, which read one message instead of two and failed
-	// two runs in five.
 	for n := len(want); n > 0; n-- {
 		msgType, payload, err := c.recv()
 		if err != nil {
@@ -796,13 +657,6 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 	}
 }
 
-// A reading that could not be taken is sent and flagged, not sent as zero and
-// not left out. Zero is a plausible value for every one of them, and Home
-// Assistant would draw it as a measurement; the jack is the worst of the seven,
-// because false there is "nothing is plugged in" rather than an obvious absence.
-// Leaving it out is no better once a value has been published, because the old
-// one stays on screen as though it were current. missing_state is the field the
-// protocol has for exactly this.
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
 		"cpu_temperature", "memory_available", "audio_jack", "speaker_playing"} {
@@ -879,10 +733,6 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	}
 }
 
-// The minute tick is what keeps the uptime and the signal fresh, and nothing
-// else reads them. The three on the short tick must not ride along: they are
-// published when they change, and a minute tick repeating them would undo
-// that.
 func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -905,10 +755,6 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 		}
 	}
 
-	// Every reading moves, so anything the tick carries arrives and anything it
-	// does not carry is visibly absent. action_button_mode is on this tick too and
-	// deliberately stands still: it is not a reading of the device, and what
-	// this is measuring is which reads the tick repeats.
 	s.uptime = func() (float32, bool) { return 5678, true }
 	s.wifi = func() (float32, bool) { return -70, true }
 	s.volumes = speakerReads(func() (float32, bool) { return 90, true })
@@ -916,9 +762,6 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	s.memory = func() (float32, bool) { return 64.5, true }
 	s.publish("sensors", s.readTicked())
 
-	// A ping behind the tick. One queue per connection and in order, so the
-	// answer arriving marks the end of what the tick sent, and anything from
-	// the short tick would have had to arrive first.
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -953,10 +796,6 @@ func TestTheMinuteTickCarriesOnlyItsOwnSensors(t *testing.T) {
 	}
 }
 
-// aioesphomeapi pings only when it has not heard from the device, and cancels
-// the pending one on any message. A device that talks often enough is never
-// pinged, and a read deadline waiting for that ping expires on a connection
-// that is working. So the deadline is satisfied by a ping of our own.
 func TestAQuietConnectionIsPingedRatherThanDropped(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -969,8 +808,6 @@ func TestAQuietConnectionIsPingedRatherThanDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One message first: the longer deadline is bought by a frame that decrypts,
-	// not by finishing the handshake, and until then the handshake budget runs.
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -978,8 +815,6 @@ func TestAQuietConnectionIsPingedRatherThanDropped(t *testing.T) {
 		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
 	}
 
-	// Then say nothing at all, twice over, answering each ping. A client that only
-	// ever answers is one the deadline must not drop.
 	for round := 1; round <= 2; round++ {
 		msgType, _, err := c.recv()
 		if err != nil {
@@ -994,8 +829,6 @@ func TestAQuietConnectionIsPingedRatherThanDropped(t *testing.T) {
 	}
 }
 
-// The ping is asked once. A peer that will not answer it is gone, and the
-// budget it is gone after is ESPHome's, two and a half pings.
 func TestAPeerThatWillNotAnswerThePingIsDropped(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1018,33 +851,23 @@ func TestAPeerThatWillNotAnswerThePingIsDropped(t *testing.T) {
 		t.Fatalf("no ping arrived: type %d, %v", msgType, err)
 	}
 
-	// Answer nothing. The next deadline has no second ping to spend.
 	if _, _, err := c.recv(); err == nil {
 		t.Error("a peer that never answered the ping was still connected")
 	}
 }
 
-// ESPHome's own shape: its device pings after KEEPALIVE_TIMEOUT_MS of silence
-// and gives up at two and a half times it, so a client that is slow to answer
-// is given longer than one that has merely gone quiet.
 func TestTheKeepaliveBudgetMatchesESPHome(t *testing.T) {
 	if pingAfter != 60*time.Second {
 		t.Errorf("pingAfter is %v, want ESPHome's KEEPALIVE_TIMEOUT_MS of 60s", pingAfter)
 	}
-	// The literal, not pingAfter*5/2: that would restate the line that defines
-	// idleWait and could not fail.
 	if idleWait != 150*time.Second {
 		t.Errorf("idleWait is %v, want ESPHome's KEEPALIVE_DISCONNECT_TIMEOUT of 150s", idleWait)
 	}
 
-	// What a Dot actually runs with. Every other test here shrinks pingWait, so
-	// without this nothing reads what NewServer sets.
 	if live := NewServer("dot", "model", "00:00:5E:00:53:00", make([]byte, noisePSKLen)); live.pingWait != 60*time.Second {
 		t.Errorf("NewServer starts a connection on %v, want %v", live.pingWait, pingAfter)
 	}
 
-	// The two waits the read loop actually spends have to add up to that budget,
-	// or the constant documents a timeout the code does not keep.
 	s := &Server{pingWait: pingAfter}
 	if spent := s.readWait(false) + s.readWait(true); spent != idleWait {
 		t.Errorf("the read loop spends %v before it gives up, want %v", spent, idleWait)
@@ -1054,10 +877,6 @@ func TestTheKeepaliveBudgetMatchesESPHome(t *testing.T) {
 	}
 }
 
-// The ping is for a peer that has proved it holds the key and then gone quiet.
-// A peer that finishes the handshake and sends nothing has proved nothing --
-// message 1 replays verbatim -- and gets the handshake budget and no more. Ping
-// it and that budget doubles, which is a slot held twice as long for free.
 func TestAPeerThatHasProvedNothingIsNotPinged(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1072,7 +891,6 @@ func TestAPeerThatHasProvedNothingIsNotPinged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Say nothing. The handshake budget runs out and that is the whole of it.
 	start := time.Now()
 	msgType, _, err := c.recv()
 	took := time.Since(start)
@@ -1082,28 +900,12 @@ func TestAPeerThatHasProvedNothingIsNotPinged(t *testing.T) {
 	if msgType == msgPingRequest {
 		t.Error("a peer that never decrypted a frame was pinged, which buys it a second deadline")
 	}
-	// Which end hung up matters as much as that one did: the client carries a
-	// deadline of its own, and without this the test passes against a server
-	// that holds the slot for ever.
 	if took > 3*s.handshakeWait {
 		t.Errorf("the connection lasted %v, well past the %v budget: the client's own deadline ended it, not the server",
 			took, s.handshakeWait)
 	}
 }
 
-// The asymmetry is spent on the client: a peer that has been asked something
-// waits longer than one that has merely gone quiet. Measured as one span from a
-// single mark rather than as two intervals either side of the ping, because
-// those two are anti-correlated -- noticing the ping late inflates the first and
-// shrinks the second by the same amount, so a scheduling hiccup of a few tens of
-// milliseconds fails an honest server. This span only ever grows.
-//
-// A whole second rather than the milliseconds the other tests use, because the
-// band has to separate 2.5 from the 3 a hard-coded readWait(true) spends, and
-// what a loaded machine adds is a fixed number of milliseconds rather than a
-// proportion. Measured under one emulated ARM cpu against eight busy ones, a
-// truthful run reached 2.99 at 300ms, which is inside the mutant. Widening the
-// band cannot fix that and scaling it can.
 func TestTheWaitAfterThePingIsSpentOnTheClient(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1132,21 +934,12 @@ func TestTheWaitAfterThePingIsSpentOnTheClient(t *testing.T) {
 	}
 	lived := time.Since(start)
 
-	// Two and a half pingWaits. Hard-coding either branch of readWait at the call
-	// site gives two (both short) or three (both long), and the band is wide
-	// enough that only those land outside it.
 	if low, high := s.pingWait*11/5, s.pingWait*14/5; lived < low || lived > high {
 		t.Errorf("a quiet connection lasted %v, want about %v (between %v and %v): the two waits are not %v then half again",
 			lived, s.pingWait*5/2, low, high, s.pingWait)
 	}
 }
 
-// The ping takes over a read that expired, so it may only do so when that read
-// took nothing off the socket. io.ReadFull copies what it got into a buffer the
-// caller drops with the error, so retrying a frame that stopped part-way reads
-// the rest of it as a fresh header and every frame after that is garbage. Both
-// of the reads it makes can stop that way, and the payload one always has the
-// header behind it.
 func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1175,7 +968,6 @@ func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
 				t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
 			}
 
-			// A whole valid frame, of which the server is given only the front.
 			inner := make([]byte, 4)
 			binary.BigEndian.PutUint16(inner[0:2], uint16(msgPingRequest))
 			sealed, err := c.out.Encrypt(nil, nil, inner)
@@ -1189,15 +981,10 @@ func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
 			if tc.sent >= len(frame) {
 				t.Fatalf("the frame is only %d bytes, so %d of it is all of it", len(frame), tc.sent)
 			}
-			// Inside pingWait of the server's last read, or the stall under test is
-			// the wait rather than the frame. One small encrypt stands between the
-			// two, so the margin is wide.
 			if _, err := c.conn.Write(frame[:tc.sent]); err != nil {
 				t.Fatal(err)
 			}
 
-			// The deadline now expires part-way through. Answering it with a ping
-			// would leave the server inside a frame it can never resynchronise.
 			msgType, _, err := c.recv()
 			if err == nil {
 				t.Fatalf("a half-read frame was answered with message type %d rather than dropped", msgType)
@@ -1205,8 +992,6 @@ func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
 			if msgType == msgPingRequest {
 				t.Error("the server pinged part-way through a frame, so the rest of it becomes a header")
 			}
-			// The operator's only signal. Blaming the peer for a lead byte this end
-			// lost is the failure the mark exists to prevent being reported as.
 			if said := out.String(); !strings.Contains(said, "mid-frame") {
 				t.Errorf("the log does not say the stream was left mid-frame: %s", said)
 			}
@@ -1214,17 +999,11 @@ func TestAFrameThatStoppedPartWayIsNotResumed(t *testing.T) {
 	}
 }
 
-// Only a deadline is a peer that has gone quiet. Every other read error is a
-// peer that said something wrong, and pinging it spends the one ping this
-// connection has on a question already answered.
 func TestOnlyAnExpiredReadDrawsAPing(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
-	// Under the client's own deadline, so a drop this test sees is the server's,
-	// and far enough above an immediate one that a ping could not be mistaken for
-	// the error's doing.
 	s := testServer(t, psk)
 	s.pingWait = 2 * time.Second
 
@@ -1239,8 +1018,6 @@ func TestOnlyAnExpiredReadDrawsAPing(t *testing.T) {
 		t.Fatalf("the server did not answer a ping: type %d, %v", msgType, err)
 	}
 
-	// A frame that will not decrypt. The deadline is ten seconds away, so a ping
-	// arriving here came from the error rather than from silence.
 	if err := writeNoiseFrame(c.w, []byte("not sealed under the key at all")); err != nil {
 		t.Fatal(err)
 	}
@@ -1257,15 +1034,11 @@ func TestOnlyAnExpiredReadDrawsAPing(t *testing.T) {
 	if msgType == msgPingRequest {
 		t.Error("a peer that sent an undecryptable frame was pinged rather than dropped")
 	}
-	// The error ends it, so it ends at once. Left unbounded this passes on any
-	// deadline that happens to expire later, the client's included.
 	if took > s.pingWait/2 {
 		t.Errorf("the drop took %v, long enough that a deadline ended it rather than the frame", took)
 	}
 }
 
-// Read every tick, sent only when it moves. The uptime changes on every read
-// and the signal does not, so what a quiet minute costs is the read alone.
 func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1281,8 +1054,6 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Nothing is published yet, so the snapshot is empty and the first poll is
-	// what fills it.
 	pollAll(s)
 	for n := 0; n < len(want); n++ {
 		if _, _, err := c.recv(); err != nil {
@@ -1290,14 +1061,12 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 		}
 	}
 
-	// The others are held still, so every push below is the signal's.
 	s.uptime = func() (float32, bool) { return 1234, true }
 	s.volumes = speakerReads(func() (float32, bool) { return 40, true })
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	reads := func(v float32, ok bool) { s.wifi = func() (float32, bool) { return v, ok } }
 	signal := func() []reading { return pollAll(s) }
 
-	// stubSensors reads -48, so that is what the first poll above published.
 	reads(-55, true)
 	if got := signal(); len(got) != 1 {
 		t.Fatal("a changed signal was not published")
@@ -1321,9 +1090,6 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 		}
 	}
 
-	// A read that starts failing is a change even when the number it returns is
-	// the one already published, or a signal that reached zero and then became
-	// unreadable stays on screen as a real zero.
 	reads(0, true)
 	signal()
 	if _, _, err := c.recv(); err != nil {
@@ -1340,9 +1106,6 @@ func TestAReadingIsPublishedOnlyWhenItChanges(t *testing.T) {
 	}
 }
 
-// Nothing published is not the same as a published zero. A reading of zero that
-// could not be taken at all is the zero value in both fields, and it is the
-// first thing a Dot with no volume to read would have to say.
 func TestAnUnreadableFirstReadingIsStillPublished(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1356,11 +1119,6 @@ func TestAnUnreadableFirstReadingIsStillPublished(t *testing.T) {
 	}
 }
 
-// The defect that makes the published state a single thing: two readers of the
-// device put a subscriber permanently out of step. The snapshot must replay
-// what was published rather than take a reading of its own, or a value it alone
-// saw is one the poll will never correct. Reproduced on the Dot with the volume
-// before this was written, which is the reading a user turns and turns back.
 func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1370,10 +1128,8 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 	stubSensors(s)
 	s.uptime = func() (float32, bool) { return 1234, true }
 
-	// Published: 40.
 	pollAll(s)
 
-	// Turned to 50 between ticks, and a subscriber arrives inside that window.
 	s.volumes = speakerReads(func() (float32, bool) { return 50, true })
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -1393,7 +1149,6 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 		}
 	}
 
-	// Turned back before the next tick, so the poll sees no change at all.
 	s.volumes = speakerReads(func() (float32, bool) { return 40, true })
 	if got := pollAll(s); len(got) != 0 {
 		t.Fatal("the poll published; this test no longer covers the case it was written for")
@@ -1404,8 +1159,6 @@ func TestASubscriberIsNeverLeftHoldingAValueThePollWillNotCorrect(t *testing.T) 
 	}
 }
 
-// A writer that records whether the server lock was held while a line was
-// written to it.
 type lockWatchingWriter struct {
 	s      *Server
 	mu     sync.Mutex
@@ -1425,9 +1178,6 @@ func (w *lockWatchingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// The lock gates the accept path and every other connection's handler, so a
-// write to /data underneath it stalls the server. publish is where that rule
-// now lives for every reading, which is the whole reason it is one function.
 func TestPublishLogsWhatItCouldNotSendAfterDroppingTheLock(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	w := &lockWatchingWriter{s: s}
@@ -1435,8 +1185,6 @@ func TestPublishLogsWhatItCouldNotSendAfterDroppingTheLock(t *testing.T) {
 	log.SetOutput(w)
 	defer log.SetOutput(was)
 
-	// A subscriber whose queue is already full, so the send fails and the
-	// failure has to be reported.
 	near, far := net.Pipe()
 	t.Cleanup(func() { near.Close(); far.Close() })
 	stalled := &conn{sock: fakeAddr{Conn: near}, out: make(chan frame), states: true}
@@ -1456,15 +1204,11 @@ func TestPublishLogsWhatItCouldNotSendAfterDroppingTheLock(t *testing.T) {
 	}
 }
 
-// eachConn drops a connection whose send failed, and it can only know to do
-// that if sendSensorsAt stops at the first failure and says so. Carrying on
-// would leave a subscriber holding some of a push and still in the table.
 func TestAFailedSendDropsTheConnectionRatherThanContinuing(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	// Room for one frame, and two readings to send.
 	near, far := net.Pipe()
 	t.Cleanup(func() { near.Close(); far.Close() })
 	stalled := &conn{sock: fakeAddr{Conn: near}, out: make(chan frame, 1), states: true}
@@ -1484,18 +1228,11 @@ func TestAFailedSendDropsTheConnectionRatherThanContinuing(t *testing.T) {
 	if still {
 		t.Error("a connection that could not take a whole push is still in the table")
 	}
-	// The scenario rather than the behaviour: a queue that refused the first
-	// frame too would make the drop above prove nothing about stopping. What
-	// carries this test is the connection being gone.
 	if n := len(stalled.out); n != 1 {
 		t.Errorf("the stalled connection was queued %d frames, so this is not the case the test means to cover", n)
 	}
 }
 
-// The read forks a process, so it is not made while nothing is listening -- and
-// a connection that has not subscribed is not listening either. What makes that
-// safe is that subscribing wakes the poll rather than reading for itself, so
-// the tick here is long enough that only the wake can deliver in time.
 func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1513,9 +1250,6 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 		return 40, true
 	})
 
-	// Connected before the poll starts, and saying nothing: the poll's first
-	// look has a connection to see, and a poll that reads for one that has not
-	// subscribed is reading for nobody.
 	c, err := dial(t, s, psk)
 	if err != nil {
 		t.Fatal(err)
@@ -1533,8 +1267,6 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Nothing has published at all, so this can only arrive because subscribing
-	// woke the poll: the next tick is thirty seconds away.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		msgType, payload, err := c.recv()
@@ -1551,10 +1283,6 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 	t.Error("subscribing did not wake the volume poll, so the reading waits for a tick that is half a minute away")
 }
 
-// The wake is what lets the poll sleep, so asking for it has to cost nothing
-// after the first time. The volume read forks a process, and a peer holding the
-// key can send SubscribeStatesRequest as fast as it likes: repeating the wake
-// would hand it a fork per request, on a device with 512 MiB of memory.
 func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1576,7 +1304,6 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Ticks far enough away that only a wake can cause a read.
 	go s.PollLive(time.Hour)
 	go s.PollSensors(time.Hour)
 
@@ -1592,8 +1319,6 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 		}
 	}
 
-	// The first one is allowed to wake both polls; what it costs is not the
-	// point here, so it is measured rather than assumed.
 	ask(0)
 	time.Sleep(300 * time.Millisecond)
 	mu.Lock()
@@ -1617,24 +1342,15 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	}
 }
 
-// The snapshot replays what was published, so a subscriber arriving between
-// ticks is answered with a value up to a whole tick old. Waking the sensor poll
-// as well as the volume one is what keeps that to a read rather than to a
-// minute.
 func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
-	// The wake this is about is gated by the same gap PollLive's is, so a
-	// subscribe arriving a moment after the poll's own first read would be
-	// skipped at the shipped second.
 	s.wakeGap = 10 * time.Millisecond
 	want := stubSensors(s)
 
-	// The reading moves, not the function: PollSensors calls this from its own
-	// goroutine, so swapping s.uptime underneath it is a race on the field.
 	var mu sync.Mutex
 	uptime := want[s.keyUptime]
 	read := make(chan struct{}, 1)
@@ -1654,15 +1370,9 @@ func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Started, and parked on a tick an hour away, while the reading is still the
-	// published one: its own first publish must not be what delivers the new
-	// value, or this passes without any wake at all. Waited for rather than
-	// slept past, because a sleep that a loaded machine outruns turns this into
-	// a test that passes with the wake deleted.
 	go s.PollSensors(time.Hour)
 	<-read
 
-	// Only now does the device move on.
 	mu.Lock()
 	uptime = 9999
 	mu.Unlock()
@@ -1670,8 +1380,6 @@ func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// The deadline is the client's, so a wake that never comes ends this rather
-	// than the loop spinning until dial's own five seconds run out.
 	if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -1686,9 +1394,6 @@ func TestSubscribingWakesTheSensorPoll(t *testing.T) {
 	}
 }
 
-// The wake is what starts the poll; the tick is what keeps it going. A poll
-// that only ever woke would read once for each subscriber and never again,
-// which is the headline behaviour of this sensor gone.
 func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1724,7 +1429,6 @@ func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 	before := reads
 	mu.Unlock()
 
-	// Subscribed once, then left alone. Only the ticker can read now.
 	go s.PollLive(20 * time.Millisecond)
 	time.Sleep(400 * time.Millisecond)
 
@@ -1736,10 +1440,6 @@ func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 	}
 }
 
-// The expensive readings ride one tick in HeavyEvery, not every tick. Without
-// the split this reads on all of them, which is the fork this separation exists
-// to stop paying for: the count is compared against the ticks that actually
-// elapsed rather than a fixed number, because a loaded runner delivers fewer.
 func TestTheExpensiveReadingsSkipMostTicks(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1794,9 +1494,6 @@ func TestTheExpensiveReadingsSkipMostTicks(t *testing.T) {
 	}
 }
 
-// Sound rides its own divisor: oftener than the fork, and not on every tick
-// either. Both counts come from the one run, so a slow runner moves them
-// together and the ratio between them is what is asserted.
 func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1850,15 +1547,11 @@ func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 		t.Fatalf("sound read %d times and the expensive readings %d; neither should be zero",
 			sound, heavy)
 	}
-	// Equal counts mean the divisors are not being applied separately.
 	if sound <= heavy {
 		t.Errorf("sound read %d times and the expensive readings %d in %d ticks; sound is on "+
 			"every %d ticks and they are on every %d, so it should be the larger",
 			sound, heavy, ticks, SoundEvery, HeavyEvery)
 	}
-	// HeavyEvery over SoundEvery is how much oftener sound should run. Half of
-	// that is the floor, so a slow runner does not fail it and a divisor that
-	// stopped being applied does.
 	if ratio := HeavyEvery / SoundEvery; sound < heavy*ratio/2 {
 		t.Errorf("sound read %d times and the expensive readings %d; sound is on every %d "+
 			"ticks against their %d, so it should be about %d times as many",
@@ -1866,17 +1559,7 @@ func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 	}
 }
 
-// Which message a state goes out as is not a detail: Home Assistant registers
-// audio_jack and speaker_playing from ListEntitiesBinarySensor, and a state
-// arriving as SensorStateResponse carries a float under a key it filed as a
-// binary sensor. The entity lists and then never moves, which is silent. The
-// tests that receive every state accept either message, so this is the one that
-// says which key must arrive as which.
 func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
-	// readSound returns from two places and only one is on the happy path, so a
-	// missing state can go out under the wrong message while every good one is
-	// right. Both are driven, and the snapshot a subscriber gets is what
-	// carries them, so the reader is set before the poll.
 	for _, tt := range []struct {
 		name  string
 		sound func() (bool, bool)
@@ -1891,10 +1574,6 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 			psk := testPSK(t)
 			s := testServer(t, psk)
 			want := stubSensors(s)
-			// Everything not named here is a plain sensor. Home Assistant
-			// files a state by the key inside it and reads that key's fields
-			// by number, so one sent under the wrong message is read as
-			// whatever those numbers mean there.
 			elsewhere := map[uint32]struct {
 				name    string
 				msgType int
@@ -1947,12 +1626,6 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 	}
 }
 
-// PollLive arms the gap guard, and that assignment is the only place it is ever
-// set. Nothing else observes it, so a wrong value is silent in both directions:
-// too small and every ordinary sample looks late, which zeroes the on clock on
-// every reading and means the entity can never report playing at all; absent
-// and the guard is dead code. Both are states the rest of the suite is happy
-// with, so this checks the wiring and then checks it still reports.
 func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -1969,8 +1642,6 @@ func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The poll sleeps while nothing is subscribed, so without this it publishes
-	// nothing and the test would blame the guard for the gate.
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1997,9 +1668,6 @@ func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
 		"so every reading looks late and the on clock never accumulates", gap, tick*SoundEvery)
 }
 
-// A subscriber is answered from the published state, so something has to have
-// published before the first tick comes round: a Dot whose sensor tick is a
-// minute would otherwise answer its first subscriber with nothing at all.
 func TestTheSensorPollPublishesBeforeItsFirstTick(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2017,9 +1685,6 @@ func TestTheSensorPollPublishesBeforeItsFirstTick(t *testing.T) {
 	}
 }
 
-// Only what changed goes on the wire, not the whole batch it arrived in. The
-// volume publishes one reading at a time, so this needs the two the minute tick
-// carries together.
 func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2042,7 +1707,6 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 		}
 	}
 
-	// One of the two moves; the other is exactly what was published.
 	s.publish("sensors", []reading{
 		{key: s.keyUptime, value: 4321, ok: true},
 		{key: s.keyWifi, value: stubSensors(s)[s.keyWifi], ok: true},
@@ -2051,8 +1715,6 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A ping behind the push: one queue per connection and in order, so the
-	// answer marks the end of what the push sent.
 	for {
 		msgType, payload, err := c.recv()
 		if err != nil {
@@ -2068,10 +1730,6 @@ func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
 	}
 }
 
-// A subscriber is answered from the published state, so it needs a reading of
-// its own only when there was nobody to keep that state current. With one
-// already subscribed the polls have been running, and another connection is
-// answered for free however many of them arrive.
 func TestASecondSubscriberCostsNoReading(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2091,8 +1749,6 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 	})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return reads }
 
-	// A tick far away, so a read here is one a connection asked for; and a gap
-	// short enough that it is the idle check, not the gap, deciding.
 	s.wakeGap = 10 * time.Millisecond
 	go s.PollLive(time.Hour)
 	time.Sleep(100 * time.Millisecond)
@@ -2132,11 +1788,6 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 	}
 }
 
-// Waking is for the idle case, so what is left of it is a peer that keeps
-// making itself the idle case: connect, subscribe, leave, repeat. Each cycle
-// would otherwise be a fork, at whatever rate handshakes can be done. The gap
-// is what bounds that, and it bounds the wake alone -- the tick is a cadence
-// somebody chose.
 func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2160,7 +1811,6 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 	go s.PollLive(time.Hour)
 	time.Sleep(100 * time.Millisecond)
 
-	// Subscribe, then go away again, twice over, well inside the gap.
 	churn := func(round int) {
 		c, err := dial(t, s, psk)
 		if err != nil {
@@ -2176,8 +1826,6 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 		}
 		time.Sleep(80 * time.Millisecond)
 		c.conn.Close()
-		// Wait for the server to notice, so the next round is the idle case
-		// again rather than a second subscriber.
 		for i := 0; i < 100; i++ {
 			if !s.anyStateSubscriber() {
 				return
@@ -2202,9 +1850,6 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 	}
 }
 
-// Every sensor that is listed is a sensor something has to read. A listing and
-// a set of polls that disagree leave an entity that exists and never gets a
-// state: unavailable in Home Assistant, and green in every other test here.
 func TestEveryListedSensorHasAPollThatPublishesIt(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2244,9 +1889,6 @@ func TestEveryListedSensorHasAPollThatPublishesIt(t *testing.T) {
 	}
 }
 
-// time.NewTicker panics on a tick that is not positive, and PollLive has no
-// MinSensorTick to have stopped one. A panic here takes the daemon down, and
-// the supervisor brings it back to do the same again five seconds later.
 func TestTheLivePollSurvivesATickThatIsNotPositive(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2264,10 +1906,6 @@ func TestTheLivePollSurvivesATickThatIsNotPositive(t *testing.T) {
 	t.Errorf("a tick of zero was accepted; the log says %q", out.String())
 }
 
-// The told flag, which every real key hides: entityKey is a hash and none of
-// them is zero, so a reading that is the zero value in every field is the only
-// thing that can tell "published" from "never published" apart. Without the
-// flag it reads as already published and is never sent at all.
 func TestAReadingThatIsZeroInEveryFieldIsStillPublished(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2281,11 +1919,6 @@ func TestAReadingThatIsZeroInEveryFieldIsStillPublished(t *testing.T) {
 	}
 }
 
-// A wake is sent with the server lock held, so it must never block. A bare send
-// would deadlock the whole server: handle would hold the lock against every
-// other connection and the accept path, while the poll that drains the channel
-// is itself waiting on that lock inside publish. Nothing else here can see
-// that, because every other test sends one wake into an empty buffer.
 func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2294,7 +1927,6 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 	s := testServer(t, psk)
 	stubSensors(s)
 
-	// Both filled, with no poll running to drain either.
 	s.sensorWake <- struct{}{}
 	s.liveWake <- struct{}{}
 
@@ -2305,8 +1937,6 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// A ping behind the subscribe: one queue per connection and in order, so an
-	// answer to it is the handler having come back from the wake.
 	if err := c.send(msgPingRequest, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -2324,9 +1954,6 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 	}
 }
 
-// The drain counts in this file are written against sensorCount, and a sensor
-// added without moving it would leave every one of them one frame short --
-// which surfaces as an unrelated test hanging on a read, rather than as this.
 func TestTheSensorCountMatchesTheListing(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	if got := len(listedWithState(t, s)); got != sensorCount {
@@ -2334,9 +1961,6 @@ func TestTheSensorCountMatchesTheListing(t *testing.T) {
 	}
 }
 
-// The jack is published the same way every other reading is: once, when it
-// changes. That is the state change an automation triggers on, and it has to
-// arrive as a binary sensor state rather than as a sensor state carrying 1.
 func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2362,7 +1986,6 @@ func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 		}
 	}
 
-	// Unplugged, then polled twice: the change goes out once.
 	occupied = false
 	if got := pollAll(s); len(got) != 1 {
 		t.Fatalf("unplugging published %d readings, want 1", len(got))
@@ -2385,7 +2008,6 @@ func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 			key, value, missing, s.keyJackOn)
 	}
 
-	// And plugged back in.
 	occupied = true
 	if got := pollAll(s); len(got) != 1 {
 		t.Fatalf("plugging in published %d readings, want 1", len(got))
@@ -2399,8 +2021,6 @@ func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 	}
 }
 
-// A jack that cannot be read is reported as missing rather than as unplugged,
-// because unplugged is a state somebody would act on.
 func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2424,14 +2044,6 @@ func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
 	t.Error("the live poll carries no jack reading at all")
 }
 
-// The reading a subscriber is answered from is not the one the poll is holding,
-// and the gap between them is where this went wrong. A subscriber is sent the
-// published state before anything fresh is read, so a value left there by the
-// last subscriber is the first thing a returning Home Assistant is told. For
-// this entity that is a speaker reported as playing and then corrected, which
-// fires whatever was triggered on it turning on. Driven through real
-// connections because neither half shows it alone: the hysteresis is reset
-// either way, and the published state is only wrong once somebody reads it.
 func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -2444,8 +2056,6 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 
 	go s.PollLive(5 * time.Millisecond)
 
-	// Waits for the speaker to be reported as playing, and answers with the
-	// first reading of it this client was sent.
 	firstSound := func(c *client, want float32, what string) {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
@@ -2477,8 +2087,6 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 	if err := gone.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// It starts off and turns on once the sound has lasted, which is the state
-	// that must not outlive this connection.
 	firstSound(gone, 0, "the first subscriber")
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -2498,7 +2106,6 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 		}
 	}
 
-	// Home Assistant goes away. The speaker never stops.
 	gone.conn.Close()
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
@@ -2517,17 +2124,9 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 	if err := back.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Off, and then on again a delay later once this connection has watched the
-	// sound last. Being told it was already playing is the failure.
 	firstSound(back, 0, "the subscriber that came back")
 }
 
-// Every test in this package replaces these before it runs, so the wiring
-// itself is the one thing none of them sees: a server that reads the wrong
-// device passes the whole suite and ships an entity reporting somebody else's
-// reading under this one's name. sound and jack are the pair that makes this
-// worth holding -- the same signature, two lines apart, and a swap between them
-// is a plausible edit that nothing else here would notice.
 func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
 	for _, tt := range []struct {

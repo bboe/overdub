@@ -63,6 +63,24 @@ to confirm that directory is gone, and is reaped by the trap on any exit that
 happens in between. `uninstall.sh` removes that directory too, because a copy
 left there is the live key and nothing else would ever look for it.
 
+The fourth pushed thing is the operator's adb public key, which is what
+`Secure` authenticates against. It is not a secret, and it goes through a `0700`
+directory of ours anyway: `adb push` lands a file `0666` and `/data/local/tmp`
+is `o+x`, so any uid could substitute a key of its own between the push and the
+copy, and the read-back would catch that only after a stranger's key was already
+where the daemon looks. An empty file is the one shape that would pass every
+check, because the read-back greps for the file's own content and an empty
+pattern matches the blank line the device echoes; installed, it would set
+`ro.adb.secure` against a key that authenticates nobody, which reaches USB too
+and locks the operator out of a Dot with no screen to say so. So an empty key is
+refused before anything is pushed.
+
+What this cannot do is revoke. adbd authenticates against
+`/data/misc/adb/adb_keys`, which only the daemon writes and only on `Secure`,
+and `ro.adb.secure` is not persistent -- so an install with no key stops
+`Secure` being offered from here on, and a Dot already in `Secure` keeps
+honouring the key it was given until it reboots.
+
 The daemon waits up to 60 seconds for its input node, because `service.d` runs
 before the input drivers are certainly up. Without the wait a cold boot spends
 its first restarts failing to open a node that is about to exist.

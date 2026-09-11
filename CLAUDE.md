@@ -41,6 +41,32 @@ internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
 internal/evdev     evdev and uinput primitives
 ```
 
+## Comments
+
+The code carries no explanatory comments. Why it is the way it is belongs in
+this file and in `docs/`; how to use it belongs in `README.md`. Do not add prose
+comments back, and do not add one a change makes tempting -- write the paragraph
+into the `docs/` page that already covers the area.
+
+Four things may stay, because the code cannot recover them on its own:
+
+- one doc block per package: `// Package button ...`, `// Command overdub ...`
+- Go and cgo directives: `//go:build`, and `chime_android.go`'s `#cgo` and
+  `#include` preamble. These are compiler input rather than commentary, and
+  deleting one is silent -- a stripped `//go:embed` once left the chime a nil
+  slice with `go build`, `go vet` and `go test -c` all clean, and only running
+  the test said so.
+- a label on a bare number: a protobuf field name
+  (`msg.str(13, s.name) // friendly_name`), an ioctl derivation
+  (`// _IOW('E', 0x90, int)`), the `uinput_user_dev` layout, a byte in a test
+  fixture (`// code = 138`)
+- each shell script's opening usage paragraph
+
+Everything else goes: rationale, measurements, and notes saying a line is
+deliberate rather than an oversight. All of those read better as prose in
+`docs/`, where one page holds the whole argument rather than a sentence of it
+per call site.
+
 ## The rest
 
 `docs/` carries the measurements and the traps. It is imported below, so all of

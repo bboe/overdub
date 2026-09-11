@@ -682,7 +682,6 @@ subscriber on the last published values, including ones that connect afterwards,
 where before this each new subscriber at least took a reading of its own. That
 is why the volume read carries a deadline and the two procfs reads do not.
 
-
 A reading that fails is still sent, with `missing_state` set. Leaving it out was
 the first attempt and it is only right before the first one: afterwards Home
 Assistant keeps drawing the last value it was given, so a radio that has dropped
@@ -1072,6 +1071,14 @@ holding the installed key, because `ro.adb.secure` is 1.
 `ro.adb.secure` is a property init has already frozen, so `setprop` will not
 move it and Magisk's `resetprop` is what does. That is the one thing here that
 needs Magisk rather than root.
+
+The select carries `mdi:console-network` and not the obvious name.
+`mdi:android-debug-bridge` does not exist -- Material Design Icons dropped its
+Android brand icons -- and a name Home Assistant cannot resolve is an error
+nowhere: the field is sent, the frontend finds nothing, and the entity is drawn
+with no icon at all. So icon names are checked against the library rather than
+guessed, and nothing here can test one, because the set of real names lives in
+the frontend.
 
 **Secure is offered only when there is a key to authenticate against.** The
 listing leaves it out, and `setADBLocked` refuses it a second time in case a

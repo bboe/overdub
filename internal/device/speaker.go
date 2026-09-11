@@ -20,11 +20,6 @@ var (
 	pcmGlobbed time.Time
 )
 
-// How long a resolved set of substream paths is trusted. Keeping one forever is
-// what the cost argues for, but a set resolved while ALSA is still registering
-// is readable and non-empty and so would never be reconsidered, and one missing
-// pcm23p reports confident silence for the rest of the boot. A glob a minute is
-// 5.6ms against sampling that costs 2.0ms twice a second.
 var pcmRefresh = time.Minute
 
 var (
@@ -90,9 +85,6 @@ func pcmRunning() (bool, bool) {
 		}
 	}
 	if unread {
-		// A path that has gone is a stale set, and the cache only re-globs an
-		// empty one. Without this a substream disappearing wedges the reading
-		// at no-reading for the rest of the boot.
 		forgetPCMPaths()
 		return false, false
 	}
@@ -110,8 +102,6 @@ var trackLine = regexp.MustCompile(`^\s*(\d+) Tracks(?: of which (\d+) are activ
 func hasOutputTrack(dump []byte) (playing, recognised bool) {
 	var output, counted, sawOutput bool
 	understood := true
-	// Every output thread has to be accounted for, not just one of them: a
-	// dump half of which did not parse is one this no longer understands.
 	endThread := func() {
 		if output && !counted {
 			understood = false
@@ -123,8 +113,6 @@ func hasOutputTrack(dump []byte) (playing, recognised bool) {
 			endThread()
 			output, counted, sawOutput = true, false, true
 		case line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t"):
-			// Any other section at the left margin ends the thread's own
-			// lines, so a track count below it is not the thread's.
 			endThread()
 			output = false
 		case output:
@@ -142,8 +130,6 @@ func hasOutputTrack(dump []byte) (playing, recognised bool) {
 	}
 	endThread()
 	if !sawOutput || !understood {
-		// Half a dump understood is not half an answer: a thread that says
-		// something is playing does not excuse one whose lines did not parse.
 		return false, false
 	}
 	return playing, true
