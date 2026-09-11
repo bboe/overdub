@@ -190,6 +190,57 @@ func TestParseJackVolume(t *testing.T) {
 	}
 }
 
+func TestParseMusicVolumeSteps(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		dump      string
+		max       int
+		speaker   int
+		speakerOK bool
+		jack      int
+		jackOK    bool
+		muted     bool
+	}{
+		{"the Dot as it stands", audioDump, 30, 12, true, 21, true, false},
+		{"above the maximum clamps to it",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 44, 4 (headset): 31\n",
+			30, 30, true, 30, true, false},
+		{"below zero clamps to it, rather than reading as no level at all",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): -1, 4 (headset): -9\n",
+			30, 0, true, 0, true, false},
+		{"a muted stream still names the step it will return to",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n" +
+				"   Current: 2 (speaker): 15, 4 (headset): 9\n", 30, 15, true, 9, true, true},
+		{"no maximum, no step and no scale",
+			"- STREAM_MUSIC:\n   Current: 2 (speaker): 15\n", 0, 0, false, 0, false, false},
+		{"a route that is not listed has no step",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 15\n", 30, 15, true, 0, false, false},
+		{"the headphone step when there is no headset",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12, 8 (headphone): 15\n",
+			30, 12, true, 15, true, false},
+		{"a scale with no route to apply it to is not a reading",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 1000000 (speaker_safe): 3\n",
+			0, 0, false, 0, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			v := parseMusicVolumes(tt.dump)
+			if v.Max != tt.max || v.SpeakerStep != tt.speaker || v.JackStep != tt.jack {
+				t.Errorf("max = %d, speaker = %d, jack = %d; want %d, %d, %d",
+					v.Max, v.SpeakerStep, v.JackStep, tt.max, tt.speaker, tt.jack)
+			}
+			if v.SpeakerOK != tt.speakerOK || v.JackOK != tt.jackOK {
+				t.Errorf("read speaker = %v, jack = %v; want %v, %v",
+					v.SpeakerOK, v.JackOK, tt.speakerOK, tt.jackOK)
+			}
+			if v.Muted != tt.muted {
+				t.Errorf("muted = %v, want %v: the mute is a fact of its own, and a caller "+
+					"reading it back out of a zeroed percentage cannot tell it from a level "+
+					"somebody turned down", v.Muted, tt.muted)
+			}
+		})
+	}
+}
+
 func TestParseJackSwitch(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

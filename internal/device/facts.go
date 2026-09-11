@@ -159,10 +159,14 @@ var (
 func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
 
 type MusicVolume struct {
-	Speaker   float32
-	SpeakerOK bool
-	Jack      float32
-	JackOK    bool
+	Max         int
+	Muted       bool
+	Speaker     float32
+	SpeakerStep int
+	SpeakerOK   bool
+	Jack        float32
+	JackStep    int
+	JackOK      bool
 }
 
 func MusicVolumes() MusicVolume {
@@ -181,6 +185,10 @@ func parseMusicVolumes(dump string) MusicVolume {
 	muted, sawMute := false, false
 	var found MusicVolume
 	done := func() MusicVolume {
+		if !found.SpeakerOK && !found.JackOK {
+			return MusicVolume{}
+		}
+		found.Muted = muted
 		if muted {
 			if found.SpeakerOK {
 				found.Speaker = 0
@@ -228,11 +236,14 @@ func parseMusicVolumes(dump string) MusicVolume {
 			if max <= 0 {
 				return MusicVolume{}
 			}
-			found.Speaker, found.SpeakerOK = devicePercent(trimmed, max, "speaker")
-			found.Jack, found.JackOK = devicePercent(trimmed, max, "headset")
+			found.Max = max
+			found.SpeakerStep, found.SpeakerOK = deviceStep(trimmed, max, "speaker")
+			found.Speaker = stepPercent(found.SpeakerStep, max)
+			found.JackStep, found.JackOK = deviceStep(trimmed, max, "headset")
 			if !found.JackOK {
-				found.Jack, found.JackOK = devicePercent(trimmed, max, "headphone")
+				found.JackStep, found.JackOK = deviceStep(trimmed, max, "headphone")
 			}
+			found.Jack = stepPercent(found.JackStep, max)
 			continue
 		}
 	}
@@ -242,7 +253,7 @@ func parseMusicVolumes(dump string) MusicVolume {
 	return done()
 }
 
-func devicePercent(current string, max int, name string) (float32, bool) {
+func deviceStep(current string, max int, name string) (int, bool) {
 	level, ok := deviceLevel(current, name)
 	if !ok {
 		return 0, false
@@ -253,8 +264,10 @@ func devicePercent(current string, max int, name string) (float32, bool) {
 	if level > max {
 		level = max
 	}
-	return float32(level) * 100 / float32(max), true
+	return level, true
 }
+
+func stepPercent(step, max int) float32 { return float32(step) * 100 / float32(max) }
 
 var jackSwitchPath = "/sys/class/switch/h2w/state"
 

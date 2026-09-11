@@ -440,6 +440,25 @@ both, and costs far less: measured on the Dot, three hundred `dumpsys audio`
 calls took four seconds, about thirteen milliseconds each, against 546ms for one
 `settings get`.
 
+**The reading carries the step as well as the percentage**, and the maximum it
+was scaled by. A percentage is what Home Assistant is told. A step is what a
+volume *change* has to start from, because the only way to move this Dot's level
+is a key press, and a key press moves one step. Deriving the step back out of the
+percentage would work at this scale and is still the wrong way round: it puts a
+rounding between the number that was read and the number a change is counted
+against, and the maximum is already on the same read as the level.
+
+The maximum travels with the steps and only with them. A dump that declares a
+scale and then names no route this parser can use reports nothing at all, rather
+than a scale standing on its own, so nothing downstream can read a maximum as
+evidence that there was a level to scale.
+
+**The mute does not reach the step.** A muted stream reports zero percent,
+because zero is what can be heard, and reports the step its `Current:` line
+names, because that is where a key press starts from. Reporting zero for both
+would have a muted Dot count its way up from a level it is not holding, and
+land as far below the level asked for as the mute was holding back.
+
 The maximum is read out of `- STREAM_MUSIC:` specifically, because every stream
 in that dump carries one and this Dot's `STREAM_ALARM` carries the same 30 -- a
 reader that wandered into the next stream would look right here and be wrong
