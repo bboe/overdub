@@ -33,8 +33,9 @@ instead.
 main.go, serve.go  the flag, the constants, and the wiring
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them
-internal/button    the exclusive grab, the clone, the read loop, and whether
-                   the action key is ours or Alexa's
+internal/button    the exclusive grab, the clone, the read loop, whether the
+                   action key is ours or Alexa's, and the volume keys pressed
+                   on request
 internal/device    the Dot itself: its network, the firewall rule, network
                    adb, and the microphone mute
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and

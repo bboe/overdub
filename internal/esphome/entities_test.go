@@ -69,7 +69,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	for _, entity := range listed(t, s) {
 		switch entity[0].num {
 		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent),
-			uint64(msgListSwitch):
+			uint64(msgListSwitch), uint64(msgListMediaPlayer):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {

@@ -549,11 +549,15 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 				if f.num != 0 {
 					value = 1
 				}
-			case msgSelectState:
+			case msgSelectState, msgMediaPlayerState:
 			default:
 				value = math.Float32frombits(uint32(f.num))
 			}
 		case 3:
+			if msgType == msgMediaPlayerState {
+				value = math.Float32frombits(uint32(f.num))
+				break
+			}
 			missing = f.num != 0
 		}
 	}); err != nil {
@@ -564,7 +568,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 	}
 	want := wireFixed32
 	switch msgType {
-	case msgBinarySensorState, msgSwitchState:
+	case msgBinarySensorState, msgSwitchState, msgMediaPlayerState:
 		want = wireVarint
 	case msgSelectState:
 		want = wireBytes
@@ -578,7 +582,10 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
 	return func() device.MusicVolume {
 		v, ok := read()
-		return device.MusicVolume{Speaker: v, SpeakerOK: ok, Jack: 70, JackOK: true}
+		return device.MusicVolume{
+			Max: 30, Speaker: v, SpeakerStep: int(v) * 30 / 100, SpeakerOK: ok,
+			Jack: 70, JackStep: 21, JackOK: true,
+		}
 	}
 }
 
@@ -588,7 +595,10 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	s.memory = func() (float32, bool) { return 126.5, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{Speaker: 40, SpeakerOK: true, Jack: 70, JackOK: true}
+		return device.MusicVolume{
+			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+			Jack: 70, JackStep: 21, JackOK: true,
+		}
 	}
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
@@ -597,13 +607,13 @@ func stubSensors(s *Server) map[uint32]float32 {
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0, s.keyMicMute: 0,
+		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.7,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
 		s.keyADB: 0,
 	}
 }
 
-const sensorCount = 12
+const sensorCount = 13
 
 func pollAll(s *Server) []reading {
 	changed := s.publish("sensors", s.readTicked())
@@ -634,10 +644,12 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 			t.Fatalf("a reading did not arrive: %v", err)
 		}
 		if msgType != msgSensorState && msgType != msgBinarySensorState &&
-			msgType != msgSelectState && msgType != msgSwitchState {
-			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d), select (%d) "+
-				"or switch (%d) state",
-				msgType, msgSensorState, msgBinarySensorState, msgSelectState, msgSwitchState)
+			msgType != msgSelectState && msgType != msgSwitchState &&
+			msgType != msgMediaPlayerState {
+			t.Fatalf("got message type %d, want a sensor (%d), binary sensor (%d), select (%d), "+
+				"switch (%d) or media player (%d) state",
+				msgType, msgSensorState, msgBinarySensorState, msgSelectState, msgSwitchState,
+				msgMediaPlayerState)
 		}
 		key, value, missing := sensorReading(t, msgType, payload)
 		expected, known := want[key]
@@ -677,14 +689,20 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				fail(&s.wifi)
 				failedKey = s.keyWifi
 			case "volume":
-				s.volumes = func() device.MusicVolume { return device.MusicVolume{Jack: 70, JackOK: true} }
+				s.volumes = func() device.MusicVolume {
+					return device.MusicVolume{Max: 30, Jack: 70, JackStep: 21, JackOK: true}
+				}
 				failedKey = s.keyVolume
 			case "jack_volume":
-				s.volumes = func() device.MusicVolume { return device.MusicVolume{Speaker: 40, SpeakerOK: true} }
+				s.volumes = func() device.MusicVolume {
+					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true}
+				}
 				failedKey = s.keyJack
+				delete(want, s.keySpeaker)
 			case "audio_jack":
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn
+				delete(want, s.keySpeaker)
 			case "speaker_playing":
 				s.sound = func() (bool, bool) { return false, false }
 				failedKey = s.keySound
@@ -1581,6 +1599,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.keyJackOn:                       {"audio_jack", msgBinarySensorState},
 				s.keySound:                        {"speaker_playing", msgBinarySensorState},
 				s.keyMicMute:                      {"microphone_muted", msgSwitchState},
+				s.keySpeaker:                      {"speaker", msgMediaPlayerState},
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
 				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
 				s.keyADB:                          {"network_adb", msgSelectState},
@@ -1987,38 +2006,49 @@ func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 	}
 
 	occupied = false
-	if got := pollAll(s); len(got) != 1 {
-		t.Fatalf("unplugging published %d readings, want 1", len(got))
+	if got := pollAll(s); len(got) != 2 {
+		t.Fatalf("unplugging published %d readings, want 2: the jack itself, and the media "+
+			"player whose volume is now the speaker's rather than the socket's", len(got))
 	}
 	if got := pollAll(s); len(got) != 0 {
 		t.Error("a jack state equal to the published one was sent again")
 	}
 
-	msgType, payload, err := c.recv()
-	if err != nil {
-		t.Fatalf("the unplug did not arrive: %v", err)
-	}
-	if msgType != msgBinarySensorState {
-		t.Fatalf("the jack went out as message %d, want a binary sensor state (%d)",
-			msgType, msgBinarySensorState)
-	}
-	key, value, missing := sensorReading(t, msgType, payload)
-	if key != s.keyJackOn || value != 0 || missing {
-		t.Errorf("the unplug carried key %d value %v missing %v, want the jack (%d) at 0",
-			key, value, missing, s.keyJackOn)
+	if value, missing, ok := jackAmong(t, c, s.keyJackOn, 2); !ok {
+		t.Error("the unplug never arrived")
+	} else if value != 0 || missing {
+		t.Errorf("the unplug carried value %v missing %v, want the jack at 0", value, missing)
 	}
 
 	occupied = true
-	if got := pollAll(s); len(got) != 1 {
-		t.Fatalf("plugging in published %d readings, want 1", len(got))
+	if got := pollAll(s); len(got) != 2 {
+		t.Fatalf("plugging in published %d readings, want 2", len(got))
 	}
-	msgType, payload, err = c.recv()
-	if err != nil {
-		t.Fatalf("the plug did not arrive: %v", err)
+	if value, _, ok := jackAmong(t, c, s.keyJackOn, 2); !ok {
+		t.Error("the plug never arrived")
+	} else if value != 1 {
+		t.Errorf("the plug carried value %v, want the jack at 1", value)
 	}
-	if key, value, _ := sensorReading(t, msgType, payload); key != s.keyJackOn || value != 1 {
-		t.Errorf("the plug carried key %d value %v, want the jack (%d) at 1", key, value, s.keyJackOn)
+}
+
+func jackAmong(t *testing.T, c *client, key uint32, n int) (float32, bool, bool) {
+	t.Helper()
+	for ; n > 0; n-- {
+		msgType, payload, err := c.recv()
+		if err != nil {
+			t.Fatalf("waiting on the jack: %v", err)
+		}
+		got, value, missing := sensorReading(t, msgType, payload)
+		if got != key {
+			continue
+		}
+		if msgType != msgBinarySensorState {
+			t.Fatalf("the jack went out as message %d, want a binary sensor state (%d)",
+				msgType, msgBinarySensorState)
+		}
+		return value, missing, true
 	}
+	return 0, false, false
 }
 
 func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {

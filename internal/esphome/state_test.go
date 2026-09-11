@@ -284,7 +284,10 @@ func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 	s.memory = func() (float32, bool) { return 126.5, true }
 	s.jack = func() (bool, bool) { return true, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{Speaker: 40, SpeakerOK: true, Jack: 70, JackOK: true}
+		return device.MusicVolume{
+			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+			Jack: 70, JackStep: 21, JackOK: true,
+		}
 	}
 
 	near, far := net.Pipe()

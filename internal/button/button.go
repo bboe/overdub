@@ -1,5 +1,6 @@
-// Package button owns the exclusive grab on the action button, and the uinput
-// device that stands in for the real one while it is held.
+// Package button owns the exclusive grab on the action button, the uinput device
+// that stands in for the real one while it is held, and a second uinput device
+// that stands in for nothing: the volume keys pressed on request.
 package button
 
 import (

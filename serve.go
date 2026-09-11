@@ -23,6 +23,7 @@ const (
 	actionKey  = 138
 	muteKey    = 113
 	uinputName = "mtk-kpd"
+	volumeName = "overdub-volume"
 	wifiIface  = device.WifiInterface
 	apiPort    = 6053
 
@@ -79,7 +80,15 @@ func serve(flags config) error {
 		defer chime.Close()
 	}
 
-	go serveAPI(flags.Name, psk, i)
+	volume, err := button.NewVolumeKeys(volumeName)
+	if err != nil {
+		log.Printf("warning: %v; the volume cannot be set from home assistant", err)
+		volume = nil
+	} else {
+		defer volume.Close()
+	}
+
+	go serveAPI(flags.Name, psk, i, volume)
 
 	var held []string
 	for code, b := range buttons {
@@ -172,7 +181,7 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 	return "", false
 }
 
-func serveAPI(name string, psk []byte, i *button.Interceptor) {
+func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.VolumeKeys) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		log.Printf("%s has no address yet; the button works, and the api starts if it appears", wifiIface)
@@ -202,6 +211,19 @@ func serveAPI(name string, psk []byte, i *button.Interceptor) {
 		}
 		return err
 	})
+
+	if volume != nil {
+		server.UseVolumeKeys(func(up bool, n int) error {
+			err := volume.Step(up, n)
+			if errors.Is(err, button.ErrKeyStuck) {
+				log.Printf("volume: %v; exiting so the device is rebuilt", err)
+				withdraw()
+				i.Close()
+				os.Exit(1)
+			}
+			return err
+		})
+	}
 
 	api.Store(server)
 

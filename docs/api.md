@@ -514,6 +514,120 @@ goes out, so a volume nobody touches costs the read and no traffic at all.
 That is also why `PollLive` has no `MinSensorTick` of its own. The floor there
 bounds traffic, and a tick that publishes nothing produces none.
 
+**Home Assistant can also change the volume**, and it does that through a
+`media_player`, because that is the only ESPHome entity with a volume on it.
+What the Dot gets is the control rather than a player: `feature_flags` declares
+`VOLUME_SET` and `VOLUME_STEP` and nothing else, so the card carries a slider
+and no transport buttons. Declaring `PLAY_MEDIA` before there is anything to
+play would draw a control that does nothing, and the state is `IDLE` for the
+same reason -- nothing here yet starts a sound the media player owns.
+
+The volume that arrives in a command is read only when it is a `fixed32`, and
+only when it is finite. A field 5 sent as a varint is not a float that happens to
+be zero -- it is a peer saying something the message does not allow, and treating
+it as zero would step the Dot to silence on a malformed frame. The clamp bounds
+what a nonsense fraction can do, but the clamp is a floor rather than the check.
+
+**A level is set by pressing keys, because API 22 has no setter to call.**
+`setStreamVolume` needs an APK or an `app_process` host, and the shell commands
+that reach it are a VM start each: measured on the Dot, four `input keyevent 24`
+calls took 2.28 seconds, about 570ms apiece, the same order as the `settings
+get` above. Thirty of those is seventeen seconds between Home Assistant asking
+for full volume and the Dot arriving there. A uinput device of our own costs
+30ms a step, so the same thirty steps take under a second.
+
+**Pressing keys is audible, and that is not a detail.** Android plays its own
+volume tick on each adjustment, so a set is heard once per step it moves: nine
+ticks to go from a fifth to a half, and a drag across the scale is heard the
+whole way. Heard on the Dot rather than measured. This is the same sound the
+physical buttons make, which is consistent with what the keys buy -- the level
+lands where a hand would have put it, and it sounds like a hand put it there --
+but a slider in Home Assistant does not look like something that makes a noise,
+and an automation that sets the volume at four in the morning will be heard.
+
+A silent setter exists and is not reached from a shell: `setStreamVolume` takes
+a flags argument, and `FLAG_PLAY_SOUND` is what the key handler passes and a
+direct caller need not. Reaching it means a binder transaction on `IAudioService`
+by number, or a Java helper through `app_process`. Neither is in this tree, both
+are version-fragile in a way a keycode is not, and the keycode route works
+today; what it costs is this paragraph.
+
+**That device needs no borrowed identity.** The action button's clone has to be
+named `mtk-kpd` and carry the real node's ids, because Android resolves the
+keylayout from the name and the two devices have to look alike; docs/button.md
+says why. The volume device is the opposite case -- it invents keys rather than
+standing in for a node, and the volume keycodes are in the generic keylayout.
+Measured on a Dot, a device named `overdub-volume` with an all-zero `input_id`
+moved `volume_music_speaker` from 5 to 6 on one injected key, and from 6 to 3 on
+three more at 30ms apart, with `input keyevent` as the control in the other
+direction.
+
+**The step that moves is the live route's.** A volume key adjusts whatever
+output Android is routing to, so the level to count from is the socket's when
+something is in it and the speaker's otherwise, which is what `JackOccupied`
+answers. Counting from the speaker with a cable in the jack sends the wrong
+number of presses and lands somewhere nobody asked for -- and lands it in
+somebody's headphones, which is the reason this one is not a matter of taste.
+When the live route has no readable level, **or when which route is live cannot
+be read at all**, nothing is pressed: a press from an unknown level is a guess,
+and the reading that follows makes it look deliberate. The switch this reads,
+`/sys/class/switch/h2w/state`, has never been seen to fail, and the jack sensor
+beside it goes missing when it does, so the two agree about what is unknown.
+
+**A set is a press, a wait, and a read back**, in the shape the microphone
+switch already uses: one worker, one pending request, and `liveWake` at the end
+so the poll republishes rather than the worker inventing a state. Two requests
+arriving together coalesce, and two *relative* ones add rather than replace, so
+a double tap on volume-up moves two steps. A step arriving on a pending *set* is
+added to it, and a set arriving on a pending step replaces it. Those are not the
+same rule twice, and they are not meant to be: a step says which way to go from
+wherever you are, so it belongs on top of whatever is about to happen, while a
+set names where to be, so it answers a step rather than landing one above it.
+Half and then one more is 51.7%; one more and then half is half, which is what
+the second request asked for. The wait is 400ms: measured through Home Assistant's own client
+against the Dot, a nine-step move logged the level it had asked for rather than
+one still in flight.
+
+**The slider shows the step, and the mute is a flag beside it.** The two volume
+sensors report a muted stream as zero percent, because zero is what can be
+heard. The media player cannot: a set counts presses from the step, so a slider
+fed the zeroed percentage would sit at 0 while the level it counts from was 12
+of 30, and every set would land on the device and snap back in Home Assistant --
+then do nothing at all the second time, because the step is already where it was
+asked for. So the volume field carries `step / max`, and read and write count
+from the same number by construction.
+
+The mute travels beside it as its own flag, read from `Mute count:` rather than
+recovered from a percentage that happens to be zero. Those two are not the same
+question: a level stepped all the way down is also zero percent, and reporting
+*that* as muted puts Home Assistant's mute indicator on a player with no
+`VOLUME_MUTE` among its features, so nothing can lift it. `MusicVolume` carries
+the flag for that reason. Nothing on this Dot has ever produced the mute it
+separates, which is the reason to pin both halves in tests rather than leave
+them agreeing by accident.
+
+**The media player carries no missing flag.** `MediaPlayerStateResponse` has a
+key, a state, a volume and a muted bool, and nothing that says "unknown", where
+every sensor here has one. So a level that cannot be read publishes nothing and
+Home Assistant keeps the last value it was told, rather than taking a zero that
+reads as silence. The two volume sensors beside it do carry the flag and do go
+missing, which is where to look when they and the slider disagree.
+
+**No keys, no controls.** `NewVolumeKeys` is allowed to fail -- `/dev/uinput`
+may be missing, and the daemon still has a button to serve -- so the feature
+flags are computed rather than fixed: with no device behind them the entity is
+listed with none, and Home Assistant draws the level and no slider. The
+alternative is a slider that moves back every time, which is the same objection
+that keeps `PLAY_MEDIA` off the listing until there is something behind it.
+
+**A stuck volume key exits the daemon.** `Step` goes through the same `press`
+the mute button uses, so a write that fails after the key-down comes back as
+`ErrKeyStuck`, and `serve.go` answers it the way it answers a stuck mute: log,
+withdraw, close, exit, and let the supervisor build a new device five seconds
+later. A volume key left down is worse than untidy -- docs/hardware.md has
+Alexa's advanced factory reset on mute and volume down held together for eight
+seconds, and the user's own hand supplies the other half.
+
 Both polls are started by one call, `Poll`, rather than by a `go` statement each
 in `serveAPI`. What goes wrong there is a sensor that is listed with nothing to
 read it, which Home Assistant shows as an entity that never has a value, and

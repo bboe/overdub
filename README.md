@@ -238,6 +238,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
+| `media_player.<name>_speaker` | none | the volume, and the control that changes it; it sets the level of whichever route is live, and it plays nothing -- there are no transport controls on it because there is nothing behind them yet |
 | `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
@@ -257,6 +258,17 @@ traffic at all.
 
 That is why a volume you have just turned appears within a few seconds, whether
 you turned it with the buttons, from an app, or by asking Alexa.
+
+Setting it from Home Assistant goes the other way down the same path: the daemon
+presses the volume keys for you, one press per step, so the level lands where
+Alexa and the buttons would have put it and every other reader of the volume
+agrees with it afterwards. It moves the route you are hearing, so with headphones
+in the socket the slider moves the socket's level and leaves the speaker's alone.
+
+**You will hear it.** Android ticks on every volume adjustment, the same as when
+you press the buttons on the Dot, so moving the slider is heard once per step it
+travels. Worth knowing before an automation sets the volume in a bedroom at four
+in the morning.
 
 `volume` is the speaker's own level and `jack_volume` is the socket's. Android
 keeps a level per route and switches between them when you plug something in,

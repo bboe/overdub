@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"math"
 	"net"
 	"os"
 	"slices"
@@ -73,6 +74,9 @@ const (
 	msgListSelect        = 52
 	msgSelectState       = 53
 	msgSelectCommand     = 54
+	msgListMediaPlayer   = 63
+	msgMediaPlayerState  = 64
+	msgMediaPlayerCmd    = 65
 	msgListEvent         = 107
 	msgEventState        = 108
 )
@@ -128,6 +132,7 @@ type Server struct {
 	keyJack    uint32
 	keyJackOn  uint32
 	keySound   uint32
+	keySpeaker uint32
 	keyMicMute uint32
 	keyADB     uint32
 
@@ -147,6 +152,10 @@ type Server struct {
 	micSettled    bool
 	micLive       bool
 
+	volWorking    bool
+	volHasPending bool
+	volWant       volumeWant
+
 	soundOn     bool
 	soundGap    time.Duration
 	onDelay     time.Duration
@@ -164,6 +173,7 @@ type Server struct {
 	cpu     func() (float32, bool)
 	memory  func() (float32, bool)
 
+	volumeKeys  func(up bool, n int) error
 	micPress    func() error
 	adbMode     func() (device.ADBMode, bool)
 	adbSet      func(device.ADBMode) error
@@ -176,6 +186,7 @@ type Server struct {
 	wakeGap       time.Duration
 	adbSettle     time.Duration
 	micSettle     time.Duration
+	volumeSettle  time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -206,6 +217,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyJack:    entityKey("jack_volume"),
 		keyJackOn:  entityKey("audio_jack"),
 		keySound:   entityKey("speaker_playing"),
+		keySpeaker: entityKey("speaker"),
 		keyMicMute: entityKey("microphone_muted"),
 		keyADB:     entityKey("network_adb"),
 		buttons:    newButtons(),
@@ -230,6 +242,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		wakeGap:       minLiveReadGap,
 		adbSettle:     adbSettleFor,
 		micSettle:     micSettleFor,
+		volumeSettle:  volumeSettleFor,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
@@ -577,6 +590,42 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}
 		if key == s.keyMicMute {
 			s.setMicLocked(conn, on)
+		}
+		return nil
+
+	case msgMediaPlayerCmd:
+		var key uint32
+		var command uint64
+		var hasCommand, hasVolume, volumeIsFloat bool
+		var volume float32
+		if err := walk("MediaPlayerCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				hasCommand = f.num != 0
+			case 3:
+				command = f.num
+			case 4:
+				hasVolume = f.num != 0
+			case 5:
+				if f.wire == wireFixed32 {
+					volume, volumeIsFloat = math.Float32frombits(uint32(f.num)), true
+				}
+			}
+		}); err != nil {
+			return err
+		}
+		if key != s.keySpeaker {
+			return nil
+		}
+		switch {
+		case hasVolume && volumeIsFloat && isFinite(volume):
+			s.setVolumeLocked(conn, volumeWant{fraction: volume, absolute: true})
+		case hasCommand && command == mediaVolumeUp:
+			s.setVolumeLocked(conn, volumeWant{steps: 1})
+		case hasCommand && command == mediaVolumeDown:
+			s.setVolumeLocked(conn, volumeWant{steps: -1})
 		}
 		return nil
 

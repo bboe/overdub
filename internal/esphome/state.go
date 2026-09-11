@@ -12,12 +12,14 @@ const (
 	kindBinary
 	kindSelect
 	kindSwitch
+	kindMedia
 )
 
 type reading struct {
 	key   uint32
 	value float32
 	text  string
+	muted bool
 	ok    bool
 	kind  int
 }
@@ -94,6 +96,15 @@ func (s *Server) readLive() []reading {
 		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
 		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
+	if step, _, ok := activeVolume(volumes, occupied, jackOK); ok && volumes.Max > 0 {
+		out = append(out, reading{
+			key:   s.keySpeaker,
+			value: float32(step) / float32(volumes.Max),
+			muted: volumes.Muted,
+			ok:    true,
+			kind:  kindMedia,
+		})
+	}
 	if micOK {
 		s.micObserved(muted)
 		out = append(out, reading{key: s.keyMicMute, value: boolValue(muted), ok: true, kind: kindSwitch})
@@ -126,6 +137,8 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 			msgType, payload = msgSelectState, selectState(r.key, r.text)
 		case kindSwitch:
 			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
+		case kindMedia:
+			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.value, r.muted)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err

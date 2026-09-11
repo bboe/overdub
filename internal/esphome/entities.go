@@ -69,6 +69,18 @@ func (s *Server) listEntities(conn *conn) error {
 		}
 	}
 
+	var speaker pb
+	speaker.str(1, "speaker")
+	speaker.fixed32(2, s.keySpeaker)
+	speaker.str(3, "Speaker")
+	speaker.str(5, speakerIcon)
+	speaker.boolean(6, false) // disabled_by_default
+	speaker.u32(7, entityCategoryNone)
+	speaker.u32(11, s.volumeFeatures()) // feature_flags
+	if err := s.send(conn, msgListMediaPlayer, speaker.b); err != nil {
+		return err
+	}
+
 	for _, sensor := range []struct {
 		objectID    string
 		key         uint32
