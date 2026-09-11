@@ -466,7 +466,13 @@ each decision is defending against.
 * [Hardware](docs/hardware.md): the input nodes and keycodes, and how to test
   against a live Dot
 * [Hard constraints](docs/constraints.md): what cannot change, and why
-* [Architecture](docs/architecture.md): the subsystems, one at a time
+* [The button](docs/button.md): the grab, the clone, the modes, and what a
+  press reports
+* [The Home Assistant API](docs/api.md): the entities, the polls, discovery,
+  and the encryption
+* [Network adb, and the microphone](docs/device.md): the two things Home
+  Assistant can switch on the Dot itself
+* [Audio](docs/audio.md): what it takes to make a sound here, and the chime
 * [Things that fail silently](docs/pitfalls.md): the failures that report
   success
 * [Deployment](docs/deployment.md): installing and removing it

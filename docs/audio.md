@@ -70,7 +70,7 @@ chime that outgrew the queue would otherwise play its first half for ever.
 stream type, so a ROM without it still chimes rather than leaving the daemon
 permanently silent.
 
-`docs/architecture.md` says what the daemon does with that, and why the build
+"The chime" below says what the daemon does with that, and why the build
 target is `GOOS=android`.
 
 ## Latency is process startup, not hardware
@@ -147,10 +147,61 @@ identical.
 ten and a half seconds after a sound, so a trial started inside that window
 measures nothing.
 
-## Rendering the chime
+## The chime
 
-Generating it costs 12.7 ms on the Dot and 39.4 KB held for the run, against
-0.008% of what this device has. Generating it per press would spend that 12.7 ms
-inside the 33 ms budget, and the OpenSL ES buffer queue holds a *pointer* into
-the PCM rather than a copy, so a clip regenerated under a second press is a
-use-after-free rather than a slow chime.
+`internal/audio`. A press is acknowledged by the daemon's own sound, played
+through OpenSL ES, which is the layer AudioFlinger mixes. That is what lets it
+coexist with Alexa: her speech is a track like ours rather than an owner of the
+device. Writing to ALSA directly is not an option and fails worse than silently:
+card 0 device 23 is the speaker, declares one substream, and the audio HAL holds
+it open for the life of the boot, so a second opener gets `EBUSY`. The DSP
+front-ends around it do accept a write and do reach the speaker, and doing so
+corrupts the codec stream and leaves the driver logging
+`mtk_pcm_I2S0dl1_pointer underflow` fast enough to empty the kernel ring buffer,
+until a reboot. Every sound on the device pops in that state.
+
+Handing a URL to Alexa's `SpeechSynthesizer` via `am startservice` was the route
+before this, and it worked. What it cost was 691ms from press to sound against
+33ms now, measured five trials each at the moment the codec substream goes
+RUNNING. Nearly all of the difference was hers: binder to her service, an http
+fetch, an mp3 decode. It also required a loopback listener alive for the life of
+the daemon, four separate quirks of `SpeechInteractionManager`, one exact mp3
+encoding, and a stack that a debloated Dot may not have running at all. None of
+that is needed to make a sound.
+
+**The player is built once and held.** Building it per press was measured at
+333ms, and almost all of that is `exec` plus linking `libOpenSLES`: the helper's
+own work, from its `main` to the buffer queue, was 4ms. A resident process is
+therefore the whole trick, and once one is resident it may as well be this one --
+a separate helper measured the same 33ms while costing a second binary to push
+and verify, a pipe, a child to supervise, and 10MB of its own.
+
+**It is cgo, so the target is `GOOS=android` rather than `GOOS=linux`.** That is
+not a preference. Go's linux runtime hangs before `main` against Bionic, so a
+linux build does not fail, it stops -- with no output, which is what makes it
+worth stating. Bionic also folds pthread into libc and ships no `libpthread`,
+while cgo appends `-lpthread` regardless, so `build.sh` makes the empty stub
+archives older NDKs used to carry.
+
+The daemon pays about 9MB of RSS for holding the media stack in its own address
+space, roughly doubling it, and CI keeps building for `GOOS=linux` because the
+audio package is behind a build tag. What that buys is the tests and `go vet`
+running exactly as they did, on the real 32-bit target, with the audio path
+verified on the device like everything else that touches hardware.
+
+**The sound is generated rather than stored**, which is why no asset is in the
+tree and nothing needs ffmpeg to regenerate one. Two sustained sine tones a
+fifth apart, A5 then E6, ramped at both ends and fading over the last tenth of
+a second. Those
+are the recording's own numbers rather than a choice: a DFT over each half of the
+clip this replaces reads 880.0 Hz and 1320.0 Hz, within two cents of A5 and E6,
+with no partial above the fundamental carrying enough energy to matter, and an
+envelope that holds its level for three quarters of its length rather than decaying
+like a bell.
+
+Generating it once costs 12.7ms on the Dot and 39.4KB held for the run.
+Generating it per press would spend that 12.7ms inside the 33ms budget, which is
+most of what the change bought, and the buffer queue holds a *pointer* into the
+PCM rather than a copy -- so a clip regenerated under a second press is a
+use-after-free rather than a slow chime. The 39.4KB is 0.008% of what this device
+has.

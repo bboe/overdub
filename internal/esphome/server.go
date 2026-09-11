@@ -2,7 +2,7 @@
 // the Echo Dot with its own first-party integration: no custom component and no
 // MQTT. The API is encrypted, and the pre-shared key it needs is the one
 // credential the Dot holds.
-// docs/architecture.md has the measurements.
+// docs/api.md has the measurements.
 package esphome
 
 import (

@@ -35,7 +35,8 @@ internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them
 internal/button    the exclusive grab, the clone, the read loop, and whether
                    the action key is ours or Alexa's
-internal/device    the Dot itself: its network, and the firewall rule
+internal/device    the Dot itself: its network, the firewall rule, network
+                   adb, and the microphone mute
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
                    the mDNS responder Home Assistant finds the Dot by
 internal/evdev     evdev and uinput primitives
@@ -69,12 +70,20 @@ per call site.
 
 ## The rest
 
-`docs/` carries the measurements and the traps. It is imported below, so all of
-it is in context here without being opened:
+`docs/` carries the measurements and the traps. Two pages apply whatever you are
+doing and are imported below. The others are reference for one subsystem each:
+read the page **before** you touch the thing, because what they carry is mostly
+silent failures, and a trap you meet afterwards has already cost you the
+evening.
 
-@docs/hardware.md
+| before you | read |
+|---|---|
+| change what a key press does -- the grab, the clone, the modes, the gestures | `docs/button.md` |
+| add or change an entity, or touch the polls, the deadlines, mDNS, or the key | `docs/api.md` |
+| turn on network adb, or touch the microphone mute | `docs/device.md` |
+| make a sound | `docs/audio.md` |
+| change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |
+| run anything against the real device | `docs/hardware.md` |
+
 @docs/constraints.md
-@docs/architecture.md
-@docs/audio.md
 @docs/pitfalls.md
-@docs/deployment.md

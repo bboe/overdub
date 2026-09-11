@@ -1,5 +1,6 @@
-// Package device reads facts about the Echo Dot itself.
-// docs/architecture.md has the measurements.
+// Package device reads facts about the Echo Dot itself, and switches the two
+// things Home Assistant can change on it.
+// docs/api.md has the measurements; docs/device.md has adb and the mic.
 package device
 
 import (

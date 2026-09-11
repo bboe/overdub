@@ -18,7 +18,7 @@ calls it, the target is `GOOS=android` rather than `GOOS=linux`, and the build
 needs an NDK. Nothing else on the device is needed: `libOpenSLES.so` is stock.
 The package is behind a build tag, so `go vet` and the tests still run for
 linux/arm exactly as before, with a stub in place of the player;
-docs/architecture.md says what that costs and why the target is not optional.
+docs/audio.md says what that costs and why the target is not optional.
 
 **A flag has to earn its place.** One flag, `-name`, the one thing that cannot
 be defaulted. Every other fact about biscuit is a `const`, in `serve.go` or
@@ -72,5 +72,5 @@ of constraints which have all gone with it: one exact encoding her demuxer would
 accept, a Xing frame that silently broke it, a listener alive for the life of the
 daemon, and an `am` intent with four separate quirks. `internal/audio` renders
 two sine tones at startup instead. What is left of that list is one line: the
-tones are the recording's own, measured by DFT, and docs/architecture.md carries
+tones are the recording's own, measured by DFT, and docs/audio.md carries
 the numbers.

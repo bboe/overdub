@@ -196,7 +196,7 @@ func TestTheDocsPromiseTheHoldThresholdTheDaemonUses(t *testing.T) {
 	if holdTime != promised {
 		t.Errorf("holdTime is %v and the docs promise %q; change them together", holdTime, said)
 	}
-	for _, path := range []string{"README.md", "docs/architecture.md"} {
+	for _, path := range []string{"README.md", "docs/button.md"} {
 		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -225,12 +225,12 @@ func TestTheDocsPromiseTheGapTheDaemonUses(t *testing.T) {
 	if multiGap != promised {
 		t.Errorf("multiGap is %v and the docs promise %q; change them together", multiGap, said)
 	}
-	body, err := os.ReadFile("docs/architecture.md")
+	body, err := os.ReadFile("docs/button.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(body), said) {
-		t.Errorf("docs/architecture.md no longer says %q, which is the gap the daemon uses", said)
+		t.Errorf("docs/button.md no longer says %q, which is the gap the daemon uses", said)
 	}
 }
 
