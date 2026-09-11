@@ -168,7 +168,8 @@ func TestAHoldOnItsOwnReportsNoRun(t *testing.T) {
 }
 
 func TestARunDoesNotCloseWhileAKeyIsDown(t *testing.T) {
-	m, got := collector()
+	const hold = 10 * testGap
+	m, got := collectorWith(testGap, hold)
 	m.tap()
 	m.Down()
 	time.Sleep(3 * testGap)
@@ -176,7 +177,7 @@ func TestARunDoesNotCloseWhileAKeyIsDown(t *testing.T) {
 	if n := len(got()); n != 0 {
 		t.Fatalf("a run closed under a key that was still down: %v", got())
 	}
-	time.Sleep(3 * testHold)
+	time.Sleep(3 * hold)
 	m.Up(time.Second)
 	settle()
 

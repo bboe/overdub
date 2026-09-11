@@ -417,3 +417,24 @@ network is waited for, so the read loop runs for as long as `wlan0` takes.
 `serve.go` holds the server in an `atomic.Pointer`, and a press that finds
 nothing there goes no further than the log. Queueing it would deliver a press at
 a moment it did not happen.
+
+**The gesture tests race their own timers, and one of them lost.**
+`multipress_test.go` drives `MultiPress` with a 20ms gap and a 60ms hold and
+then sleeps, which makes every assertion a footrace against a timer rather than
+a question about the state machine. `TestARunDoesNotCloseWhileAKeyIsDown` slept
+`3 * testGap` and then asserted the hold had not fired -- and `3 * testGap` is
+60ms, which is the hold exactly. The two deadlines landed on the same instant
+and the reading goroutine won by microseconds, which is a pass; when it lost,
+`held` had already reported the run in front of it and started the long press,
+so the failure read as a run closing under a key that was still down. Measured
+on the branch that found it: three failures in two hundred runs under
+`qemu-arm-static`, and one in forty with the emulator held to half a core. It
+takes a local hold of `10 * testGap` now, which puts 140ms between the check and
+the timer, and neither rate reproduces.
+
+What is left is smaller and has never been seen to fire. Chaining `m.tap()` into
+whatever follows has only the gap to do it in, because the tap's release arms the
+gap timer and the next call has to beat it; five tests in that file depend on
+20ms of wall clock arriving on time. Widening `testGap` would buy that margin and
+charge every `settle()` four times over for a hazard with no evidence behind it,
+so the number stays until something makes the case.
