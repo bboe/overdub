@@ -76,7 +76,7 @@ func (s *Server) listEntities(conn *conn) error {
 	speaker.str(5, speakerIcon)
 	speaker.boolean(6, false) // disabled_by_default
 	speaker.u32(7, entityCategoryNone)
-	speaker.u32(11, s.volumeFeatures()) // feature_flags
+	speaker.u32(11, s.mediaFeatures()) // feature_flags
 	if err := s.send(conn, msgListMediaPlayer, speaker.b); err != nil {
 		return err
 	}

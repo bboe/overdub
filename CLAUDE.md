@@ -31,6 +31,8 @@ instead.
 
 ```
 main.go, serve.go  the flag, the constants, and the wiring
+internal/alexa     her synthesizer: the intent that hands it a clip, and the
+                   log tail that says whether the clip played
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them
 internal/button    the exclusive grab, the clone, the read loop, whether the
@@ -82,7 +84,7 @@ evening.
 | change what a key press does -- the grab, the clone, the modes, the gestures | `docs/button.md` |
 | add or change an entity, or touch the polls, the deadlines, mDNS, or the key | `docs/api.md` |
 | turn on network adb, or touch the microphone mute | `docs/device.md` |
-| make a sound | `docs/audio.md` |
+| make a sound, or play one | `docs/audio.md` |
 | change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |
 | run anything against the real device | `docs/hardware.md` |
 

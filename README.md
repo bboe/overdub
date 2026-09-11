@@ -238,7 +238,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
-| `media_player.<name>_speaker` | none | the volume, and the control that changes it; it sets the level of whichever route is live, and it plays nothing -- there are no transport controls on it because there is nothing behind them yet |
+| `media_player.<name>_speaker` | none | the volume, the control that changes it, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
 | `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
@@ -280,6 +280,71 @@ at once.
 A bluetooth speaker is a third route and is not reported at all. Pair one and
 Android tracks its level separately again, so neither of these readings is what
 you are hearing and `audio_jack` does not say so.
+
+### Playing something on it
+
+`media_player.play_media` hands the URL to Alexa's synthesizer, which fetches and
+plays it the way she plays her own speech -- mixed and ducked against whatever
+else is going on, rather than fighting it. Two rules come from her rather than
+from here:
+
+* **The clip must be CBR mp3 at 48 kbps, 24 kHz, mono.** Anything variable is
+  refused by her demuxer, and the refusal reads exactly like a file that is not
+  there. Home Assistant's `tts.speak` takes `preferred_bitrate: 48` from 2026.9,
+  which is the whole of the setup on newer versions.
+* **The URL must be `http://`, with no comma or double quote in it.** The intent
+  that carries it is a comma-separated array and hand-built JSON, so those two
+  characters end it early. `https` is not refused by Alexa so much as unverified
+  here.
+
+The Dot fetches the clip itself, so whatever serves it has to be reachable *from
+the Dot*, which is the opposite direction from the one Home Assistant uses to
+reach the Dot. A `/local/` file served by Home Assistant is the ordinary case.
+
+```yaml
+action: tts.speak
+target:
+  entity_id: tts.home_assistant_cloud
+data:
+  media_player_entity_id: media_player.kitchen_speaker
+  message: "The back door has been open for ten minutes"
+  options:
+    preferred_bitrate: 48
+```
+
+The entity reports `playing` while Alexa is actually playing rather than from
+the moment you ask, because the daemon learns it from her playback log; expect
+roughly two thirds of a second before it moves. If she never plays it at all,
+the entity gives up and goes back to idle rather than sticking.
+
+**When nothing plays, the daemon's log is the wrong place to look.** It records
+what was asked for and nothing else, because everything after that is hers: she
+fetches the clip, she decodes it, and she is where it fails. Her log is where
+the reason is:
+
+```sh
+adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'
+```
+
+Three failures look alike from Home Assistant and are easy to tell apart there:
+
+* `cannot estimate length of the next mp3 frame` is the encoding -- a variable
+  bitrate her demuxer will not take.
+* `Playback ended: ... FAILED` with nothing before it is usually the fetch: a
+  404, or a URL the Dot cannot route to.
+* **No lines at all** means the request never reached her.
+
+The routing one catches people out, because it fails in complete silence. The
+Dot fetches the clip itself, and a Dot on an IoT network often cannot open a
+connection to the machine serving it even though that machine reaches the Dot
+perfectly well. Ask the Dot rather than assuming:
+
+```sh
+adb shell 'su -c "curl -sS -m 5 -o /dev/null -w %{http_code} http://<host>:8123/"'
+```
+
+`200` means the route is open. A curl error and `000` is the answer: open that
+one route, and everything else already works.
 
 The mode selects are the only entities Home Assistant writes to. There is one
 per button -- the action button and the microphone mute -- and each has three

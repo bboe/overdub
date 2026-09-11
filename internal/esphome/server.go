@@ -152,6 +152,12 @@ type Server struct {
 	micSettled    bool
 	micLive       bool
 
+	mpPlaying bool
+
+	playWorking    bool
+	playHasPending bool
+	playWant       string
+
 	volWorking    bool
 	volHasPending bool
 	volWant       volumeWant
@@ -174,6 +180,7 @@ type Server struct {
 	memory  func() (float32, bool)
 
 	volumeKeys  func(up bool, n int) error
+	play        func(url string) error
 	micPress    func() error
 	adbMode     func() (device.ADBMode, bool)
 	adbSet      func(device.ADBMode) error
@@ -596,8 +603,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 	case msgMediaPlayerCmd:
 		var key uint32
 		var command uint64
-		var hasCommand, hasVolume, volumeIsFloat bool
+		var hasCommand, hasVolume, volumeIsFloat, hasURL, announcement bool
 		var volume float32
+		var url string
 		if err := walk("MediaPlayerCommandRequest", payload, func(f pbField) {
 			switch f.field {
 			case 1:
@@ -612,6 +620,12 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 				if f.wire == wireFixed32 {
 					volume, volumeIsFloat = math.Float32frombits(uint32(f.num)), true
 				}
+			case 6:
+				hasURL = f.num != 0
+			case 7:
+				url = string(f.data)
+			case 9:
+				announcement = f.num != 0
 			}
 		}); err != nil {
 			return err
@@ -620,6 +634,8 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			return nil
 		}
 		switch {
+		case hasURL && url != "":
+			s.playLocked(conn, url, announcement)
 		case hasVolume && volumeIsFloat && isFinite(volume):
 			s.setVolumeLocked(conn, volumeWant{fraction: volume, absolute: true})
 		case hasCommand && command == mediaVolumeUp:

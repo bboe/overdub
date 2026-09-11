@@ -613,12 +613,116 @@ Home Assistant keeps the last value it was told, rather than taking a zero that
 reads as silence. The two volume sensors beside it do carry the flag and do go
 missing, which is where to look when they and the slider disagree.
 
+**Playing a URL is Alexa's job, and the state comes back from her.** The
+`media_url` a peer sends goes to `internal/alexa` untouched: whatever it points
+at is her question, not ours, because nothing here decodes an mp3. What the
+daemon adds is the two checks the intent forces -- `http://` only, and no comma
+or double quote, because the extras are a comma-separated array and the payload
+is hand-built JSON -- and a directive id per call, so two clips in flight are
+two directives rather than one confused one.
+
+The state follows the speaker rather than the request. A peer asking to play
+does not make the entity say playing: `PlaybackWatcher` tails
+`logcat -s tts-Server tts-Playback` and reports `Playback started:` and
+`Playback ended:` for the `SpeechSynthesizer` namespace, and only those move the
+state. Alexa speaks for her own reasons all day, so the watcher is armed by a
+request and disarmed by the end it was waiting for; a playback nobody asked for
+is hers. The optimistic alternative -- say playing the moment a peer asks -- is
+wrong in the direction that lasts: a clip she never plays would leave the entity
+playing until something else moved it, where this one reports what was heard and
+goes back to idle on its own.
+
+It goes back to idle even when she says nothing at all. The watcher carries a
+deadline and gives up at it, because the failure that matters most here is
+silence: a 404 and a variable-bitrate mp3 both end `FAILED` with a line worth
+keeping, but a stack that is not running answers neither way. The deadline is
+extended once `am` has returned, because the intent carries a timeout of its own
+and a slow one would otherwise eat the budget meant for her fetch -- extended
+rather than re-armed, because a clip that failed inside that second or so has
+already been reported, and arming a fresh watch over it invents a timeout for a
+playback that is finished and throws away the line that said why.
+
+**The deadline is for starting, not for playing.** Thirty seconds is a generous
+wait for her to fetch a clip and begin it, and a ludicrous cap on the clip
+itself: a ninety-second recording would otherwise be called a failure while it
+was still audible, drop the entity to idle, and then have its real `SUCCESS`
+discarded because the watch was already disarmed. So `Playback started:` moves
+the deadline out to fifteen minutes -- longer than anything anybody hands a Dot,
+and short enough that a playback she starts and never reports the end of does not
+own the entity for the rest of the run.
+
+**What the watcher cannot do is tell her clip from ours.** Measured on a Dot,
+the lines are `Playback started: uid(32037)_id(0)_namespace(SpeechSynthesizer)`
+and the matching `ended`, and the directive id this daemon minted is in neither
+of them -- it appears under `SPCH-SIM_SimJobStack` instead, which is a different
+tag and a different line. So the watcher matches a namespace, not a directive,
+and a reply to a wake word in the seconds after a request is a playback it will
+report as ours. Arming on request and disarming on the first end narrows that to
+the window a clip was asked for, and nothing here closes it further. A
+correlation would need the id out of the other tag, tied to the `id(N)` these
+lines carry, which is two more moving parts for a case nobody has hit.
+
+The hook itself is taken under the lock rather than read where it is used, which
+matters only because the check that installs it now runs in the background: a
+field written by one goroutine and read by another is a race whatever the timing
+makes of it, and the timing here is a package manager answering at its own pace
+against a peer that can ask to play at any moment.
+
+**One clip plays at a time.** A play goes through a worker with one pending
+request, the shape the volume set and the microphone switch already use. Each
+one forks `am`, which is a fresh VM on a device with 512 MB, so a peer sending
+play commands in a loop would otherwise have as many of those running at once as
+it cared to start. It is also the half of the overlap problem that *is* ours to
+fix: two clips in flight would report through one watcher whatever the
+namespace matching did.
+
+**A url is a peer's string**, so it is cut to the same 64 bytes every other peer
+string is cut to before it reaches the log -- in the error `CheckURL` builds as
+well as in the line the connection notes, because a rejected url is logged by
+the first and never reaches the second. What `am` prints is cut on the same
+rule: a java stack trace from a failed `startservice` is kilobytes, and it is a
+peer that decides how often one happens. The reason Alexa gives for a failure is
+cut with them. Playback is peer-triggered from end to end, so the line
+that reports it goes through the rate-limited log rather than `log.Printf` in
+`serve.go`: a peer that can ask for a clip a second can otherwise write to
+`/data` a second, which is the hazard docs/pitfalls.md opens with.
+
 **No keys, no controls.** `NewVolumeKeys` is allowed to fail -- `/dev/uinput`
 may be missing, and the daemon still has a button to serve -- so the feature
 flags are computed rather than fixed: with no device behind them the entity is
 listed with none, and Home Assistant draws the level and no slider. The
-alternative is a slider that moves back every time, which is the same objection
-that keeps `PLAY_MEDIA` off the listing until there is something behind it.
+alternative is a slider that moves back every time. `PLAY_MEDIA` and
+`MEDIA_ANNOUNCE` are computed the same way and for the same reason, so a daemon
+that cannot reach Alexa's synthesizer offers no play button rather than one that
+fails quietly.
+
+Whether she is there is pm's answer rather than a file's, and it is asked in the
+background rather than once in front of the listener. A debloated Dot keeps the
+apk and loses the package, so a stat would say yes where nothing can be reached;
+and `pm` early in a boot is a package manager still settling, so a single answer
+at startup can be a no that lasts the whole run. It is asked every thirty
+seconds for four and a half minutes and latched on the first yes, which is the
+same rule the firewall rule is re-asserted under: setup that depends on the
+device waits or repeats, never runs once. A daemon that starts before she does
+logs the wait and logs the answer when it comes.
+
+Arriving late is not enough on its own, because `ListEntities` is answered once
+per connection and Home Assistant holds what it was told. The ordinary cold boot
+is exactly that order -- the daemon starts, Home Assistant reconnects and lists
+while `pm` is still settling, and the answer lands half a minute later -- so the
+play button would be missing for the life of that socket with nothing saying
+why. Installing the hook where there was none therefore drops the connections
+that have one, and they list again on reconnect. It happens once in a run, and
+the log says which peers were dropped and why.
+
+**A watcher that cannot start says so once.** `logcat` is a process, and a
+process that will not start will not start again ten seconds later either. The
+retry loop reports the first failure and then goes quiet, the way the firewall
+re-assert does and for the same reason: a line every ten seconds is six a minute
+into a log that is truncated at boot and every twentieth restart, and neither of
+those arrives while the daemon is happily running. A tail that ran for a while
+before it failed is a new fault rather than the one already reported, so that
+one is said again.
 
 **A stuck volume key exits the daemon.** `Step` goes through the same `press`
 the mute button uses, so a write that fails after the key-down comes back as

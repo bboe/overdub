@@ -20,6 +20,7 @@ type reading struct {
 	value float32
 	text  string
 	muted bool
+	state uint32
 	ok    bool
 	kind  int
 }
@@ -101,6 +102,7 @@ func (s *Server) readLive() []reading {
 			key:   s.keySpeaker,
 			value: float32(step) / float32(volumes.Max),
 			muted: volumes.Muted,
+			state: mediaStateFor(s.playing()),
 			ok:    true,
 			kind:  kindMedia,
 		})
@@ -138,7 +140,7 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 		case kindSwitch:
 			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
 		case kindMedia:
-			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.value, r.muted)
+			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.state, r.value, r.muted)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err

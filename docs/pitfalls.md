@@ -56,6 +56,22 @@ pipeline reports only its last command, so with `adb` inline a pulled cable read
 as an empty pid, which is what this script says when nothing was supervising the
 daemon at all.
 
+**`pm` carries no shebang and `am` does**, so one of the two cannot be exec'd
+and the other can. `/system/bin/pm` is six lines of shell that set `CLASSPATH`
+and hand off to `app_process`, with no `#!` line in front of them, so `execve`
+answers ENOEXEC and Go's `exec.Command` fails before the script runs. A shell
+falls back to interpreting a file it cannot exec, which is why the same command
+works by hand over `adb shell` and fails from the daemon.
+
+Nothing about that failure names its cause. `Installed()` read the error as a
+package that is not there and reported one -- on every Dot, including the one
+with the package plainly installed, which is what makes it worth writing down:
+the check was measured against a device where the answer really was no, and
+agreed with the device for the wrong reason. Anything reached through
+`/system/bin/pm` goes through `/system/bin/sh` in front of it, the way
+`settings` always has. `am` is exec'd directly and is not the same case;
+`head -1` is the whole test.
+
 **The Dot's own firewall.** FireOS runs iptables with `INPUT policy DROP` and a
 port allowlist, and `tcp/6053` is not on it, so Home Assistant times out adding
 the device **with nothing in the daemon log**: the SYN never reaches userspace.

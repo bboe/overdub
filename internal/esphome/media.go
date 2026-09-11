@@ -2,6 +2,7 @@ package esphome
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"time"
 
@@ -10,12 +11,15 @@ import (
 
 // From aioesphomeapi's MediaPlayerEntityFeature.
 const (
-	featVolumeSet  = 1 << 2
-	featVolumeStep = 1 << 10
+	featVolumeSet     = 1 << 2
+	featPlayMedia     = 1 << 9
+	featVolumeStep    = 1 << 10
+	featMediaAnnounce = 1 << 20
 )
 
 const (
-	mediaStateIdle = 1
+	mediaStateIdle    = 1
+	mediaStatePlaying = 2
 
 	mediaVolumeUp   = 6
 	mediaVolumeDown = 7
@@ -39,13 +43,20 @@ func (w volumeWant) String() string {
 	return fmt.Sprintf("%+d steps", w.steps)
 }
 
-func mediaState(key uint32, volume float32, muted bool) []byte {
+func mediaState(key uint32, state uint32, volume float32, muted bool) []byte {
 	var p pb
 	p.fixed32(1, key)
-	p.u32(2, mediaStateIdle)
+	p.u32(2, state)
 	p.float(3, volume)
 	p.boolean(4, muted)
 	return p.b
+}
+
+func mediaStateFor(playing bool) uint32 {
+	if playing {
+		return mediaStatePlaying
+	}
+	return mediaStateIdle
 }
 
 func activeVolume(v device.MusicVolume, occupied, jackKnown bool) (step int, percent float32, ok bool) {
@@ -58,11 +69,102 @@ func activeVolume(v device.MusicVolume, occupied, jackKnown bool) (step int, per
 	return v.SpeakerStep, v.Speaker, v.SpeakerOK
 }
 
-func (s *Server) volumeFeatures() uint32 {
-	if s.volumeKeys == nil {
-		return 0
+func (s *Server) mediaFeatures() uint32 {
+	var flags uint32
+	if s.volumeKeys != nil {
+		flags |= featVolumeSet | featVolumeStep
 	}
-	return featVolumeSet | featVolumeStep
+	if s.play != nil {
+		flags |= featPlayMedia | featMediaAnnounce
+	}
+	return flags
+}
+
+func (s *Server) UsePlay(play func(url string) error) {
+	s.mu.Lock()
+	relist := s.play == nil && play != nil
+	s.play = play
+	var dropped []string
+	if relist {
+		for c := range s.conns {
+			dropped = append(dropped, c.sock.RemoteAddr().String())
+			delete(s.conns, c)
+			c.sock.Close()
+		}
+	}
+	s.mu.Unlock()
+
+	for _, addr := range dropped {
+		log.Printf("esphome api: dropped %s so it lists the entities again; the media player "+
+			"can play now", addr)
+	}
+}
+
+func (s *Server) NotePlayback(playing bool) {
+	s.mu.Lock()
+	changed := s.mpPlaying != playing
+	s.mpPlaying = playing
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+	select {
+	case s.liveWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) NotePlaybackFailed(detail string) {
+	if detail == "" {
+		detail = "no reason given"
+	}
+	s.peerLogf("playback: alexa reported a failure: %s", truncate(detail))
+	s.NotePlayback(false)
+}
+
+func (s *Server) playing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mpPlaying
+}
+
+func (s *Server) playLocked(conn *conn, url string, announcement bool) {
+	if s.play == nil {
+		conn.noted = fmt.Sprintf("esphome api: %s asked to play %s, and there is nothing here "+
+			"that plays", conn.sock.RemoteAddr(), truncate(url))
+		return
+	}
+	conn.noted = fmt.Sprintf("esphome api: %s asked to play %s (announcement=%v)",
+		conn.sock.RemoteAddr(), truncate(url), announcement)
+
+	s.playWant, s.playHasPending = url, true
+	if s.playWorking {
+		return
+	}
+	s.playWorking = true
+	go s.playWorker()
+}
+
+func (s *Server) playWorker() {
+	for {
+		s.mu.Lock()
+		if !s.playHasPending {
+			s.playWorking = false
+			s.mu.Unlock()
+			return
+		}
+		url, play := s.playWant, s.play
+		s.playHasPending = false
+		s.mu.Unlock()
+
+		if play == nil {
+			continue
+		}
+		if err := play(url); err != nil {
+			s.peerLogf("playback: %s", truncate(err.Error()))
+			s.NotePlayback(false)
+		}
+	}
 }
 
 func isFinite(v float32) bool { return !math.IsInf(float64(v), 0) && !math.IsNaN(float64(v)) }

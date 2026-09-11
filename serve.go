@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bboe/overdub/internal/alexa"
 	"github.com/bboe/overdub/internal/audio"
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
@@ -37,6 +38,11 @@ const (
 	firewallRe = 30 * time.Second
 
 	holdTime = 600 * time.Millisecond
+
+	playbackWait = 30 * time.Second
+
+	alexaWait  = 30 * time.Second
+	alexaTries = 10
 
 	multiGap = 350 * time.Millisecond
 )
@@ -225,6 +231,8 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 		})
 	}
 
+	go waitForAlexa(server)
+
 	api.Store(server)
 
 	responder := &esphome.Responder{Instance: name, MAC: mac, Iface: wifiIface, Port: apiPort}
@@ -240,6 +248,52 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
 	withdraw()
 	os.Exit(1)
+}
+
+func waitForAlexa(server *esphome.Server) {
+	for attempt := 1; ; attempt++ {
+		if alexa.Installed() {
+			usePlayback(server)
+			if attempt > 1 {
+				log.Printf("alexa: %s answered on attempt %d; the media player can play now",
+					alexa.Package, attempt)
+			}
+			return
+		}
+		if attempt == 1 {
+			log.Printf("alexa: %s is not installed yet, so the media player offers the volume "+
+				"alone; asking again for %v", alexa.Package, alexaWait*(alexaTries-1))
+		}
+		if attempt >= alexaTries {
+			log.Printf("alexa: %s never answered; nothing here can play a clip until a restart",
+				alexa.Package)
+			return
+		}
+		time.Sleep(alexaWait)
+	}
+}
+
+func usePlayback(server *esphome.Server) {
+	watcher := &alexa.PlaybackWatcher{
+		OnStart: func() { server.NotePlayback(true) },
+		OnEnd: func(ok bool, detail string) {
+			if ok {
+				server.NotePlayback(false)
+				return
+			}
+			server.NotePlaybackFailed(detail)
+		},
+	}
+	go watcher.Run()
+	server.UsePlay(func(url string) error {
+		watcher.Expect(playbackWait)
+		if err := alexa.Speak(url); err != nil {
+			watcher.Cancel()
+			return err
+		}
+		watcher.Extend(playbackWait)
+		return nil
+	})
 }
 
 func loadPSK(path string) ([]byte, error) {

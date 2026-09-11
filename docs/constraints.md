@@ -67,10 +67,18 @@ distribution needs nothing, but clause 2 asks that their notices travel with a
 build that is published.
 
 **The chime is generated, not stored and not encoded.** It was an mp3 served
-over loopback http to Alexa's `SpeechSynthesizer`, and that imposed a long list
-of constraints which have all gone with it: one exact encoding her demuxer would
-accept, a Xing frame that silently broke it, a listener alive for the life of the
-daemon, and an `am` intent with four separate quirks. `internal/audio` renders
-two sine tones at startup instead. What is left of that list is one line: the
-tones are the recording's own, measured by DFT, and docs/audio.md carries
-the numbers.
+over loopback http to Alexa's `SpeechSynthesizer`, and the chime is free of that
+list now: one exact encoding her demuxer would accept, a Xing frame that
+silently broke it, a listener alive for the life of the daemon, and an `am`
+intent with four separate quirks. `internal/audio` renders two sine tones at
+startup instead. What is left of that list for the chime is one line: the tones
+are the recording's own, measured by DFT, and docs/audio.md carries the numbers.
+
+The route itself is not gone, because playing a clip is not making a sound.
+`internal/alexa` hands Alexa a URL for anything Home Assistant asks to play,
+since nothing here decodes an mp3 and nothing should: her synthesizer already
+demuxes, decodes, mixes and ducks, and an mp3 decoder is the one dependency this
+tree would not be able to check in isolation. What that costs is her encoding
+rule and her four quirks back, on the path where the latency does not matter --
+the loopback listener is the one thing that stays gone, because the clip is
+served by whoever asked for it to be played.

@@ -3,6 +3,7 @@ package esphome
 import (
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -351,8 +352,8 @@ func TestTheSpeakerIsListedAsAMediaPlayerThatOnlyDoesVolume(t *testing.T) {
 			t.Errorf("the media player is object_id %q, want %q", got, "speaker")
 		}
 		if got := entity[11].num; got != featVolumeSet|featVolumeStep {
-			t.Errorf("feature_flags is %d, want %d: nothing here can play a URL yet, and "+
-				"a control that does nothing is worse than one that is absent",
+			t.Errorf("feature_flags is %d, want %d: this server was given keys and no player, "+
+				"and a control that does nothing is worse than one that is absent",
 				got, featVolumeSet|featVolumeStep)
 		}
 		return
@@ -363,20 +364,22 @@ func TestTheSpeakerIsListedAsAMediaPlayerThatOnlyDoesVolume(t *testing.T) {
 func TestTheStateCarriesTheVolumeAndTheMute(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
+		state  uint32
 		volume float32
 		muted  bool
 	}{
-		{"turned down", 0, true},
-		{"audible", 0.2, false},
-		{"muted at a level it will return to", 0.4, true},
+		{"turned down", mediaStateIdle, 0, true},
+		{"audible", mediaStateIdle, 0.2, false},
+		{"muted at a level it will return to", mediaStateIdle, 0.4, true},
+		{"playing", mediaStatePlaying, 0.4, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fields := map[int]pbField{}
-			if err := pbWalk(mediaState(7, tt.volume, tt.muted), func(f pbField) { fields[f.field] = f }); err != nil {
+			if err := pbWalk(mediaState(7, tt.state, tt.volume, tt.muted), func(f pbField) { fields[f.field] = f }); err != nil {
 				t.Fatalf("the state did not parse: %v", err)
 			}
-			if got := fields[2].num; got != mediaStateIdle {
-				t.Errorf("state is %d, want idle: nothing here plays anything yet", got)
+			if got := uint32(fields[2].num); got != tt.state {
+				t.Errorf("state is %d, want %d", got, tt.state)
 			}
 			if got := math.Float32frombits(uint32(fields[3].num)); got != tt.volume {
 				t.Errorf("volume is %v, want %v", got, tt.volume)
@@ -499,15 +502,23 @@ func TestAnUnreadableRouteIsNotStepped(t *testing.T) {
 	}
 }
 
-func TestWithNoKeysThereIsNoControlToOffer(t *testing.T) {
+func TestEveryControlOfferedHasSomethingBehindIt(t *testing.T) {
 	s := testServer(t, testPSK(t))
-	if got := s.volumeFeatures(); got != 0 {
-		t.Errorf("a server with no volume keys offered feature_flags %d, want none: a slider "+
-			"that cannot move is worse than a card without one", got)
+	if got := s.mediaFeatures(); got != 0 {
+		t.Errorf("a server with neither keys nor a player offered feature_flags %d, want none: "+
+			"a control that cannot act is worse than a card without one", got)
 	}
+
 	s.UseVolumeKeys(func(bool, int) error { return nil })
-	if got := s.volumeFeatures(); got != featVolumeSet|featVolumeStep {
-		t.Errorf("feature_flags is %d, want %d", got, featVolumeSet|featVolumeStep)
+	if got := s.mediaFeatures(); got != featVolumeSet|featVolumeStep {
+		t.Errorf("with keys and no player feature_flags is %d, want the volume alone (%d)",
+			got, featVolumeSet|featVolumeStep)
+	}
+
+	s.UsePlay(func(string) error { return nil })
+	want := uint32(featVolumeSet | featVolumeStep | featPlayMedia | featMediaAnnounce)
+	if got := s.mediaFeatures(); got != want {
+		t.Errorf("feature_flags is %d, want %d", got, want)
 	}
 }
 
@@ -560,5 +571,376 @@ func TestAVolumeThatIsNotAFloatIsNotASet(t *testing.T) {
 				t.Errorf("the speaker moved to %d after %d up and %d down", speaker, ups, downs)
 			}
 		})
+	}
+}
+
+func playCommand(key uint32, url string, announcement bool) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(6, true)
+	p.str(7, url)
+	if announcement {
+		p.boolean(9, true)
+	}
+	return p.b
+}
+
+func wireFakePlay(s *Server, err error) (*[]string, func()) {
+	var mu sync.Mutex
+	var asked []string
+	done := make(chan struct{}, 8)
+	s.UsePlay(func(url string) error {
+		mu.Lock()
+		asked = append(asked, url)
+		mu.Unlock()
+		done <- struct{}{}
+		return err
+	})
+	return &asked, func() {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func TestAPlayCommandHandsTheURLOnUntouched(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	asked, wait := wireFakePlay(s, nil)
+
+	const url = "http://192.168.2.5:8123/local/dot-tts/3-abc.mp3"
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, url, true)); err != nil {
+		t.Fatalf("a play command was an error: %v", err)
+	}
+	wait()
+
+	if len(*asked) != 1 || (*asked)[0] != url {
+		t.Errorf("the player was asked for %v, want exactly %q: whatever the url means is "+
+			"Alexa's question, not ours", *asked, url)
+	}
+}
+
+func TestAPlayCommandForAnotherKeyIsNotOurs(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	asked, _ := wireFakePlay(s, nil)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySound, "http://x.invalid/a.mp3", false)); err != nil {
+		t.Fatalf("a play command for another key was an error: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(*asked) != 0 {
+		t.Errorf("a command naming the speaker sensor played %v", *asked)
+	}
+}
+
+func TestAnEmptyURLIsNotAPlay(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	asked, _ := wireFakePlay(s, nil)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, "", false)); err != nil {
+		t.Fatalf("an empty url was an error: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(*asked) != 0 {
+		t.Errorf("an empty url was played as %v", *asked)
+	}
+}
+
+func TestPlaybackIsReportedWhenItIsHeardRatherThanWhenItIsAskedFor(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	_, wait := wireFakePlay(s, nil)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, "http://x.invalid/a.mp3", false)); err != nil {
+		t.Fatalf("a play command was an error: %v", err)
+	}
+	wait()
+	if s.playing() {
+		t.Error("the player reported playing because a peer asked it to: nothing had reached " +
+			"the speaker yet, and a state nobody observed is a guess")
+	}
+
+	s.NotePlayback(true)
+	if !s.playing() {
+		t.Error("a playback Alexa reported was not passed on")
+	}
+	s.NotePlayback(false)
+	if s.playing() {
+		t.Error("a playback that ended was still reported as playing")
+	}
+}
+
+func TestAPlayThatCouldNotStartLeavesNothingPlaying(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	_, wait := wireFakePlay(s, errors.New("am startservice: Error: Not found"))
+	s.NotePlayback(true)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, "http://x.invalid/a.mp3", false)); err != nil {
+		t.Fatalf("a play command was an error: %v", err)
+	}
+	wait()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline) && s.playing(); {
+		time.Sleep(time.Millisecond)
+	}
+	if s.playing() {
+		t.Error("a play that failed to start left the player reporting playing for ever")
+	}
+}
+
+func TestPlaybackWakesThePollThatPublishesIt(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	s.NotePlayback(true)
+	if len(s.liveWake) != 1 {
+		t.Fatal("a playback did not wake the poll, so Home Assistant hears about it on the " +
+			"next tick rather than now")
+	}
+	<-s.liveWake
+
+	s.NotePlayback(true)
+	if len(s.liveWake) != 0 {
+		t.Error("a playback already reported woke the poll again")
+	}
+}
+
+func TestTheReadingCarriesWhateverIsPlaying(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	s.NotePlayback(true)
+
+	for _, r := range s.readLive() {
+		if r.key != s.keySpeaker {
+			continue
+		}
+		if r.state != mediaStatePlaying {
+			t.Errorf("the media reading carried state %d while something was playing, want %d",
+				r.state, mediaStatePlaying)
+		}
+		return
+	}
+	t.Fatal("no media state was published")
+}
+
+func TestAFailureAlexaReportsGoesThroughTheLimitedLog(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	s.NotePlayback(true)
+	s.NotePlaybackFailed("cannot estimate length of the next mp3 frame")
+
+	if s.playing() {
+		t.Error("a failure left the player reporting playing")
+	}
+	if got := out.String(); !strings.Contains(got, "cannot estimate length") {
+		t.Errorf("the log said %q, want the reason Alexa gave", got)
+	}
+
+	s.NotePlayback(true)
+	s.NotePlaybackFailed("")
+	if got := out.String(); !strings.Contains(got, "no reason given") {
+		t.Errorf("a failure with no detail said %q, want it said so", got)
+	}
+}
+
+func TestAFailureDetailIsCutBeforeItIsLogged(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	s.NotePlaybackFailed(strings.Repeat("x", 4096))
+
+	if n := len(out.String()); n > 512 {
+		t.Errorf("one failure wrote %d bytes to a log that lives on /data: a line Alexa "+
+			"prints is still a line a peer asked for", n)
+	}
+}
+
+func TestPlaysDoNotPileUp(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	var mu sync.Mutex
+	inFlight, most, calls := 0, 0, 0
+	release := make(chan struct{})
+	s.UsePlay(func(string) error {
+		mu.Lock()
+		inFlight++
+		calls++
+		if inFlight > most {
+			most = inFlight
+		}
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil
+	})
+
+	c := &conn{sock: fakeAddr{}}
+	s.mu.Lock()
+	for i := 0; i < 8; i++ {
+		s.playLocked(c, "http://x.invalid/a.mp3", false)
+	}
+	s.mu.Unlock()
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		busy := s.playWorking || s.playHasPending
+		s.mu.Unlock()
+		if !busy {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if most > 1 {
+		t.Errorf("%d plays ran at once; each one forks a VM on the Dot, and the volume beside "+
+			"it deliberately runs one worker", most)
+	}
+	if calls == 0 {
+		t.Error("eight play commands ran nothing at all")
+	}
+}
+
+func TestAPlayErrorIsCutBeforeItIsLogged(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	_, wait := wireFakePlay(s, errors.New(strings.Repeat("z", 8192)))
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, "http://x.invalid/a.mp3", false)); err != nil {
+		t.Fatalf("a play command was an error: %v", err)
+	}
+	wait()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if n := len(out.String()); n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := len(out.String()); n > 512 {
+		t.Errorf("one failed play wrote %d bytes to the log", n)
+	}
+}
+
+func TestThePlayerCanBeWiredWhilePlaysArrive(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	s.UsePlay(func(string) error { return nil })
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.UsePlay(func(string) error { return nil })
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		c := &conn{sock: fakeAddr{}}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.mu.Lock()
+			s.playLocked(c, "http://x.invalid/a.mp3", false)
+			s.mu.Unlock()
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		s.mu.Lock()
+		busy := s.playWorking || s.playHasPending
+		s.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the play worker never went idle")
+}
+
+func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	psk := testPSK(t)
+	s := testServer(t, psk)
+	s.UseVolumeKeys(func(bool, int) error { return nil })
+
+	c, err := dial(t, s, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.send(msgSubscribeStates, nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		n := len(s.conns)
+		s.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	s.UsePlay(func(string) error { return nil })
+
+	s.mu.Lock()
+	left := len(s.conns)
+	s.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d connections kept after the player arrived; ListEntities is answered once "+
+			"per connection, so a peer that listed before this holds feature_flags with no "+
+			"PLAY_MEDIA for the life of the socket", left)
+	}
+
+	s.UsePlay(func(string) error { return nil })
+	if got := out.String(); strings.Count(got, "lists the entities again") != 1 {
+		t.Errorf("the log said %q; wiring a player that was already there drops nobody", got)
 	}
 }

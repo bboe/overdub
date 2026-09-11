@@ -169,6 +169,16 @@ the daemon, four separate quirks of `SpeechInteractionManager`, one exact mp3
 encoding, and a stack that a debloated Dot may not have running at all. None of
 that is needed to make a sound.
 
+It is needed to play one. `internal/alexa` keeps that route for the media
+player, where every one of those costs is either irrelevant or somebody else's:
+691ms is nothing against a clip somebody asked Home Assistant to speak, the
+fetch and the decode are hers, and the listener is gone because the clip is
+served by whoever asked for it. What stays is her encoding rule, which is the
+part that fails in a way worth naming -- `cannot estimate length of the next mp3
+frame` in `logcat -s tts-Server` is a variable bitrate she will not demux, and
+it reads exactly like a file that is not there. Both end `Playback ended: ...
+FAILED`, so the watcher keeps that line and reports it as the reason.
+
 **The player is built once and held.** Building it per press was measured at
 333ms, and almost all of that is `exec` plus linking `libOpenSLES`: the helper's
 own work, from its `main` to the buffer queue, was 4ms. A resident process is
