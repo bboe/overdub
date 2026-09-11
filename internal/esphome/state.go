@@ -32,6 +32,12 @@ func (s *Server) readTicked() []reading {
 		{key: s.keyUptime, value: up, ok: upOK},
 		{key: s.keyWifi, value: signal, ok: signalOK},
 	}
+	if s.anyStateSubscriber() {
+		registered, alexaOK := s.alexa()
+		out = append(out, reading{
+			key: s.keyAlexa, value: boolValue(registered), ok: alexaOK, kind: kindBinary,
+		})
+	}
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
 	}

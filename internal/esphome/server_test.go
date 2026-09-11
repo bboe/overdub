@@ -326,6 +326,10 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		muted, _ := watch(0)()
 		return muted != 0, true
 	}
+	s.alexa = func() (bool, bool) {
+		registered, _ := watch(1)()
+		return registered != 0, true
+	}
 
 	go s.Poll(MinSensorTick, time.Hour)
 
@@ -365,13 +369,13 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		}
 	}
 
-	const liveReaders = 5 // cpu, memory, volumes, jack, sound
+	const readersAWakeCosts = 7 // cpu, memory, volumes, jack, sound, mic, registration
 	mu.Lock()
 	defer mu.Unlock()
 	if underLock {
 		t.Error("the device was read with the server lock held")
 	}
-	if ceiling := 2*polled + liveReaders; reads > ceiling {
+	if ceiling := 2*polled + readersAWakeCosts; reads > ceiling {
 		t.Errorf("answering a subscriber took %d readings beyond the wake's own; the snapshot has to replay what was published, or the two readers can disagree",
 			reads-ceiling)
 	}
@@ -604,18 +608,38 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.sound = func() (bool, bool) { return false, true }
 	s.micMute = func() (bool, bool) { return false, true }
 	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
+	s.alexa = func() (bool, bool) { return true, true }
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
 		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.7,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
-		s.keyADB: 0,
+		s.keyADB: 0, s.keyAlexa: 1,
 	}
 }
 
-const sensorCount = 13
+const sensorCount = 14
+
+func listening(s *Server) *conn {
+	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
+	s.mu.Lock()
+	s.conns[c] = struct{}{}
+	s.mu.Unlock()
+	return c
+}
+
+func quiet(s *Server, c *conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	s.mu.Unlock()
+	for len(c.out) > 0 {
+		<-c.out
+	}
+}
 
 func pollAll(s *Server) []reading {
+	c := listening(s)
+	defer quiet(s, c)
 	changed := s.publish("sensors", s.readTicked())
 	changed = append(changed, s.publish("live", s.readLive())...)
 	return append(changed, s.publish("live", []reading{s.readSound()})...)
@@ -1603,6 +1627,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
 				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
 				s.keyADB:                          {"network_adb", msgSelectState},
+				s.keyAlexa:                        {"alexa_registered", msgBinarySensorState},
 			}
 
 			s.sound = tt.sound
@@ -2229,5 +2254,109 @@ func TestTheMicMuteIsPublishedWhenItChanges(t *testing.T) {
 	}
 	if got[0].key != s.keyMicMute || got[0].value != 1 || !got[0].ok {
 		t.Errorf("the mute carried %+v, want the microphone (%d) at 1", got[0], s.keyMicMute)
+	}
+}
+
+func TestAnUnreadableRegistrationIsMissingRatherThanUnregistered(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	s.alexa = func() (bool, bool) { return false, false }
+	defer quiet(s, listening(s))
+
+	for _, r := range s.readTicked() {
+		if r.key != s.keyAlexa {
+			continue
+		}
+		if r.ok {
+			t.Error("a registration that could not be read was reported as a state, which " +
+				"reads as a Dot that is not registered")
+		}
+		if r.kind != kindBinary {
+			t.Error("the registration went out as a sensor rather than a binary sensor")
+		}
+		return
+	}
+	t.Error("the minute poll carries no registration reading at all")
+}
+
+func TestTheRegistrationIsNotForkedWhileNobodyIsListening(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	reads := 0
+	s.alexa = func() (bool, bool) {
+		reads++
+		return true, true
+	}
+
+	for _, r := range s.readTicked() {
+		if r.key == s.keyAlexa {
+			t.Error("the registration was read with nobody subscribed, which is a fork a " +
+				"minute on a Dot Home Assistant has never been told about")
+		}
+	}
+	if reads != 0 {
+		t.Errorf("the registration was read %d times with nobody subscribed", reads)
+	}
+
+	defer quiet(s, listening(s))
+	found := false
+	for _, r := range s.readTicked() {
+		if r.key == s.keyAlexa {
+			found = true
+		}
+	}
+	if !found || reads != 1 {
+		t.Errorf("a subscriber got %d registration readings and %v in the tick; want one of each",
+			reads, found)
+	}
+}
+
+func TestTheFirstSubscriberGetsNoRegistrationUntilThePollTakesOne(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	stubSensors(s)
+	s.publish("sensors", s.readTicked())
+
+	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
+	s.mu.Lock()
+	s.conns[c] = struct{}{}
+	err := s.sendSensorsAt(c, s.snapshot())
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	carries := func(what string) bool {
+		t.Helper()
+		found := false
+		for len(c.out) > 0 {
+			f := <-c.out
+			key, _, _ := sensorReading(t, f.msgType, f.payload)
+			if key == s.keyAlexa {
+				if f.msgType != msgBinarySensorState {
+					t.Errorf("the registration went out in %s as message %d, want %d",
+						what, f.msgType, msgBinarySensorState)
+				}
+				found = true
+			}
+		}
+		return found
+	}
+
+	if carries("the snapshot") {
+		t.Error("the snapshot carried a registration nothing had read; published holds only " +
+			"readings that were taken")
+	}
+	if s.publish("sensors", s.readTicked()); !carries("the woken poll") {
+		t.Error("the poll that the subscriber's wake starts never sent the registration the " +
+			"snapshot had nothing to say about")
 	}
 }

@@ -285,3 +285,38 @@ func TestTheMicrophoneIsListedAsASwitch(t *testing.T) {
 		t.Errorf("%d switch entities were listed, want 1", found)
 	}
 }
+
+func TestTheRegistrationIsListedAsABinarySensor(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+
+	found := 0
+	for _, entity := range listed(t, s) {
+		if entity[0].num != uint64(msgListBinarySensor) || string(entity[1].data) != "alexa_registered" {
+			continue
+		}
+		found++
+		if uint32(entity[2].num) != s.keyAlexa {
+			t.Errorf("alexa_registered has key %d, want %d", entity[2].num, s.keyAlexa)
+		}
+		if entity[2].wire != wireFixed32 {
+			t.Errorf("alexa_registered sent its key as wire type %d, want fixed32 (%d)",
+				entity[2].wire, wireFixed32)
+		}
+		if got := string(entity[3].data); got != "Alexa registered" {
+			t.Errorf("alexa_registered is named %q", got)
+		}
+		if got := string(entity[5].data); got != "" {
+			t.Errorf("alexa_registered has device_class %q, which renames its states away "+
+				"from On and Off", got)
+		}
+		if entity[9].num != entityCategoryDiagnostic {
+			t.Error("alexa_registered is not diagnostic; it would sit among the device's controls")
+		}
+		if got := string(entity[8].data); got != alexaIcon {
+			t.Errorf("alexa_registered has icon %q, want %s", got, alexaIcon)
+		}
+	}
+	if found != 1 {
+		t.Errorf("%d alexa_registered entities were listed, want 1", found)
+	}
+}

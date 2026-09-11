@@ -135,6 +135,7 @@ type Server struct {
 	keySpeaker uint32
 	keyMicMute uint32
 	keyADB     uint32
+	keyAlexa   uint32
 
 	buttons []*physicalButton
 
@@ -177,6 +178,7 @@ type Server struct {
 	sound   func() (bool, bool)
 	micMute func() (bool, bool)
 	cpu     func() (float32, bool)
+	alexa   func() (bool, bool)
 	memory  func() (float32, bool)
 
 	volumeKeys  func(up bool, n int) error
@@ -227,6 +229,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keySpeaker: entityKey("speaker"),
 		keyMicMute: entityKey("microphone_muted"),
 		keyADB:     entityKey("network_adb"),
+		keyAlexa:   entityKey("alexa_registered"),
 		buttons:    newButtons(),
 		uptime:     device.UptimeSeconds,
 		wifi:       device.WifiSignal,
@@ -235,6 +238,7 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		sound:      device.SpeakerPlaying,
 		cpu:        device.CPUTemperature,
 		micMute:    device.MicMuted,
+		alexa:      device.AlexaRegistered,
 		micPress: func() error {
 			return fmt.Errorf("no button to press: the switch is not wired to one")
 		},

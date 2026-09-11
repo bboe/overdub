@@ -21,6 +21,8 @@ const (
 	buttonModeIcon = "mdi:gesture-tap-button"
 
 	adbIcon = "mdi:console-network"
+
+	alexaIcon = "mdi:account-check"
 )
 
 var buttonModes = []string{"intercept", "monitor", "pass through"}
@@ -123,6 +125,7 @@ func (s *Server) listEntities(conn *conn) error {
 	}{
 		{"audio_jack", s.keyJackOn, "Audio jack", "plug", ""},
 		{"speaker_playing", s.keySound, "Speaker playing", "", speakerIcon},
+		{"alexa_registered", s.keyAlexa, "Alexa registered", "", alexaIcon},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)

@@ -238,6 +238,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
+| `binary_sensor.<name>_alexa_registered` | diagnostic | whether the Dot holds an Amazon account, which is what setup gives it; a Dot that was never set up, or that deregistered itself, reads off while the button and the rest of this list go on working |
 | `media_player.<name>_speaker` | none | the volume, the control that changes it, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
 | `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
@@ -245,10 +246,13 @@ Dot's own firewall.
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
 | `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
 
-Uptime and signal are read once a minute, and again when Home Assistant
-subscribes. Both volumes, the jack, the temperature, the memory and the
+Uptime, signal and the registration are read once a minute, and again when Home
+Assistant subscribes. Both volumes, the jack, the temperature, the memory and the
 microphone are read every two and a half seconds, whether the speaker is playing
-every half second, and all of it only while something is subscribed.
+every half second, and all of it only while something is subscribed -- except
+uptime and signal, which are cheap enough to read either way. So the
+registration has no state to show on the first connect after a restart, until
+that subscriber's own reading arrives a moment later.
 
 The microphone switch carries one caution: unmuting needs only the API key, not
 a hand on the Dot, so anything holding that key can turn the microphone back on.

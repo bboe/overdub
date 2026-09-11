@@ -179,6 +179,7 @@ anybody would look for it sooner. Measured on the Dot, per reading:
 | a thermal zone's `temp` | 118us |
 | `/proc/net/wireless` | 1.8ms |
 | `dumpsys audio` | 11.7ms |
+| `dumpsys account` | 10.5ms |
 
 The poll wakes on one interval and reads on another. `liveTick` is half a
 second and `HeavyEvery` is five, so the expensive readings are taken every fifth
@@ -193,13 +194,20 @@ Nothing rides the cheap ticks yet, so today the split costs the wakeups it adds
 and nothing else: a select and a look at whether anybody is subscribed, twice a
 second, and only while somebody is.
 
+`dumpsys account` was measured against `dumpsys audio` in the same loop rather
+than on its own -- 4.66 seconds to its 5.23, for three hundred calls each --
+because the absolute number moves with whatever else the device is doing, and
+what the tick decision needs is the comparison.
+
 So the short tick carries the volume, the temperature, the memory, the jack and
-whether the microphone is muted, and the minute tick carries the uptime and the
-signal. The uptime is on the minute
+whether the microphone is muted, and the minute tick carries the uptime, the
+signal and whether the Dot is registered. The uptime is on the minute
 because it changes on every read whatever the cadence, so a short tick would
 publish it twenty-four times as often for nothing; the signal is there because
 it is sixteen times the cost of reading `/proc/meminfo` and twenty-seven times
-`/proc/uptime`, and moves slowly.
+`/proc/uptime`, and moves slowly. The registration is there because it is a
+fork, and because the thing it reports changes when somebody sets the Dot up or
+deregisters it and at no other time.
 Five readings on the short tick cost about 24ms of a core every two and a half
 seconds, which is one percent, and almost all of it is the two forks: the
 volume's 11.7ms and the microphone's 12ms, against a few hundred microseconds
@@ -411,6 +419,69 @@ about a second and a half -- and about three seconds for sound that begins just
 after a stalled tick, since the guard starts the delay again there. Riding the
 fork's two and a half seconds instead of sampling every half would make the
 ordinary case three and a half and take most of Alexa's replies with it.
+
+Whether the Dot is registered comes out of `dumpsys account`, which lists the
+accounts Android's `AccountManager` holds. A registered Dot has one, and the type
+is Amazon's:
+
+```
+  Accounts: 1
+    Account {name=Bryce, type=com.amazon.account}
+```
+
+An unregistered one says `Accounts: 0` and nothing under it. Measured on two
+Dots, one of each.
+
+The reading is `alexa.Installed()`'s complement rather than a second opinion on
+it. `amazon.speech.sim` is in `/system/priv-app`, so it answers `pm path` on a
+Dot that has never been set up at all, measured on the unregistered one: the
+package says the stack is there and says nothing about whether it has an account
+to use.
+
+What the registration does **not** gate is the clip route. A clip asked for over
+the API played through to `Playback ended: ... SUCCESS` on a Dot with no account
+at all, measured when that route was added, so this reading is not a predictor
+of the media player and must not be read as one. What it reports is the
+condition nothing else here surfaces: a Dot that was never set up, or that
+deregistered itself, keeps answering the button and every entity on this list
+while it has stopped being an Echo.
+
+The fork is taken only while somebody is subscribed, which is the rule the live
+tick already follows and the minute tick did not have to before: the two
+readings it carried were `/proc` reads costing microseconds, and this one is a
+fork. So a Dot that is installed and never added to Home Assistant spends
+nothing on it at all, rather than 10.5ms a minute for ever.
+
+`PollSensors` itself is not gated, and must not be: it re-asserts the firewall
+rule and reads the adb mode, neither of which is for a subscriber's benefit. The
+gate is around the one reading.
+
+What the gate costs is the first state. A subscriber is answered from
+`published`, which holds only readings that were actually taken, so the very
+first one to arrive is sent no registration at all rather than a missing one:
+the key is not there to replay. The reading follows a moment later, when the
+wake that subscribing sends reaches `PollSensors`. Every later subscriber is
+answered from the last reading taken while somebody was listening.
+
+So the entity is unknown for that moment rather than unavailable, and only on
+the first connect after a restart. That is the trade against a fork a minute on
+a device nobody is asking.
+
+What the parser must not read as an account is the authenticator:
+
+```
+    ServiceInfo: AuthenticatorDescription {type=com.amazon.account}, ComponentInfo{...}
+```
+
+That line names the same type, and it is there on the unregistered Dot too,
+which is the whole trap: a search for `com.amazon.account` alone reports every
+Dot registered. So a line counts only if it opens with `Account {` and ends with
+the type, and both halves have a fixture.
+
+A dump that carries no `Accounts:` line at all is no reading rather than an
+unregistered Dot, for the same reason the signal's zero is no reading: off is a
+state somebody would act on, and a `dumpsys` that failed or changed its shape is
+not evidence of one.
 
 The volume comes out of `dumpsys audio`, which carries both the numbers it
 takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
