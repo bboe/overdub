@@ -13,6 +13,7 @@ const (
 	kindSelect
 	kindSwitch
 	kindMedia
+	kindText
 )
 
 type reading struct {
@@ -147,12 +148,22 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 			msgType, payload = msgSwitchState, switchState(r.key, r.value != 0)
 		case kindMedia:
 			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.state, r.value, r.muted)
+		case kindText:
+			msgType, payload = msgTextState, textState(r.key, r.text)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func textState(key uint32, text string) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.str(2, text)
+	p.boolean(3, false) // missing_state
+	return p.b
 }
 
 func selectState(key uint32, choice string) []byte {

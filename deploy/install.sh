@@ -292,6 +292,7 @@ adb push "$boot_script" /data/local/tmp/s.sh
 
 adb shell 'su -c "
   mkdir -p /data/local/bin
+  chmod 700 /data/local/bin
   cp /data/local/tmp/overdub /data/local/bin/overdub.new
   chmod 755 /data/local/bin/overdub.new
   mv -f /data/local/bin/overdub.new /data/local/bin/overdub
@@ -319,6 +320,58 @@ elif [ "$answer" != yes ]; then
   exit 1
 fi
 echo "binary verified on device ($built_md5)"
+
+bin_mode=$(adb shell 'su -c "ls -ldn /data/local/bin"' | tr -d "\r" |
+  grep -Eo '^d[rwx-]{9}' | head -1)
+if [ "$bin_mode" != drwx------ ]; then
+  echo "INSTALL FAILED: /data/local/bin is ${bin_mode:-unreadable}, want drwx------." >&2
+  echo "  The API key lives there, and the mode is asserted rather than inherited:" >&2
+  echo "  mkdir leaves 0700 or keeps whatever an older install had." >&2
+  exit 1
+fi
+echo "key directory verified on device ($bin_mode)"
+
+mapjar=deploy/mapdump/mapdump.jar
+if [ -f "$mapjar" ]; then
+  adb push "$mapjar" /data/local/tmp/mapdump.jar
+  adb shell 'su -c "
+    mkdir -p /data/local/map
+    cp /data/local/tmp/mapdump.jar /data/local/map/mapdump.jar
+    chown -R 32051.32051 /data/local/map
+    chmod 755 /data/local/map
+    chmod 644 /data/local/map/mapdump.jar
+    rm -f /data/local/tmp/mapdump.jar
+  "'
+  jar_md5=$(local_md5 "$mapjar")
+  installed_jar=$(adb shell 'su -c "md5 /data/local/map/mapdump.jar"' | tr -d "\r" |
+    grep -Eo '^[0-9a-f]{32}' | head -1)
+  if [ "$jar_md5" != "$installed_jar" ]; then
+    echo "INSTALL FAILED: the jar on the device is ${installed_jar:-no hash}, built $jar_md5" >&2
+    exit 1
+  fi
+  jar_readable=$(adb shell 'su 32051 -c "[ -r /data/local/map/mapdump.jar ] && echo yes || echo no"' |
+    tr -d "\r" | grep -m1 -x -e yes -e no || true)
+  if [ "$jar_readable" != yes ]; then
+    echo "INSTALL FAILED: uid 32051 cannot read /data/local/map/mapdump.jar" >&2
+    echo "  (the device said ${jar_readable:-nothing}). MAP's own uid is what loads it, so" >&2
+    echo "  app_process would answer ClassNotFoundException on an empty DexPathList." >&2
+    exit 1
+  fi
+  echo "mapdump.jar verified on device ($jar_md5); alexa commands are available"
+else
+  echo "no $mapjar was built here."
+  on_device=$(adb shell 'su -c "[ -f /data/local/map/mapdump.jar ] && echo yes || echo no"' |
+    tr -d "\r" | grep -m1 -x -e yes -e no || true)
+  case "$on_device" in
+    yes) echo "  The device already carries one, so the Alexa command box stays available"
+         echo "  and the daemon still holds the account credential. To take it away:"
+         echo "    adb shell 'su -c \"rm -rf /data/local/map\"'" ;;
+    no)  echo "  The device carries none either, so the Alexa command box is not offered."
+         echo "  deploy/mapdump/build.sh builds one; README.md says what it needs." ;;
+    *)   echo "  The device did not say whether it carries one, so nothing here can tell you" >&2
+         echo "  whether the command box is offered." >&2 ;;
+  esac
+fi
 
 boot_md5=$(local_md5 "$boot_script")
 installed_boot_md5=$(adb shell 'su -c "md5 /sbin/.core/img/.core/service.d/overdub.sh"' |

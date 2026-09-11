@@ -11,6 +11,7 @@ KEY=/data/local/bin/.overdub-noise-key
 ADBKEY=/data/local/bin/adb_keys
 ADBKEYS=/data/misc/adb/adb_keys
 STAGE=/data/local/tmp/overdub-install
+MAP=/data/local/map
 
 if ! adb shell 'su -c "id"' | tr -d '\r' | grep -q 'uid=0'; then
   echo "no root here: su -c id did not report uid=0" >&2
@@ -27,7 +28,7 @@ adb shell "su -c 'rm -f $BOOT'"
 
 adb shell "su -c '
   rm -f $BIN ${BIN}.new $KEY $ADBKEY
-  rm -rf $STAGE
+  rm -rf $STAGE $MAP
   rm -f /data/local/tmp/overdub /data/local/tmp/s.sh
 '"
 
@@ -45,7 +46,7 @@ adb shell "su -c '
 sleep 6   # the supervisor recreates the log every 5
 
 answer=$(adb shell "su -c '
-  for path in $BOOT $BIN ${BIN}.new $KEY $STAGE $LOG; do
+  for path in $BOOT $BIN ${BIN}.new $KEY $STAGE $MAP $LOG; do
     [ -e \"\$path\" ] && echo \"\$path\"
   done
   echo swept
@@ -56,7 +57,7 @@ if ! printf '%s\n' "$answer" | grep -qx swept; then
   exit 1
 fi
 left=$(printf '%s\n' "$answer" |
-  grep -Fx -e "$BOOT" -e "$BIN" -e "${BIN}.new" -e "$KEY" -e "$STAGE" -e "$LOG" || true)
+  grep -Fx -e "$BOOT" -e "$BIN" -e "${BIN}.new" -e "$KEY" -e "$STAGE" -e "$MAP" -e "$LOG" || true)
 
 fail=0
 for path in $left; do

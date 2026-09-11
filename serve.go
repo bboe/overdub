@@ -44,6 +44,8 @@ const (
 	alexaWait  = 30 * time.Second
 	alexaTries = 10
 
+	commandRetry = 5 * time.Minute
+
 	multiGap = 350 * time.Millisecond
 )
 
@@ -231,6 +233,20 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 		})
 	}
 
+	switch jar, registered, known := commandState(); {
+	case commandReady(jar, registered, known):
+		server.UseCommand(alexa.NewClient().Send)
+	case !jar:
+		log.Printf("alexa: no %s, so nothing here can run a command and the api offers no "+
+			"command box; asking again every %v", alexa.JarPath, commandRetry)
+		go waitForCommand(server)
+	default:
+		log.Printf("alexa: this dot holds no amazon account, so a command would have no "+
+			"credential to run with and the api offers no command box; asking again every %v",
+			commandRetry)
+		go waitForCommand(server)
+	}
+
 	go waitForAlexa(server)
 
 	api.Store(server)
@@ -248,6 +264,32 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
 	withdraw()
 	os.Exit(1)
+}
+
+func commandState() (jar, registered, known bool) {
+	if !alexa.JarInstalled() {
+		return false, false, false
+	}
+	registered, known = device.AlexaRegistered()
+	return true, registered, known
+}
+
+func waitForCommand(server *esphome.Server) {
+	for {
+		time.Sleep(commandRetry)
+		if commandReady(commandState()) {
+			server.UseCommand(alexa.NewClient().Send)
+			log.Printf("alexa: a jar and an account are both here now; the command box is offered")
+			return
+		}
+	}
+}
+
+func commandReady(jar, registered, known bool) bool {
+	if !jar {
+		return false
+	}
+	return registered || !known
 }
 
 func waitForAlexa(server *esphome.Server) {

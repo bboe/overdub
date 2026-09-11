@@ -22,8 +22,15 @@ const (
 
 	adbIcon = "mdi:console-network"
 
+	commandIcon = "mdi:microphone-message"
+
 	alexaIcon = "mdi:account-check"
 )
+
+// ListEntitiesServicesArgument.ServiceArgType
+const serviceArgString = 3
+
+const commandMaxLength = 255
 
 var buttonModes = []string{"intercept", "monitor", "pass through"}
 
@@ -182,6 +189,34 @@ func (s *Server) listEntities(conn *conn) error {
 	adb.u32(8, entityCategoryConfig)
 	if err := s.send(conn, msgListSelect, adb.b); err != nil {
 		return err
+	}
+
+	if s.hasCommand() {
+		var command pb
+		command.str(1, "alexa_command")
+		command.fixed32(2, s.keyText)
+		command.str(3, "Alexa command")
+		command.str(5, commandIcon)
+		command.boolean(6, false) // disabled_by_default
+		command.u32(7, entityCategoryConfig)
+		command.u32(8, 0)                // min_length
+		command.u32(9, commandMaxLength) // max_length
+		command.u32(11, 0)               // mode: TEXT
+		if err := s.send(conn, msgListText, command.b); err != nil {
+			return err
+		}
+
+		var arg pb
+		arg.str(1, "text")
+		arg.u32(2, serviceArgString)
+
+		var service pb
+		service.str(1, "send_command")
+		service.fixed32(2, s.keyCommand)
+		service.sub(3, arg.b)
+		if err := s.send(conn, msgListService, service.b); err != nil {
+			return err
+		}
 	}
 
 	return s.send(conn, msgListEntitiesDone, nil)

@@ -18,6 +18,13 @@ by anyone, and a FireOS update can invalidate any of it. Rooting voided Amazon's
 warranty, and the flashing that gets you there can brick the Dot; both are
 behind you before anything here runs.
 
+**Alexa commands are optional, and what they risk is the account, not the Dot.**
+They reach an undocumented endpoint with a credential that carries the whole
+Amazon account, and that endpoint is the Alexa app's own rather than an
+interface Amazon offers, so driving it may sit outside Amazon's terms. Read
+[Alexa commands](#alexa-commands) before building MapDump. Without the jar the
+daemon never offers them.
+
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
 daemon holds it. The `Action button mode` select gives it back without stopping
@@ -121,11 +128,28 @@ and makes the empty `libpthread` stub Bionic needs and cgo asks for. Set
 `ANDROID_NDK_HOME` if the NDK is not where it looks; it says so if it cannot
 find one.
 
+Alexa commands additionally need `mapdump.jar`, which is not in the repository
+and is not built by `build.sh`. Skip this if you do not want them. `$SDK` is your
+Android SDK root, and `deploy/mapdump/build.sh` names both jars, where to
+download them, and the JDK it needs:
+
+```sh
+ANDROID_JAR=$SDK/platforms/android-22/android.jar \
+R8_JAR=$SDK/build-tools/34.0.0/lib/d8.jar deploy/mapdump/build.sh
+```
+
 ## Install
 
 ```sh
 deploy/install.sh kitchen                          # binary, boot script, key
 ```
+
+`install.sh` picks the jar up from `deploy/mapdump/mapdump.jar` if it is there
+and says so either way; nothing else about the install changes.
+
+Installing under a **different** name needs a reboot to finish. The boot script
+is read once at boot, so the loop that respawns the daemon keeps the old name
+until then; the install prints `REBOOT REQUIRED` when it sees that.
 
 More than one Dot on `adb` means telling it which. `install.sh` uses plain
 `adb`, so `ANDROID_SERIAL` picks the target:
@@ -187,8 +211,10 @@ respawning a half-deleted install. The daemon gets `SIGTERM` rather than being
 killed outright, so it gives the button back and destroys its uinput clones on
 the way out.
 
-Everything goes: the boot script, the binary, the API key, and the log the boot
-script writes. `/data/local/bin` goes with them if nothing else is left in it.
+Everything goes: the boot script, the binary, the API key, `mapdump.jar` and the
+directory it sits in, and the log the boot script writes. `/data/local/bin` goes
+with them if nothing else is left in it. Removing the jar revokes nothing: see
+[Alexa commands](#alexa-commands).
 
 The tcp/6053 rule the daemon opened goes too, once the daemon is confirmed
 gone, so no reboot is needed. An uninstall that reports trouble stops before
@@ -244,6 +270,7 @@ Dot's own firewall.
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
+| `text.<name>_alexa_command` | config | a box that runs what you type on the Echo as though it had been spoken; listed only where `mapdump.jar` is installed and the Dot is registered |
 | `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
 
 Uptime, signal and the registration are read once a minute, and again when Home
@@ -437,6 +464,69 @@ without chiming, so silence there is the mode working as asked.
 The mode selects are still the only entities Home Assistant writes to. Everything
 else reports, the button included, and together they are the connection proved
 end to end in both directions.
+
+### Alexa commands
+
+With `mapdump.jar` installed, the Dot gains a text box on its device page and a
+matching action. Either runs text on the Echo as though somebody had said it:
+
+```yaml
+action: esphome.kitchen_send_command
+data:
+  text: play dance party music on Amazon Music
+```
+
+Two things have to be true: the jar has to be installed, and the Dot has to be
+registered to an Amazon account. If either is missing, neither the box nor the
+action is advertised at all, rather than being offered and failing on every
+call, and the daemon log says which one it was. The one exception is a Dot that
+cannot be asked -- if the registration reading itself fails, the box is offered
+rather than hidden, because the jar is the switch somebody chose and a reading
+that did not happen is not an answer. The
+box shows the last command it was given, so an automation that sent one can be
+seen to have sent it.
+
+**Registration is the credential**, which is why it gates the feature.
+`binary_sensor.<name>_alexa_registered` reports it, and a Dot that was factory
+reset, or rooted and restored, usually is not registered.
+
+Registering one is Alexa's own process, and the daemon's only part in it is to
+get out of the way:
+
+1. Set `Action button mode` to `pass through`, which gives Alexa her button
+   back without stopping anything else here.
+2. Hold the action button until the ring turns orange. That is Alexa's own long
+   press, and it is what the daemon was intercepting.
+3. Add the device in the Alexa app. The Dot brings up its own Wi-Fi network to
+   finish, so it leaves your LAN and Home Assistant shows it as unavailable
+   until setup ends. `adb` over USB is unaffected; `adb` over the network goes
+   with the LAN.
+4. Set the button mode back to `intercept`.
+
+The daemon needs nothing else: it asks again every five minutes, so the command
+box appears on its own once the Dot is registered, with no restart and no
+reinstall.
+
+> **This is an unofficial endpoint, reached with an account-level credential.**
+> `/api/behaviors/preview` is undocumented and its request shape has drifted
+> before.
+>
+> What MapDump reads is the OAuth refresh token this Echo was registered with,
+> and the daemon trades it for cookies scoped to `.amazon.com` rather than to an
+> Alexa subdomain. Measured, what comes back is `at-main`, `sess-at-main`,
+> `session-id`, `session-token`, `ubid-main` and `x-main` -- the set a browser
+> signed in to amazon.com carries. So while the daemon runs it holds a signed-in
+> session on the retail account, order history and addresses included: the
+> breadth [alexa_media_player](https://github.com/alandtse/alexa_media_player)
+> gets by asking you to log in, arrived at from the other end. Not AWS, which is
+> a separate sign-in. The token and the cookies are kept in memory and never
+> written to disk, and the only lock on the port that reaches them is the API
+> key.
+>
+> The failure mode to watch for is not an error from the daemon but the Dot
+> quietly deregistering. To revoke what it holds, deregister the Dot in the
+> Alexa app or under Manage Your Content and Devices; uninstalling removes the
+> jar but revokes nothing already extracted.
 
 ### Network ADB
 

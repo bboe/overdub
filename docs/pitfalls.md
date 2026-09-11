@@ -72,6 +72,43 @@ agreed with the device for the wrong reason. Anything reached through
 `settings` always has. `am` is exec'd directly and is not the same case;
 `head -1` is the whole test.
 
+**`/data/local/bin`'s mode used to be whatever created it, and it varied between
+Dots.** `mkdir -p` gives `0700` under root's umask, and a directory that already
+existed keeps whatever it had. Measured across three Dots running the same
+install: `drwx------` on one and `drwxr-xr-x` on the other two, which is the sort
+of difference that decides whether a bug reproduces. `install.sh` now chmods it
+to `0700` and reads the mode back, so it is a fact rather than an inheritance;
+an older install is corrected by the next one.
+
+So a jar under it is a jar that may or may not load, which is worse than one
+that never does. MAP's uid cannot traverse the `0700` case, and what
+`app_process` reports when it cannot read the classpath it was handed is not a
+permission error: it is `ClassNotFoundException: MapDump` on `DexPathList[[]]`,
+an empty path list, followed by `Aborted` -- which reads exactly like a jar built
+wrong. Measured both ways on the `0700` Dot: from `/data/local/bin/map` the
+class is not found, and from `/data/local/map`, owned by 32051 with
+`/data/local` already `o+x`, the same jar loads and reports `accounts: 1`. On the
+other two the old path would have worked, and did: one of them ran that build in
+August.
+
+The API key does not depend on this either way -- it is `0600` wherever the
+directory stands -- but the jar cannot be, because the uid that reads it is not
+root.
+
+**Anything running as uid 32051 cannot write to `/data/local/tmp`.** It is
+`root:shell`, and the failure is `EACCES` from inside dalvik well after the
+process has started. So the jar's own directory is owned by that uid, and
+nothing the jar does at runtime touches the shared tmp directory. The install
+passes through it, the way the binary and the boot script do, and for the same
+reason: the jar is hash-verified against the local build after the copy and is
+not a secret, so the `0666`-in-a-`0771`-directory hazard that sends the API key
+through a private directory does not apply to it.
+
+**Go cannot resolve names on this device by default.** There is no
+`/etc/resolv.conf`, so every lookup fails against `::1` with "connection
+refused". `internal/alexa` reads `net.dns1`/`net.dns2` and builds its own
+resolver out of them.
+
 **The Dot's own firewall.** FireOS runs iptables with `INPUT policy DROP` and a
 port allowlist, and `tcp/6053` is not on it, so Home Assistant times out adding
 the device **with nothing in the daemon log**: the SYN never reaches userspace.

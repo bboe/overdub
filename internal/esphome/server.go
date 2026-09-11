@@ -43,6 +43,8 @@ const (
 	logTotal  = 5000
 
 	maxLoggedString = 64
+
+	commandQueue = 4
 )
 
 // Message ids from esphome/components/api/api.proto.
@@ -71,12 +73,17 @@ const (
 	msgSubscribeHAServ   = 34
 	msgHomeassistantAct  = 35
 	msgSubscribeHAStates = 38
+	msgListService       = 41
+	msgExecuteService    = 42
 	msgListSelect        = 52
 	msgSelectState       = 53
 	msgSelectCommand     = 54
 	msgListMediaPlayer   = 63
 	msgMediaPlayerState  = 64
 	msgMediaPlayerCmd    = 65
+	msgListText          = 97
+	msgTextState         = 98
+	msgTextCommand       = 99
 	msgListEvent         = 107
 	msgEventState        = 108
 )
@@ -136,6 +143,8 @@ type Server struct {
 	keyMicMute uint32
 	keyADB     uint32
 	keyAlexa   uint32
+	keyText    uint32
+	keyCommand uint32
 
 	buttons []*physicalButton
 
@@ -163,6 +172,9 @@ type Server struct {
 	volHasPending bool
 	volWant       volumeWant
 
+	cmdWorking bool
+	cmdQueue   []string
+
 	soundOn     bool
 	soundGap    time.Duration
 	onDelay     time.Duration
@@ -183,6 +195,7 @@ type Server struct {
 
 	volumeKeys  func(up bool, n int) error
 	play        func(url string) error
+	command     func(text string) error
 	micPress    func() error
 	adbMode     func() (device.ADBMode, bool)
 	adbSet      func(device.ADBMode) error
@@ -230,6 +243,8 @@ func NewServer(name, model, mac string, psk []byte) *Server {
 		keyMicMute: entityKey("microphone_muted"),
 		keyADB:     entityKey("network_adb"),
 		keyAlexa:   entityKey("alexa_registered"),
+		keyText:    entityKey("alexa_command"),
+		keyCommand: entityKey("send_command"),
 		buttons:    newButtons(),
 		uptime:     device.UptimeSeconds,
 		wifi:       device.WifiSignal,
@@ -554,6 +569,52 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 				default:
 				}
 			}
+		}
+		return nil
+
+	case msgTextCommand:
+		var key uint32
+		var text string
+		if err := walk("TextCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				text = string(f.data)
+			}
+		}); err != nil {
+			return err
+		}
+		if key == s.keyText {
+			s.commandLocked(conn, text)
+		}
+		return nil
+
+	case msgExecuteService:
+		var key uint32
+		var text string
+		var argErr error
+		if err := walk("ExecuteServiceRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				if err := pbWalk(f.data, func(a pbField) {
+					if a.field == 4 && text == "" {
+						text = string(a.data)
+					}
+				}); err != nil && argErr == nil {
+					argErr = err
+				}
+			}
+		}); err != nil {
+			return err
+		}
+		if argErr != nil {
+			return fmt.Errorf("ExecuteServiceArgument: %w", argErr)
+		}
+		if key == s.keyCommand {
+			s.commandLocked(conn, text)
 		}
 		return nil
 

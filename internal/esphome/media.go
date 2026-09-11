@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bboe/overdub/internal/device"
 )
@@ -163,6 +165,93 @@ func (s *Server) playWorker() {
 		if err := play(url); err != nil {
 			s.peerLogf("playback: %s", truncate(err.Error()))
 			s.NotePlayback(false)
+		}
+	}
+}
+
+func (s *Server) UseCommand(send func(text string) error) {
+	s.mu.Lock()
+	relist := s.command == nil && send != nil
+	s.command = send
+	if send != nil {
+		if _, told := s.published[s.keyText]; !told {
+			s.published[s.keyText] = reading{key: s.keyText, ok: true, kind: kindText}
+		}
+	}
+	var dropped []string
+	if relist {
+		for c := range s.conns {
+			dropped = append(dropped, c.sock.RemoteAddr().String())
+			delete(s.conns, c)
+			c.sock.Close()
+		}
+	}
+	s.mu.Unlock()
+
+	for _, addr := range dropped {
+		log.Printf("esphome api: dropped %s so it lists the entities again; alexa commands "+
+			"can run now", addr)
+	}
+}
+
+func (s *Server) hasCommand() bool { return s.command != nil }
+
+func (s *Server) commandLocked(conn *conn, text string) {
+	text = strings.TrimSpace(text)
+	if n := utf8.RuneCountInString(text); n > commandMaxLength {
+		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %d characters, and the "+
+			"box takes %d; it was dropped rather than sent",
+			conn.sock.RemoteAddr(), n, commandMaxLength)
+		return
+	}
+	if s.command == nil {
+		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s, and no credential was "+
+			"found to run it with", conn.sock.RemoteAddr(), truncate(text))
+		return
+	}
+	if len(s.cmdQueue) >= commandQueue {
+		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s, and %d are already "+
+			"waiting; it was dropped rather than queued",
+			conn.sock.RemoteAddr(), truncate(text), len(s.cmdQueue))
+		return
+	}
+	if text == "" {
+		conn.noted = fmt.Sprintf("esphome api: %s emptied the command box",
+			conn.sock.RemoteAddr())
+	} else {
+		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s",
+			conn.sock.RemoteAddr(), truncate(text))
+	}
+
+	s.cmdQueue = append(s.cmdQueue, text)
+	if s.cmdWorking {
+		return
+	}
+	s.cmdWorking = true
+	go s.commandWorker()
+}
+
+func (s *Server) commandWorker() {
+	for {
+		s.mu.Lock()
+		if len(s.cmdQueue) == 0 {
+			s.cmdWorking = false
+			s.mu.Unlock()
+			return
+		}
+		text, send := s.cmdQueue[0], s.command
+		s.cmdQueue = s.cmdQueue[1:]
+		s.mu.Unlock()
+
+		if send == nil {
+			continue
+		}
+		s.publish("command", []reading{{key: s.keyText, text: text, ok: true, kind: kindText}})
+		if text == "" {
+			continue
+		}
+		if err := send(text); err != nil {
+			s.peerLogf("alexa command: %v", err)
 		}
 	}
 }

@@ -17,6 +17,14 @@ import (
 
 const WifiInterface = "wlan0"
 
+func Getprop(name string) string {
+	value, err := readProp(name)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
 func MACAddress(iface string) string {
 	b, err := os.ReadFile("/sys/class/net/" + iface + "/address")
 	if err != nil {

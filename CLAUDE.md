@@ -32,7 +32,8 @@ instead.
 ```
 main.go, serve.go  the flag, the constants, and the wiring
 internal/alexa     her synthesizer: the intent that hands it a clip, and the
-                   log tail that says whether the clip played
+                   log tail that says whether the clip played; and her cloud:
+                   the credential MapDump recovers, and the text command it buys
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them
 internal/button    the exclusive grab, the clone, the read loop, whether the
@@ -86,6 +87,7 @@ evening.
 | turn on network adb, or touch the microphone mute | `docs/device.md` |
 | make a sound, or play one | `docs/audio.md` |
 | change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |
+| touch the Alexa command path, the credential, or MapDump | `docs/command.md` |
 | run anything against the real device | `docs/hardware.md` |
 
 @docs/constraints.md

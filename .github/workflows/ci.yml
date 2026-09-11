@@ -43,8 +43,10 @@ jobs:
 
       # The shell is half of this repository, so it is linted like the Go.
       - run: sudo apt-get install -y shellcheck
-      - run: bash -n build.sh deploy/*.sh
-      - run: shellcheck -S style build.sh deploy/*.sh
+      # A rule rather than a list, like the mode check below: a script added in a
+      # directory nobody remembered is still linted.
+      - run: git ls-files -z '*.sh' | xargs -0 bash -n
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck -S style
       # A mode is invisible to every other check here: lint, vet, the tests and
       # shellcheck all read these files rather than exec them. A script that
       # lost its bit fails for the first person to run the command README.md
@@ -53,3 +55,29 @@ jobs:
         run: |
           bad=$(git ls-files -s -- '*.sh' | awk '$1 != "100755" { print $4 }')
           [ -z "$bad" ] || { echo "not executable:"; echo "$bad"; exit 1; }
+
+      # MapDump loads Amazon classes by name, so a mangled one fails on the
+      # device and nowhere earlier: a wrong name is still a valid string
+      # literal, and compiling proves nothing about it. The shape is what can
+      # be checked here.
+      - run: deploy/check-identifiers.sh
+
+      # Build the jar as well. That catches neither a wrong class name nor a
+      # wrong uid, but it does prove MapDump.java still compiles and that its
+      # build.sh still works, and nothing else here covers either.
+      #
+      # The JDK is pinned because the window is narrow: javac dropped -source
+      # 1.7 in JDK 20, and D8 wants 11 or newer.
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+        with:
+          packages: 'platforms;android-22 build-tools;34.0.0'
+      - name: Build mapdump.jar
+        run: |
+          export ANDROID_JAR="$ANDROID_SDK_ROOT/platforms/android-22/android.jar"
+          export R8_JAR="$ANDROID_SDK_ROOT/build-tools/34.0.0/lib/d8.jar"
+          ls -l "$ANDROID_JAR" "$R8_JAR"
+          deploy/mapdump/build.sh

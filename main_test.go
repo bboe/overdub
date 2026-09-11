@@ -366,3 +366,24 @@ func TestTheBlueprintFiltersToOneButton(t *testing.T) {
 		t.Error("the blueprint no longer reads event_type")
 	}
 }
+
+func TestTheCommandNeedsBothAJarAndAnAccount(t *testing.T) {
+	for _, tt := range []struct {
+		name                   string
+		jar, registered, known bool
+		want                   bool
+	}{
+		{"a jar and a registered dot", true, true, true, true},
+		{"no jar at all", false, true, true, false},
+		{"a jar on a dot with no account", true, false, true, false},
+		{"a jar, and no reading either way", true, false, false, true},
+		{"no jar, and no reading either way", false, false, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := commandReady(tt.jar, tt.registered, tt.known); got != tt.want {
+				t.Errorf("commandReady(%v, %v, %v) = %v, want %v",
+					tt.jar, tt.registered, tt.known, got, tt.want)
+			}
+		})
+	}
+}

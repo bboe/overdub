@@ -102,6 +102,20 @@ because it is the only thing that starts the daemon at boot: a reboot part way
 through then leaves a Dot with nothing running rather than a supervisor
 respawning a half-deleted install.
 
+**A rename does not take until the Dot reboots.** The boot script is read once,
+at boot; what respawns the daemon afterwards is a shell loop already holding the
+arguments it was started with. So `install.sh <new name>` writes the new script,
+kills the daemon, and the loop brings it back under the old name. Measured: two
+Dots reinstalled under new names went on reporting the old ones until they were
+rebooted.
+
+`install.sh` already reads the running daemon's own `/proc/<pid>/cmdline` back
+and prints `REBOOT REQUIRED` when the name it finds is not the one it was given,
+which is the only part of an install that a reboot is needed to finish. What is
+worth saying is what happened anyway: the line was printed and went unread,
+because the output was being filtered for other words. A check that reports
+correctly is only half of one.
+
 **The binary goes before the kill, and that is not tidiness.** The supervisor is
 a live shell loop holding its script as text, so deleting that file does not
 reach it, and a kill on its own is answered five seconds later by a respawn. What
@@ -144,3 +158,30 @@ the boot ramdisk and is rebuilt from `boot.img` every boot, `/system` is read-on
 and Magisk exists to leave it alone, and `/data/local/tmp` is `root:shell` scratch
 and the one place an install can be wiped from under you. What is left is a
 directory of our own under `/data`.
+
+**`mapdump.jar` cannot live there, and gets a directory of its own.** The jar is
+loaded by MAP's uid rather than by the daemon, and `/data/local/bin` is root's
+alone -- `0700`, asserted by the install rather than inherited, after three Dots
+were measured carrying two different modes -- so the jar goes to
+`/data/local/map`, owned by 32051 and `0755`.
+`/data/local` is already `o+x` on this build, so that uid can reach it by name.
+docs/pitfalls.md has what it looks like when this is got wrong, which is not a
+permission error, and why the varying mode is the thing not to build on.
+
+Ownership is the part that matters rather than the path: dalvik may want to
+write beside the jar, and on this build it does not -- the directory holds the
+jar and nothing else -- but the jar has to be readable by the uid that runs it.
+
+`install.sh` reads the jar back like everything else it pushes: by hash, and
+then by asking uid 32051 whether it can read it, because a jar that landed
+correctly somewhere that uid cannot reach fails at the far end of a command with
+a message about a class.
+
+The question is asked rather than inferred from `ls`. The uid is not a column
+anybody can count on -- Android's toolbox `ls -ln` prints no link count and
+busybox's does, and Magisk puts its own busybox first on `PATH` -- and the uid
+was only ever a proxy for the thing that matters. `[ -r ]` as that uid covers the
+file's mode and the directory's traversal at once. Measured on a Dot: with the
+directory root-owned and `0700`, which is the arrangement that broke, the answer
+is `no`; owned by 32051 it is `yes`, and `0700` owned by 32051 is also `yes`,
+because owner permissions are what that uid gets.
