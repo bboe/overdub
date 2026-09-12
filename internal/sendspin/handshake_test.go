@@ -860,3 +860,13 @@ func TestABinaryFrameBeforeTransportModeIsRefused(t *testing.T) {
 		t.Errorf("err = %v; refused for the wrong reason", got.err)
 	}
 }
+
+func (p *wsPeer) quiet(within time.Duration) bool {
+	p.t.Helper()
+	if err := p.conn.SetReadDeadline(time.Now().Add(within)); err != nil {
+		p.t.Fatal(err)
+	}
+	defer func() { _ = p.conn.SetReadDeadline(time.Time{}) }()
+	_, err := p.r.Peek(1)
+	return err != nil
+}

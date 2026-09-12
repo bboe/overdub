@@ -13,6 +13,8 @@ ADBKEY=/data/local/bin/adb_keys
 ADBKEYS=/data/misc/adb/adb_keys
 STAGE=/data/local/tmp/overdub-install
 MAP=/data/local/map
+APIPORT=6053
+SENDPORT=8928
 
 if ! adb shell 'su -c "id"' | tr -d '\r' | grep -q 'uid=0'; then
   echo "no root here: su -c id did not report uid=0" >&2
@@ -90,23 +92,25 @@ if [ -n "$still" ]; then
 fi
 [ "$fail" = 1 ] && { echo "UNINSTALL INCOMPLETE" >&2; exit 1; }
 
-adb shell "su -c '
-  while iptables -w -C INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT 2>/dev/null; do
-    iptables -w -D INPUT -i wlan0 -p tcp --dport 6053 -j ACCEPT || break
-  done
-'" >/dev/null 2>&1 || true
+for port in "$APIPORT" "$SENDPORT"; do
+  adb shell "su -c '
+    while iptables -w -C INPUT -i wlan0 -p tcp --dport $port -j ACCEPT 2>/dev/null; do
+      iptables -w -D INPUT -i wlan0 -p tcp --dport $port -j ACCEPT || break
+    done
+  '" >/dev/null 2>&1 || true
 
-rule_answer=$(adb shell "su -c 'iptables -L INPUT -n | grep 6053; echo checked'" | tr -d '\r')
-rule=$(printf '%s\n' "$rule_answer" | grep -E 'dpt:6053' || true)
-if ! printf '%s\n' "$rule_answer" | grep -qx checked; then
-  rule="could not read the chain back"
-fi
-if [ -n "$rule" ]; then
-  echo "The tcp/6053 rule is still in the INPUT chain:" >&2
-  echo "  $rule" >&2
-  echo "  Nothing listens behind it now. It lives in the chain rather than on" >&2
-  echo "  disk, so a reboot clears it." >&2
-fi
+  rule_answer=$(adb shell "su -c 'iptables -L INPUT -n | grep $port; echo checked'" | tr -d '\r')
+  rule=$(printf '%s\n' "$rule_answer" | grep -E "dpt:$port" || true)
+  if ! printf '%s\n' "$rule_answer" | grep -qx checked; then
+    rule="could not read the chain back"
+  fi
+  if [ -n "$rule" ]; then
+    echo "The tcp/$port rule is still in the INPUT chain:" >&2
+    echo "  $rule" >&2
+    echo "  Nothing listens behind it now. It lives in the chain rather than on" >&2
+    echo "  disk, so a reboot clears it." >&2
+  fi
+done
 
 echo
 echo "Home Assistant can no longer talk to this device: the API key it was"

@@ -161,6 +161,16 @@ an iptables that answered 0 for a delete that removed nothing would spin there
 holding the chain mutex, which stops `tcp/6053` being re-asserted and takes the
 API away at netd's next rebuild. Sixteen is far past any real duplicate.
 
+`tcp/8928` is the same case as 6053 and is opened the same way, with one ordering
+rule of its own: the rule goes in **after** the listener binds. The API's rule does
+not follow that order, because `esphome.Server.Listen` binds and serves in one
+call, and it cannot matter there: a failed bind exits the daemon, so the rule it
+left behind is not re-asserted and netd's next rebuild takes it. A rule for a port
+nothing listens on is re-asserted every thirty seconds for the rest of the boot and
+removed by nothing, so a Dot that could not read its key or could not bind would
+otherwise hold an ACCEPT open for a port that answers nobody -- the same shape as
+the duplicate-ACCEPT hazard above, arrived at from the other direction.
+
 `-w` on this iptables takes no seconds argument: it waits for the xtables lock
 for as long as it takes, and netd holds that lock constantly. Ten seconds, so a
 held lock is reported rather than waited on. The one-shot call at startup says

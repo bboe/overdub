@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/bboe/overdub/internal/sendspin"
 	"time"
 
 	"github.com/bboe/overdub/internal/button"
@@ -42,10 +45,34 @@ func TestUninstallDeletesTheRuleTheDaemonOpens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("-i %s -p tcp --dport %d -j ACCEPT", wifiIface, apiPort)
-	if !strings.Contains(string(script), want) {
+	shape := fmt.Sprintf("-i %s -p tcp --dport $port -j ACCEPT", wifiIface)
+	if !strings.Contains(string(script), shape) {
 		t.Errorf("deploy/uninstall.sh deletes no rule matching %q, and the daemon adds exactly that",
-			want)
+			shape)
+	}
+	assigned := map[string]string{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if name, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			assigned[name] = value
+		}
+	}
+	looped := map[string]bool{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "for port in ") {
+			continue
+		}
+		for _, field := range strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "for port in ")) {
+			name := strings.Trim(field, `"$;`)
+			if value, ok := assigned[name]; ok {
+				looped[value] = true
+			}
+			looped[name] = true
+		}
+	}
+	for _, port := range []int{apiPort, sendspin.Port} {
+		if !looped[strconv.Itoa(port)] {
+			t.Errorf("deploy/uninstall.sh deletes no rule for tcp/%d, which the daemon opens", port)
+		}
 	}
 }
 

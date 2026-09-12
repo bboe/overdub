@@ -25,6 +25,16 @@ interface Amazon offers, so driving it may sit outside Amazon's terms. Read
 [Alexa commands](#alexa-commands) before building MapDump. Without the jar the
 daemon never offers them.
 
+**The Dot also announces itself to Music Assistant, and cannot play anything
+yet.** It advertises `_sendspin._tcp.local.` on tcp/8928 and speaks Sendspin as
+far as an activated session, reporting `available: false` -- which is the honest
+answer until there is a synchronised clock and an audio path. Music Assistant
+will find it and show it as unavailable. Anything that can reach the Dot on
+`wlan0` can take that session, because the pairing flow is not implemented and
+the fallback key is a published constant; nothing behind it plays audio or reads
+anything off the device, but see [SECURITY.md](SECURITY.md) for what it does
+hold.
+
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
 daemon holds it. The `Action button mode` select gives it back without stopping
@@ -259,9 +269,9 @@ revokes nothing: see [Alexa commands](#alexa-commands). The Sendspin identity
 matters as much as the API key does -- the pairing token is derived from it, so a
 copy left behind stays valid for a Dot that no longer runs this.
 
-The tcp/6053 rule the daemon opened goes too, once the daemon is confirmed
-gone, so no reboot is needed. An uninstall that reports trouble stops before
-that step and leaves the rule in the chain.
+The tcp/6053 and tcp/8928 rules the daemon opened go too, once the daemon is
+confirmed gone, so no reboot is needed. An uninstall that reports trouble stops
+before that step and leaves them in the chain.
 
 Amazon's stack is untouched, because installing never touched it. Home Assistant
 will show the device as unavailable; delete it there when you are done.
