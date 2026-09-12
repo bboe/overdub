@@ -327,8 +327,24 @@ statement is a server claiming something it may not have.
 `player@v1`, one format -- `pcm`, 48000 Hz, **mono**, 16-bit -- and
 `unpaired_access` enabled, which is what lets Music Assistant reach playback over
 a Sentinel-keyed connection once its operator approves the Dot, with no pairing
-exchange at all. Pairing remains offered, because every client must offer the
-Pairing PSK method, and it stays the way to get a long-term credential.
+exchange at all.
+
+Four numbers go out with it, and a server plans playback around them, so each one
+is wrong silently rather than loudly. `buffer_capacity` is two seconds of the
+declared format, 192,000 bytes, derived from the format rather than written down
+beside it, and a test holds it to whole seconds. `min_buffer_ms` is 500.
+`static_delay_ms` and `required_lead_time_ms` are both **0**, which is honest and
+temporary: nothing plays audio yet, so there is no output path whose latency could
+be measured, and the spec allows both to be updated mid-session once there is.
+
+**No pairing method is advertised**, and that is a deliberate deviation: the spec
+says every client offers at least the Pairing PSK method, and this one does not,
+because the flow is not implemented. Claiming a method the client cannot honour
+is worse than claiming none, and the admission rules refuse every `pairing`
+activity as `method_not_supported` on the same basis. `offeredPairMethods` is the
+single source for both what `client/hello` advertises and what those rules
+accept, so the two cannot drift apart. See the skew table below for the second
+reason the shape is not settled yet.
 
 Only roles named in `supported_roles` can become active. A server activating
 something else -- `display@v1`, say -- has its unknown roles dropped rather than
@@ -341,6 +357,293 @@ because the two share one OpenSL player and a mismatch would not fail at the
 format: it would fail as silence, or as a chime at the wrong pitch. Comparing
 against literals is what makes that claim look kept while the chime moves.
 
+## Being found
+
+The Dot advertises `_sendspin._tcp.local.` on **8928** with a `path` TXT record,
+which is required, and a `name` one, which is not but should match the `name` in
+`client/hello`. `tcp/8928` needs a firewall rule exactly as `tcp/6053` does, and
+for the same reason: FireOS runs `INPUT policy DROP` with a port allowlist, so
+without the rule Music Assistant times out with nothing in the daemon log. The
+`udp/5353` the responder answers on needs nothing, because the stock chain
+already accepts it -- Alexa runs her own mDNS. `docs/pitfalls.md` carries the
+`tcp/6053` case and the `udp/5353` one.
+
+The rule is opened **after** the socket binds, not before. A rule added for a port
+nothing listens on is re-asserted every thirty seconds for the life of the daemon
+and deleted by nothing, which `docs/pitfalls.md` records as its own hazard, so the
+order is what keeps a failed bind from leaving one behind.
+
+The responder itself is `internal/mdns`, and it answers for a list of services:
+`sendspin.Advert` hands it one the way `esphome.Advert` hands it the other, so
+`internal/sendspin` never imports `internal/esphome` and the two stay
+independent. docs/mdns.md carries why there is one responder rather than two;
+the rule that a service with no TXT records is refused rather than advertised is
+in `internal/mdns`'s own tests.
+
+One host record covers both. The two services claim the same `<name>.local.` and
+the same A record, which is not a conflict: mDNS conflict detection is about
+different data under one name, and this is the same data, one device advertising
+two services.
+
+The advert goes up only once the listener is behind it. `startSendspin` opens the
+socket before the responder is built, and a Dot that could not read its key or
+could not bind the port advertises no Sendspin service at all rather than
+advertising one that refuses every connection.
+
+## The advert changes when the Dot reboots
+
+The TXT records carry `path` and `name`, which the spec defines, and
+`overdub_boot`, which it does not: the first four bytes of a SHA-256 over
+`/proc/sys/kernel/random/boot_id`, so it holds still for a boot and is different
+after the next one. It exists because of what happens when this Dot dies without
+warning.
+
+A server that loses the Dot retries and then stops. Measured against Music
+Assistant on a Dot, by counting its SYNs against the `tcp/8928` rule while
+nothing listened: attempts at 1, 2, 4, 8 and so on to 256 seconds, ten of them,
+the last 8 minutes 36 seconds after the daemon was killed, and then nothing ever
+again. That matches `aiosendspin`'s own arithmetic -- 511 seconds of sleeping,
+after which its backoff reaches a 300-second ceiling and the reconnect loop
+breaks rather than caps.
+
+After that only discovery can revive it, and discovery is where the second half
+sits. A device killed by a power cut sends no goodbye, so its records stay in
+every querier's cache for the PTR TTL, 75 minutes. python-zeroconf, which Music
+Assistant browses through, fires a callback only for a record it does not already
+hold: identical data is a refresh, and the browser returns without telling anyone.
+So the Dot can come back, bind, open its rule and announce itself as often as it
+likes, and the server that gave up never hears about it. Measured: the Dot
+returned at 16:29 and Music Assistant stayed away for twenty minutes, until a
+restart sent a goodbye that cleared the cache.
+
+A record that **differs** from the cached one is news, and the callback fires --
+`Updated`, which `aiosendspin` acts on exactly as it acts on `Added`. Measured
+three ways: driving a real `zeroconf` browser, identical records produce no
+callback at all and a changed TXT produces one `Updated`; a server whose retry is
+merely *sleeping* is woken by it, because `connect_to_client` sets the event the
+loop waits on, seen at **91** and **84 milliseconds** from listener to handshake;
+and a server that has truly given up is revived, because the finished task is
+popped and a new one started.
+
+What the token does **not** buy is more than one attempt. A revived task carries
+`retry_initial_connection=False`, so it dials once and stops if that dial fails.
+
+The boot id rather than a fresh value per start, because the daemon restarts far
+more often than the device reboots. The supervisor respawns it every five
+seconds, and a token that moved with it would announce a change on every respawn,
+so a crash loop would become a reconnect attempt every five seconds in every
+server on the segment. A crash loop is not quiet either way -- the port is
+flapping -- but it does not need amplifying. What that gives up is a daemon
+absent for more than eight and a half minutes *without* a reboot, and a crash
+loop qualifies: `aiosendspin` resets its backoff only for a session that lasted
+ten seconds, and a five-second respawn never reaches that.
+
+With no boot id to read there is no record at all rather than a value of this
+daemon's own: one that moved per process start would announce a change on every
+five-second respawn, which is the storm the boot id is chosen to avoid.
+
+Not from the clock either. This device's RTC is dead after a long unplug -- every
+cold boot starts at `2010/01/01 00:00` and is corrected twice as the network
+arrives -- so anything derived from the time would repeat across exactly the case
+this is for. The `boot_id` is a kernel-generated UUID, and hashing it keeps the
+kernel's own identifier off the wire and the record short.
+
+What it costs is 21 bytes on every response carrying the TXT, and an update seen
+by every browser on the segment at each reboot rather than only by the servers
+that care.
+
+A clean stop needs none of this: `SIGTERM` withdraws the advert at TTL 0, the
+cache drops it, and the next announcement is an `Added` like any first sighting.
+The token is for the kills, the crashes and the power cuts, which are the cases
+that cannot say goodbye.
+
+It is also a workaround for one library version rather than a protocol feature.
+The spec settled this the other way in Sendspin/spec#207: the guidance telling
+servers to give up was removed, because clients are not obliged to re-announce
+and a speaker that stays dark until someone power-cycles it is the result.
+`aiosendspin` has not implemented that yet -- Sendspin/aiosendspin#348 is open --
+and when it does, a server will keep retrying on its own and this key can go.
+
+## One connection at a time, and what that leaves out
+
+The spec's multi-server rules rank connections by their highest declared activity
+and arbitrate incoming ones against the holder, with provisional connections, a
+30-second window before a connection declares itself, and an allowance for
+holding a pairing connection alongside a playback one.
+
+What is implemented is the floor of that: **one admitted connection**. A second
+server that reaches activation while one is held is answered `client/goodbye`
+with `concurrent_attempt` and closed, which the spec permits --
+clients may cap how many connections they hold and reject the rest as lower
+priority. The slot is released when the holder goes away, and a test covers a
+second server being admitted afterwards.
+
+The ranking, the displacement of a lower-priority holder, and the pairing-beside-
+playback allowance are **not** implemented. With one server on a home network
+none of it is reachable; with two, the Dot will stay with whichever arrived first
+rather than preferring the one that is playing. That is a real difference from the
+spec and it is a deliberate floor, not an oversight.
+
+## Reporting itself unavailable, on purpose
+
+Once a server activates `player@v1`, the Dot sends `client/state` with
+**`available: false`**. That is the honest answer until two things exist: a
+converged time filter, which the spec makes a precondition for a player
+reporting itself available, and an audio path to play into. `supported_commands`
+is present and empty, because the field advertises settability rather than
+reportability, and a player that accepts no commands still has to say so.
+
+## The pairing token must not be logged
+
+The token is `client_key || pairing_psk`, so printing it is the same act as
+handing over the key file, and the daemon log is not a private place. Measured on
+a Dot: `/data/local/tmp` is `drwxrwx--x` and `overdub.log` is `-rw-r--r--`, so
+every uid on the device can read it by name, and the log travels in any `adb
+pull` and any pasted excerpt. Logging the token would make the `0600` check in
+`LoadOrCreateKeys` decorative: a mode that keeps the file from every other uid
+buys nothing while the same bytes sit in a world-readable log.
+
+So the daemon logs the `client_id` and nothing else. To read the token, be root
+and derive it from the key file:
+
+```sh
+adb shell 'su -c "od -An -tx1 /data/local/bin/.overdub-sendspin-key"'
+```
+
+The last 32 bytes are the pairing PSK. The first 32 are the static private key,
+which the token does not carry: it carries the **public** key, so take that from
+the `client_id` the daemon logs at startup, which is that same key in base64url.
+The token is then
+
+```
+SP:0 || base32(public_key || pairing_psk), '=' padding stripped, every 2 a 9
+```
+
+and the spec's own version-0 reference vector is the worked example to check an
+assembly of it against. There is deliberately no flag to print it, because a flag
+that writes a secret to a world-readable file is the same hazard with a switch on
+it -- and no encoder in the tree either, for the reason the pairing-token section
+above gives.
+
+**If a token has already reached a log, treat it as disclosed.** Rotating is
+deleting the key file and restarting: the daemon generates a fresh identity, and
+the Dot then appears to every server as a **new client**, because the `client_id`
+*is* the identity.
+
+## What a peer can make the daemon do
+
+`docs/pitfalls.md` records that a log line is an unauthenticated write to
+`/data`, and `internal/untrustedlog` answers it with a 64-byte cut on peer
+strings and a limit of 20 lines a minute and 5,000 a run. The Sendspin path
+needs the same protection and for a sharper reason: the Sentinel PSK is a
+published constant and the Dot's `client_id` goes out in cleartext in
+`client/init`, so **any host that can route to `wlan0` has everything it needs**
+to complete the handshake and reach the code that logs. Nothing is paired, and
+nothing needs to be.
+
+So every peer-supplied string is cut and rendered with `%q` rather than `%s`.
+`%s` is not a style preference here: a `group_name` or a message type
+containing a newline would otherwise forge whole log lines, and `%q` on a 65 KB
+name renders at about four times its size.
+
+Cutting at the call site is not enough on its own, which is why the line itself is
+bounded as well. Peer bytes reach the log inside errors rather than only as
+strings: a `json` error quotes the offending literal verbatim, and it arrives
+already formatted, folded into a `%v` that no `Cut` at this end ever touched. So
+`internal/untrustedlog` truncates every line it writes at 512 bytes whatever the
+call site passed, and two tests hold that -- one over the log itself, one over a
+number a peer chooses the length of. The count is therefore three bounds and not
+two: 64 bytes per peer string, 512 per line, and the line budget below.
+
+The limit itself is `internal/untrustedlog`'s, spent under a `Subject` of this
+package's own, so the numbers cannot drift from the ones the ESPHome API keeps.
+The budget is not shared with it: each `Log` counts its own lines, so what a peer
+can put on the disk through both surfaces is the sum of two budgets rather than
+one. It **is** shared with the switch's own lines. `switched on`, `switched off`,
+`sendspin listening on` and the line that reports why `Serve` returned all go
+through the same `Log`, so a peer that spends the run's ceiling takes the
+operator's record of the switch with it. That is the trade SECURITY.md already
+records for the button writes, and the alternative is worse: a second `Log` for
+the daemon's own lines would double what reaches the disk, and these lines are
+worth having inside a bound rather than outside one.
+
+Per connection, what gets reported is what has not been said before, keyed on the
+call site together with the rendered values, and capped at sixteen distinct things.
+The call site is part of the key because a peer chooses the values: keyed on the
+values alone, a `group_update` naming its group `stream/start` would take that key
+and silence the line a real `stream/start` would have drawn. A
+server that walks through message types it knows this client ignores is then
+bounded twice over, by the budget and by the cap, and a seventeenth is silent. The
+cap is the load-bearing half: the set records a kind whether its line was written
+or dropped, so the log budget bounds the disk and not the set, and without it a
+peer holding the slot grows it for the life of the connection.
+
+`group/update` goes through the same gate, and so do the two lines a server draws
+by declaring itself -- the roles it activated, and the fact that it holds none.
+All three are ordinary traffic a server repeats at will, and `group/update` is the
+one Music Assistant sends on every playback-state change. Reported unconditionally it spends
+a line each time -- at twenty a minute against the run's five thousand, a session
+changing state steadily exhausts the ceiling in about four hours, and past it
+nothing a peer does is logged again. Keying on the values rather than the kind is
+what keeps a genuine change visible while a repeat says nothing twice.
+
+Connections are capped at eight, as the ESPHome API caps them, because an
+unbounded accept loop is a goroutine and a read buffer per connection for as long
+as a peer cares to open them, and an OOM kill brings the daemon back with the
+button ungrabbed.
+
+The four tunable windows are `Client` fields that fall back to the constants
+beside `handshakeWait` when they are zero. Nothing but a test sets them, and a
+test needs them short; a package-level variable would have done the same job
+while racing the connections a previous test is still closing.
+
+The handshake deadline is **absolute**: 30 seconds to finish the handshake, then
+30 more to declare itself, lifted only by an activation that leaves it holding a
+role. Neither window is refreshed by anything a peer sends, so the most a peer
+can hold a slot without being admitted is the two of them end to end. Refreshing
+one on any message would let a peer hold a slot open forever by sending something
+unrecognised every 29 seconds. After
+activation the idle timeout takes over at 150 seconds, refreshed by any frame -- a
+pong included -- and a ping goes out every 60 seconds, so a holder whose server
+loses power is noticed and its slot released rather than blocking every other
+server for the full idle window.
+
+Giving every role up starts a timer that closes the connection, and declaring a
+role again stops it. Releasing the slot is not enough on its own: the slot goes
+and the connection stays, and eight connections fill `maxConns`, so Music
+Assistant is refused inside `Serve` before it reaches a handshake -- which is
+worse than the thing releasing the slot fixed.
+
+The allowance is for the whole connection, not for each episode of it. Taking a
+role back and giving it up again earned a fresh window, so a peer could hold a
+slot by cycling; eight connections rotating the hold between them then fill
+`maxConns` while Music Assistant is refused at accept. Only the roleless time is
+charged, so a server that narrows briefly and works in between is untouched.
+
+A timer rather than a deadline or a check, because the two cheaper mechanisms both
+fail here. A deadline on the connection does not survive: `readHeader` and `write`
+arm their own from the idle window on every call. And a check between messages is
+never reached, because a ping or a pong never becomes a message -- `Conn.Read`
+answers it and reads on -- while still re-arming the idle deadline, so a peer that
+answers keepalives and says nothing else sits inside one `Read` indefinitely,
+which was measured rather than reasoned about.
+
+`SetDeadline` sets the write deadline as well as the read one, so an absolute
+provisional window bounds writes as well unless something stops it: writes start
+failing 30 seconds into a session that is otherwise healthy, the connection drops,
+and the server reconnects, which from the outside reads as a peer churning every
+half minute. That was watched on a real Music Assistant session rather than caught
+by any test here. What prevents it is that `readHeader` and `write` each arm their
+own deadline from the idle window on every call, so neither inherits an absolute
+one. That also means clearing the provisional deadline achieves nothing once the
+idle window is set -- the next read or write overwrites it either way -- so there is
+no such call, and a reader looking for one is looking for the wrong mechanism.
+
+The `path` TXT record in the advert is not optional: a server that cannot read a
+path has nowhere to send the upgrade, and the name in it should match the one
+`client/hello` carries, or the Dot is discovered under one name and introduces
+itself as another.
+
 ## Uninstalling has to take the identity with it
 
 `uninstall.sh` removes the Sendspin key alongside the ESPHome one, and reads both
@@ -349,3 +652,85 @@ not look like a failure: the daemon would be gone, the button would be Alexa's
 again, and a file whose 64 bytes are the whole pairing credential would still be
 sitting in `/data/local/bin`. The token derived from it stays valid, so anything
 that had it could pair as a Dot that no longer runs this.
+
+## The spec is ahead of the server Music Assistant actually runs
+
+Every other test in this package drives both sides from one reading of the spec,
+so a misreading agrees with itself and passes. `TestInteropWithTheReferenceServer`
+runs a real `aiosendspin` server against this client instead. It skips unless
+`SENDSPIN_INTEROP=1` and needs `uv`:
+
+```sh
+SENDSPIN_INTEROP=1 go test -run Interop ./internal/sendspin/
+```
+
+**CI runs it, in a job of its own.** It is the only check here that needs the
+network while it runs, because `uv` fetches the server from PyPI, so it is
+separated from the job that makes statements about the tree: an outage then reads
+as "interop did not run" rather than as a broken tree. And with the variable set
+the test **fails** rather than skipping when `uv` is missing, because a skip would
+let CI report green while the one test that checks the wire against a real peer
+never ran.
+
+The literal fixtures elsewhere in this package exist because this test is not
+always available. They pin what is known to matter -- `client/init`,
+`client/hello`, `client/state`, the frame layout, the message types. This test is
+what catches the field nobody thought to pin.
+
+It was worth writing the moment it ran. Four differences turned up between
+github.com/Sendspin/spec at `8fc2f8f` and **aiosendspin 9.1.1**, which is the
+version Music Assistant's provider pins. Both ends are pinned on purpose: pinning
+one and floating the other is what makes a difference impossible to attribute
+later.
+
+**These are not four library bugs.** All four point the same way -- `psk_category`
+present in the document and absent from the library, `supported_commands`
+required in a second place, `output_delay_ms` under another name,
+`supported_pair_methods` a different shape entirely -- which is what a document
+moving ahead of an implementation looks like, not what four independent mistakes
+look like. The spec repository has a commit from 2026-09-08 titled "Clarify
+output delay in the player sync target", four days before the commit pinned
+above, which is the same area as one of the four. So the library is behind the
+document rather than wrong about it, and this daemon follows the library, because
+the library is what answers on the wire.
+
+| what | the spec says | aiosendspin 9.1.1 |
+|---|---|---|
+| noise message 1 payload | `psk_id` **and** `psk_category` | `psk_id` alone |
+| `supported_pair_methods` | object keyed by method | `list[PairMethodDescriptor]` |
+| `supported_commands` | in `client/state`'s player object | **also required** in `player@v1_support` |
+| the player's fixed output delay | `output_delay_ms` | `static_delay_ms` |
+
+What this tree does about each:
+
+- **An absent `psk_category` is not an error.** A missing category means the
+  pre-category shape, so the `psk_id` is matched against every candidate the Dot
+  holds -- the pairing PSK, then the Sentinel -- and a miss falls back to the
+  Sentinel as any other miss does. Reading the category into a typed field and
+  letting an empty string reach the `default` arm is what makes every handshake
+  against a real server die as `unknown psk_category ""`. When the category **is**
+  present it binds exactly as the spec requires.
+- **No pairing method is advertised at all.** The two shapes cannot both be sent
+  under one key, and the flow is not implemented in this pass, so advertising
+  `pairing_psk` would be a claim this client cannot honour. Offering none is the
+  honest version, and the admission rules already refuse every pairing
+  activation as `method_not_supported` on that basis. The shape gets decided when
+  the flow is written, against whatever the target accepts then.
+- **`supported_commands` is sent in both places.** It costs nothing and 9.1.1
+  refuses `client/hello` without it in the support object.
+- **`static_delay_ms` is what goes on the wire**, not the spec's
+  `output_delay_ms`. Music Assistant's own configuration corroborates it -- its
+  provider carries `CONF_SENDSPIN_STATIC_DELAY`. Sending the spec name is not an
+  error either side reports: the field is simply unknown and dropped, and what
+  arrives is a `client/state` with a timing field missing. The server logs
+  `non-compliant client: initial client/state omitted required player timing
+  fields` and, because `allow_noncompliant_clients` defaults true, **carries on
+  anyway**. So this one fails by being tolerated, which is the worst way for a
+  wire mistake to fail.
+
+That last one is why the interop test scrapes the reference server's own warnings
+and fails on `non-compliant` or `Malformed` appearing in them, rather than only
+checking that a session came up. And the guard was proved by putting the wrong
+field name back: the test fails with that exact complaint, and passes with the
+right one. A check that has only ever been observed silent has not been observed
+working.

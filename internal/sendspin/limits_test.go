@@ -1,0 +1,851 @@
+package sendspin
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/bboe/overdub/internal/untrustedlog"
+)
+
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func TestServeRefusesPastTheConnectionCap(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+
+	// Each of these holds a slot until the handshake deadline, having sent
+	// nothing, which is the case an unbounded accept loop would never bound.
+	var held []net.Conn
+	for range maxConns {
+		nc, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		t.Cleanup(func() { nc.Close() })
+		held = append(held, nc)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		n := c.conns
+		c.mu.Unlock()
+		if n >= maxConns {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d connections were accepted", n, maxConns)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	extra, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer extra.Close()
+	if err := extra.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	// The read must end because the Dot closed the connection. A timeout satisfies
+	// "some error happened" while proving the opposite -- it is what an unbounded
+	// accept loop looks like from here.
+	_, err = extra.Read(make([]byte, 1))
+	switch {
+	case err == nil:
+		t.Error("the connection past the cap was not closed")
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		t.Error("the connection past the cap was left open: nothing bounds the accept loop")
+	case errors.Is(err, io.EOF), errors.Is(err, syscall.ECONNRESET):
+	default:
+		t.Errorf("the connection past the cap ended with an unexpected error: %v", err)
+	}
+	_ = held
+}
+
+func TestPeerLinesSayWhichSurfaceSpentTheBudget(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	client := &Client{Config: Config{Name: "kitchen"}}
+	serveOn(t, client, ln)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for client.subject() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("Serve never named the subject its peer lines are spent under")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := client.subject(); got != "sendspin" {
+		t.Errorf("peer lines are spent under %q, want %q: an unattributed suppressed-count"+
+			" line does not say which surface a peer was spending against", got, "sendspin")
+	}
+	ln.Close()
+}
+
+func spendTheBudget(c *Client) {
+	for i := 0; i < untrustedlog.Burst; i++ {
+		c.Peer.Printf("sendspin: line %d", i)
+	}
+}
+
+func TestAnActivationSpendsThePeerBudget(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	spendTheBudget(c)
+	before := len(out.String())
+
+	for i := 0; i < 20; i++ {
+		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+			Activities:  []string{activityPlayback},
+			ActiveRoles: roles(rolePlayerV1),
+		}))
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if wrote := len(out.String()) - before; wrote > 0 {
+		t.Errorf("twenty activations wrote %d bytes past the budget; a peer can repeat"+
+			" server/activate for as long as it likes:\n%s", wrote, out.String()[before:])
+	}
+}
+
+func TestManyRolesCannotStretchOneLogLine(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	repeated := make([]string, 3000)
+	for i := range repeated {
+		repeated[i] = rolePlayerV1
+	}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{activityPlayback},
+		ActiveRoles: &repeated,
+	}))
+	time.Sleep(200 * time.Millisecond)
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if len(line) > 512 {
+			t.Errorf("a peer stretched one log line to %d bytes by repeating a role", len(line))
+		}
+	}
+}
+
+func TestGivingUpEveryRoleGivesUpTheSlot(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{},
+		ActiveRoles: &none,
+	}))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		held := c.held
+		c.mu.Unlock()
+		if held == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a session holding no role still holds the slot, so no other server can" +
+				" ever be admitted while it stays connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAnAbsentRoleListLeavesTheSlotAlone(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities: []string{activityPlayback},
+	}))
+	time.Sleep(200 * time.Millisecond)
+
+	c.mu.Lock()
+	held := c.held
+	c.mu.Unlock()
+	if held == nil {
+		t.Error("an activation that named no roles at all gave up the slot; silence narrows a" +
+			" connection rather than relinquishing what it already holds")
+	}
+}
+
+func TestAPeerStringInAnErrorCannotForgeLogLines(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+
+	peer := dialLocal(t, ln)
+	peer.upgrade("/sendspin")
+	peer.readRaw(typeClientInit)
+	forged := "boom\n2026/09/12 13:00:00 sendspin: handshake with \"evil\" complete\n"
+	reason, err := json.Marshal(serverErrorPayload{Reason: forged + strings.Repeat("z", 1500)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := json.Marshal(envelope{Type: typeServerError, Payload: reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer.writeText(frame)
+	time.Sleep(200 * time.Millisecond)
+
+	got := out.String()
+	if strings.Contains(got, "handshake with \"evil\" complete") {
+		t.Errorf("a peer forged a log line of its own:\n%s", got)
+	}
+	if lines := strings.Count(strings.TrimRight(got, "\n"), "\n"); lines > 2 {
+		t.Errorf("one peer string wrote %d physical log lines:\n%s", lines+1, got)
+	}
+}
+
+func TestAGroupNameCannotStretchOrForgeALogLine(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{
+		GroupName:     strings.Repeat("a", 3000),
+		PlaybackState: "playing\nsendspin: forged",
+	}))
+	time.Sleep(200 * time.Millisecond)
+
+	saw := false
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "sendspin: group") {
+			saw = true
+		}
+		if len(line) > 512 {
+			t.Errorf("a peer stretched one log line to %d bytes with a group name", len(line))
+		}
+		if strings.HasPrefix(line, "sendspin: forged") {
+			t.Error("a newline in a group's playback state forged a log line of its own")
+		}
+	}
+	if !saw {
+		t.Fatal("the group line was never written, so nothing here was tested")
+	}
+}
+
+func TestASessionHoldingNoRoleDoesNotKeepItsConnectionSlot(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 200 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{},
+		ActiveRoles: &none,
+	}))
+
+	// Past the window a roleless session is given, one more message must end it.
+	// Without the bound the connection is held for as long as the peer keeps
+	// talking, and eight of those fill maxConns so no server can be accepted.
+	time.Sleep(400 * time.Millisecond)
+	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "any"}))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		conns := c.conns
+		c.mu.Unlock()
+		if conns == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a session that gave up every role kept its connection slot; eight such" +
+				" peers fill maxConns and Serve refuses music assistant before it handshakes")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAPeerThatNeverHandshakesLosesItsSlot(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.handshakeAfter = 200 * time.Millisecond
+	serveOn(t, c, ln)
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+	// Wait for the slot to be taken first: conns is trivially 0 before Serve has
+	// accepted, which would satisfy the check below without proving anything.
+	waitForConns(t, c, 1, "the connection was never accepted")
+	waitForConns(t, c, 0, "a peer that opened a socket and sent nothing held its slot")
+}
+
+func TestAPeerThatNeverActivatesLosesItsSlot(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.provisionalAfter = 200 * time.Millisecond
+	serveOn(t, c, ln)
+
+	peer := dialLocal(t, ln)
+	server := driveServer(t, peer, serverPlan{
+		clientPublic: c.Keys.Identity.Public,
+		psk:          SentinelPSK(),
+		cat:          categorySentinel,
+	})
+	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "quiet server"}))
+	if kind, _ := nextJSON(t, peer, server); kind != typeClientHello {
+		t.Fatalf("wanted %s, got %s", typeClientHello, kind)
+	}
+	// It said hello and never activated, so nothing it sends refreshes anything.
+	waitForConns(t, c, 0, "a peer that handshook and never activated held its slot")
+}
+
+func waitForConns(t *testing.T, c *Client, want int, complaint string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		got := c.conns
+		c.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: conns = %d, want %d", complaint, got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestARolelessSessionCannotHoldOnWithControlFrames(t *testing.T) {
+	// A ping or a pong never becomes an envelope: Conn.Read answers it and reads on,
+	// and every frame re-arms the idle deadline. So a bound checked when a message
+	// arrives is a bound this peer never reaches.
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 200 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{},
+		ActiveRoles: &none,
+	}))
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := peer.conn.Write(frame(true, opPing, []byte("keepalive"))); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	waitForConns(t, c, 0, "a roleless session held its slot for as long as it sent control frames")
+}
+
+func TestRegainingARoleCallsOffTheBound(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 300 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{},
+		ActiveRoles: &none,
+	}))
+	time.Sleep(100 * time.Millisecond)
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{activityPlayback},
+		ActiveRoles: roles(rolePlayerV1),
+	}))
+
+	// Well past the window it would have been dropped in, it is still here: a server
+	// that narrows itself and then declares a role again is an ordinary server.
+	time.Sleep(600 * time.Millisecond)
+	c.mu.Lock()
+	conns, held := c.conns, c.held
+	c.mu.Unlock()
+	if conns != 1 || held == nil {
+		t.Errorf("conns = %d, held = %v; declaring a role again must call off the bound",
+			conns, held != nil)
+	}
+}
+
+func TestRepeatedDeactivationDoesNotRestartTheBound(t *testing.T) {
+	// The clock starts when the roles go and is not restartable by the peer. A window
+	// a peer can refresh is not a bound: it is the shape of the bug this replaced.
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 300 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+				Activities:  []string{},
+				ActiveRoles: &none,
+			})); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	waitForConns(t, c, 0, "a peer held its slot by giving up its roles over and over")
+}
+
+func TestALongServerNameCannotStretchOrForgeALogLine(t *testing.T) {
+	// The name arrives in server/hello and is logged twice: when the handshake
+	// completes, and in front of every error the session reports. The threshold is
+	// below untrustedlog's own line cap on purpose: with the cut gone the cap still
+	// bounds the line, so a looser threshold here would pin neither.
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+
+	peer := dialLocal(t, ln)
+	server := driveServer(t, peer, serverPlan{
+		clientPublic: c.Keys.Identity.Public,
+		psk:          SentinelPSK(),
+		cat:          categorySentinel,
+	})
+	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{
+		// The newline goes first, inside what the cut keeps: past it, the cut alone
+		// would hide a missing %q.
+		Name: "ma\nsendspin: forged" + strings.Repeat("n", 3000),
+	}))
+	time.Sleep(300 * time.Millisecond)
+
+	saw := false
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "handshake with") {
+			saw = true
+		}
+		if len(line) > 300 {
+			t.Errorf("a peer's own name stretched a log line to %d bytes", len(line))
+		}
+		if strings.HasPrefix(line, "sendspin: forged") {
+			t.Error("a newline in the server's name forged a log line")
+		}
+	}
+	if !saw {
+		t.Fatal("the handshake line was never written, so nothing here was tested")
+	}
+}
+
+func TestTheKeepalivePingsAnIdleHolder(t *testing.T) {
+	// A holder whose server loses power is noticed only because this ping goes out
+	// and its pong fails to come back. Nothing else in the suite starts keepalive.
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.pingEvery = 100 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, _, _ := bringUp(t, c, ln)
+
+	if err := peer.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	op, _ := peer.read()
+	if op != opPing {
+		t.Errorf("the Dot sent %#x, want a ping (%#x)", op, opPing)
+	}
+}
+
+// audioChunk is a binary stream message shaped the way aiosendspin sends one: the
+// type byte, an 8-byte big-endian timestamp_us, then the samples.
+func audioChunk(t *testing.T, samples int) []byte {
+	t.Helper()
+	b := make([]byte, 1+8+samples)
+	b[0] = 4
+	binary.BigEndian.PutUint64(b[1:9], uint64(time.Now().UnixMicro()))
+	return b
+}
+
+func TestAnAudioChunkDoesNotDropTheSession(t *testing.T) {
+	// Nothing plays audio yet, and a server does not have to wait for that: a stream
+	// message is binary, and refusing it as "not JSON" ends the connection. The
+	// reference server reconnects immediately, so that is one Noise handshake per
+	// chunk on a device that is also running Alexa.
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	for range 3 {
+		peer.writeBinary(server.seal(t, audioChunk(t, 64)))
+	}
+	// A JSON message after them still arrives, which is what says the session lived.
+	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
+	time.Sleep(300 * time.Millisecond)
+
+	c.mu.Lock()
+	conns, held := c.conns, c.held
+	c.mu.Unlock()
+	if conns != 1 || held == nil {
+		t.Errorf("conns = %d, held = %v; an unhandled binary message ended the session",
+			conns, held != nil)
+	}
+}
+
+func TestOrdinaryTrafficDoesNotSpendThePeerBudget(t *testing.T) {
+	// stream/end arrives on the first activation, before anything plays. If every
+	// one of those spends a line, ordinary music exhausts a budget meant to bound an
+	// attacker, and past the run ceiling nothing a peer does is logged again.
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	before := c.Peer.Written()
+	for range 200 {
+		peer.writeBinary(server.sealJSON(t, typeStreamEnd, struct{}{}))
+		peer.writeBinary(server.seal(t, audioChunk(t, 8)))
+		// group/update is the one kind Music Assistant sends on every playback-state
+		// change, so it spends the budget faster than anything else a server does.
+		peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{
+			PlaybackState: "playing", GroupID: "g1", GroupName: "kitchen",
+		}))
+		// A server may repeat server/activate as often as it likes, and a repeat
+		// says nothing the first one did not.
+		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+			Activities:  []string{activityPlayback},
+			ActiveRoles: roles(rolePlayerV1),
+		}))
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	if spent := c.Peer.Written() - before; spent > 6 {
+		t.Errorf("800 ordinary messages spent %d lines of the peer budget; one per"+
+			" distinct thing said is the most that says anything new", spent)
+	}
+	if !strings.Contains(out.String(), "not handled yet") {
+		t.Error("the first unhandled message was never reported, so nothing was tested")
+	}
+}
+
+func TestCyclingRolesCannotBuyMoreRolelessTime(t *testing.T) {
+	// Taking a role back and giving it up again must not earn a fresh window. Eight
+	// connections rotating the hold between them is how that becomes a peer holding
+	// every slot for as long as it likes.
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 300 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+				Activities: []string{}, ActiveRoles: &none})); err != nil {
+				return
+			}
+			time.Sleep(150 * time.Millisecond)
+			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+				Activities: []string{activityPlayback}, ActiveRoles: roles(rolePlayerV1)})); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	waitForConns(t, c, 0, "a peer held its slot by cycling its roles rather than keeping one")
+}
+
+func TestTimeHoldingARoleIsNotChargedAsRoleless(t *testing.T) {
+	// Cumulative has to mean cumulative over the roleless episodes only. A server
+	// that narrows briefly, works for a while, and narrows again is ordinary, and
+	// charging the working time would evict it on the second narrowing.
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.rolelessAfter = 400 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	none := []string{}
+	narrow := func() {
+		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+			Activities: []string{}, ActiveRoles: &none}))
+	}
+	widen := func() {
+		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+			Activities: []string{activityPlayback}, ActiveRoles: roles(rolePlayerV1)}))
+	}
+
+	narrow()
+	time.Sleep(100 * time.Millisecond) // 100ms of the 400ms allowance
+	widen()
+	time.Sleep(600 * time.Millisecond) // working, and longer than the allowance
+	narrow()
+	time.Sleep(100 * time.Millisecond) // 200ms spent in total, still inside it
+	widen()
+	time.Sleep(100 * time.Millisecond)
+
+	c.mu.Lock()
+	conns, held := c.conns, c.held
+	c.mu.Unlock()
+	if conns != 1 || held == nil {
+		t.Errorf("conns = %d, held = %v; the time it spent holding a role was charged"+
+			" against its roleless allowance", conns, held != nil)
+	}
+}
+
+func TestALeavingSessionDoesNotReleaseAnotherServersHold(t *testing.T) {
+	// The hold belongs to one session. A second connection going away must not
+	// release it, or any peer can hand Music Assistant's slot to itself by
+	// connecting and hanging up.
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+
+	holder, _, _ := bringUp(t, c, ln)
+	_ = holder
+	c.mu.Lock()
+	held := c.held
+	c.mu.Unlock()
+	if held == nil {
+		t.Fatal("the first server never took the hold")
+	}
+
+	// A second server reaches activation, is refused, and its connection ends.
+	other := dialLocal(t, ln)
+	server := driveServer(t, other, serverPlan{
+		clientPublic: c.Keys.Identity.Public,
+		psk:          SentinelPSK(),
+		cat:          categorySentinel,
+	})
+	other.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "second"}))
+	if kind, _ := nextJSON(t, other, server); kind != typeClientHello {
+		t.Fatalf("wanted %s, got %s", typeClientHello, kind)
+	}
+	other.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{activityPlayback},
+		ActiveRoles: roles(rolePlayerV1),
+	}))
+	if kind, _ := nextJSON(t, other, server); kind != typeClientGoodbye {
+		t.Fatalf("second server got %s, want %s", kind, typeClientGoodbye)
+	}
+	other.conn.Close()
+	time.Sleep(300 * time.Millisecond)
+
+	c.mu.Lock()
+	still := c.held
+	c.mu.Unlock()
+	if still != held {
+		t.Error("a refused server's disconnect released the hold the first server still has")
+	}
+}
+
+// bringUpWith drives a server that authenticates on a caller-chosen key rather than
+// on the published sentinel, so the path from Client.PSKs into the handshake is
+// exercised.
+func bringUpWith(t *testing.T, c *Client, ln net.Listener, plan serverPlan) (*wsPeer, *serverSide) {
+	t.Helper()
+	peer := dialLocal(t, ln)
+	plan.clientPublic = c.Keys.Identity.Public
+	server := driveServer(t, peer, plan)
+	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "paired server"}))
+	if kind, _ := nextJSON(t, peer, server); kind != typeClientHello {
+		t.Fatalf("wanted %s, got %s", typeClientHello, kind)
+	}
+	return peer, server
+}
+
+func TestTheConfiguredPairingKeyIsWhatTheHandshakeUses(t *testing.T) {
+	// The client's own pairing PSK, rather than the published sentinel. Nothing else
+	// at this level uses it, so the handshake could ignore it and every test would
+	// still pass by falling back to the sentinel.
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	bringUpWith(t, c, ln, serverPlan{psk: c.Keys.PairingPSK, cat: categoryPairing})
+}
+func TestAnEnvelopeTypeCannotForgeALogLine(t *testing.T) {
+	// The kind is reported when nothing handles it, and it is a peer's own string like
+	// any other. SECURITY.md promises every one of them is cut and quoted, and this is
+	// the one that reaches a line without a test of its own.
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	long := strings.Repeat("a", 3000)
+	peer.writeBinary(server.sealJSON(t,
+		long+"\nsendspin: handshake with \"forged\" complete on the sn psk", struct{}{}))
+	time.Sleep(200 * time.Millisecond)
+
+	// What a cut kind is allowed to put on the line, derived rather than restated:
+	// past this the per-line truncation is doing the work and the cut is not.
+	allowed := strings.TrimSuffix(untrustedlog.Cut(long), "...")
+	if strings.Contains(out.String(), allowed+"a") {
+		t.Error("the envelope type reached the log uncut, so the peer string is bounded" +
+			" only by the per-line truncation")
+	}
+
+	saw := false
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "not handled yet") || strings.Contains(line, "ignoring") {
+			saw = true
+		}
+		if len(line) > 512 {
+			t.Errorf("a peer stretched one log line to %d bytes with an envelope type",
+				len(line))
+		}
+		if strings.HasPrefix(line, "sendspin: handshake with") {
+			t.Error("a newline in an envelope type forged a handshake line of its own")
+		}
+	}
+	if !saw {
+		t.Fatal("the unhandled-kind line was never written, so nothing here was tested")
+	}
+}
+
+func TestTheReportedSetSaysEachThingOnceAndStopsGrowing(t *testing.T) {
+	// Every kind reported to the log is keyed on a peer's own string, and the log
+	// budget bounds what reaches the disk rather than what this holds: a kind is
+	// recorded whether its line was written or dropped. Without the bound a peer
+	// sending distinct kinds grows it for the life of the connection.
+	var noted noteSet
+	if !noted.first("first mention") {
+		t.Error("the first mention of something was suppressed")
+	}
+	if noted.first("first mention") {
+		t.Error("a repeat was reported a second time")
+	}
+	for i := range maxNoted * 8 {
+		noted.first(fmt.Sprintf("overdub/unknown-%d", i))
+	}
+	if got := len(noted.seen); got > maxNoted {
+		t.Errorf("the set grew to %d kinds against a bound of %d, and it holds one cut"+
+			" string each for the life of the connection", got, maxNoted)
+	}
+}
+
+func TestRepeatingAnActivationCostsNeitherAStateNorAKeepalive(t *testing.T) {
+	// A server may send server/activate as often as it likes, and only the first one
+	// of an episode has anything new to answer. Without that guard each repeat starts
+	// another keepalive ticker on the connection and writes another client/state, so a
+	// peer sets both growing for as long as it holds the slot.
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	for range 5 {
+		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+			Activities:  []string{activityPlayback},
+			ActiveRoles: roles(rolePlayerV1),
+		}))
+	}
+
+	if !peer.quiet(400 * time.Millisecond) {
+		t.Error("a repeated activation was answered again: each one writes another" +
+			" client/state and leaves another keepalive ticker running")
+	}
+}

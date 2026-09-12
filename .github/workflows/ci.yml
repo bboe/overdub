@@ -41,7 +41,7 @@ jobs:
       - run: GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...
 
       # The race detector does not support GOARCH=arm, so the run above cannot
-      # use it. These four packages carry the concurrency and are the ones that
+      # use it. These five packages carry the concurrency and are the ones that
       # build for the runner, so they get a second run natively.
       - run: go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ ./internal/sendspin/ ./internal/untrustedlog/
 
@@ -91,6 +91,39 @@ jobs:
           export R8_JAR="$ANDROID_SDK_ROOT/build-tools/34.0.0/lib/d8.jar"
           ls -l "$ANDROID_JAR" "$R8_JAR"
           deploy/mapdump/build.sh
+
+  # The one test here that does not drive both sides from a single reading of the
+  # spec: it runs a real aiosendspin server against the client. Every other
+  # Sendspin test builds the peer out of the same constants and structs the
+  # daemon uses, so a wire-format mistake agrees with itself and passes -- which
+  # is how a renamed field, a moved frame flag or the wrong base64 alphabet could
+  # ship. Literal fixtures cover what we know to pin; this covers what we did not
+  # think of.
+  #
+  # It is a job of its own because it is the only thing in CI that needs the
+  # network at test time: uv fetches aiosendspin from PyPI. A PyPI outage then
+  # reads as "interop did not run" rather than as a broken tree, and the build
+  # job stays a statement about the tree alone.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # uv itself is pinned, and the test pins the aiosendspin version, because which
+      # version Music Assistant ships is the thing under test. What is NOT pinned is
+      # the rest of what uv resolves: no lockfile, no hashes, and it is executed. That
+      # is a weaker promise than the commit-pinned actions above, and it is the reason
+      # this is a separate job with nothing but `contents: read` and no secrets -- the
+      # blast radius is one runner.
+      - run: pipx install uv==0.11.2
+
+      # -count=1 because a cached pass would say nothing about the peer, and the
+      # test fails rather than skips if uv is missing: asked for and not run is
+      # the outcome worth avoiding.
+      - run: SENDSPIN_INTEROP=1 go test -count=1 -run TestInteropWithTheReferenceServer ./internal/sendspin/
 
   # The release is a job here rather than a workflow of its own, so that it can
   # say `needs: build` and mean it. A tag pushed at a commit whose tests fail

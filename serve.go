@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
 	"github.com/bboe/overdub/internal/mdns"
+	"github.com/bboe/overdub/internal/sendspin"
 )
 
 const (
@@ -29,7 +31,12 @@ const (
 	wifiIface  = device.WifiInterface
 	apiPort    = 6053
 
-	noiseKeyPath = "/data/local/bin/.overdub-noise-key"
+	deviceModel = "Echo Dot (2nd Generation)"
+
+	noiseKeyPath    = "/data/local/bin/.overdub-noise-key"
+	sendspinKeyPath = "/data/local/bin/.overdub-sendspin-key"
+
+	sendspinBuffer = 500
 
 	nodeWait   = 60 * time.Second
 	macWait    = 60 * time.Second
@@ -51,8 +58,6 @@ const (
 )
 
 var advertised atomic.Pointer[mdns.Responder]
-
-const deviceModel = "Echo Dot (2nd Generation)"
 
 var api atomic.Pointer[esphome.Server]
 
@@ -254,13 +259,21 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 
 	api.Store(server)
 
-	responder := &mdns.Responder{
-		Instance: name,
-		Iface:    wifiIface,
-		Services: []mdns.Advert{esphome.Advert(name, mac, apiPort)},
+	sendspinClient, sendspinListener := startSendspin(name, mac)
+
+	services := []mdns.Advert{esphome.Advert(name, mac, apiPort)}
+	if sendspinListener != nil {
+		services = append(services, sendspin.Advert(name))
 	}
+	responder := &mdns.Responder{Instance: name, Iface: wifiIface, Services: services}
 	advertised.Store(responder)
 	go responder.Run()
+
+	if sendspinListener != nil {
+		go func() {
+			log.Printf("sendspin stopped: %v", sendspinClient.Serve(sendspinListener))
+		}()
+	}
 
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)
@@ -355,4 +368,44 @@ func loadPSK(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return psk, nil
+}
+
+func startSendspin(name, mac string) (*sendspin.Client, net.Listener) {
+	keys, created, err := sendspin.LoadOrCreateKeys(sendspinKeyPath)
+	if err != nil {
+		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
+		return nil, nil
+	}
+	if created {
+		log.Printf("sendspin: this dot had no identity, so one was generated at %s",
+			sendspinKeyPath)
+	}
+	log.Printf("sendspin: client %s; docs/sendspin.md says how to read the pairing token",
+		keys.Identity.ClientID())
+
+	client := &sendspin.Client{
+		Config: sendspin.Config{
+			Name:           name,
+			ProductName:    deviceModel,
+			Manufacturer:   "Amazon",
+			MACAddress:     strings.ToLower(mac),
+			UnpairedAccess: true,
+			BufferCapacity: sendspin.BufferCapacity,
+		},
+		Keys:        keys,
+		PSKs:        sendspin.PSKSet{Pairing: keys.PairingPSK},
+		MinBufferMS: sendspinBuffer,
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", sendspin.Port))
+	if err != nil {
+		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
+		return nil, nil
+	}
+
+	if err := device.AllowTCP(sendspin.Port); err != nil {
+		log.Printf("firewall: %v", err)
+	}
+	go device.HoldTCPOpen(sendspin.Port, firewallRe)
+	return client, ln
 }

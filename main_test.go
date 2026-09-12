@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/bboe/overdub/internal/sendspin"
 	"time"
 
 	"github.com/bboe/overdub/internal/button"
@@ -42,10 +45,39 @@ func TestUninstallDeletesTheRuleTheDaemonOpens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("-i %s -p tcp --dport %d -j ACCEPT", wifiIface, apiPort)
-	if !strings.Contains(string(script), want) {
+	// The script loops over the ports, so what has to line up is the rule's shape and
+	// the port values it is given, rather than one literal per port.
+	shape := fmt.Sprintf("-i %s -p tcp --dport $port -j ACCEPT", wifiIface)
+	if !strings.Contains(string(script), shape) {
 		t.Errorf("deploy/uninstall.sh deletes no rule matching %q, and the daemon adds exactly that",
-			want)
+			shape)
+	}
+	// Resolve the variables the loop actually iterates, so naming a port in an
+	// assignment the loop never reads does not count as deleting its rule.
+	assigned := map[string]string{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if name, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			assigned[name] = value
+		}
+	}
+	looped := map[string]bool{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "for port in ") {
+			continue
+		}
+		for _, field := range strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "for port in ")) {
+			name := strings.Trim(field, `"$;`)
+			if value, ok := assigned[name]; ok {
+				looped[value] = true
+			}
+			// A literal port in the loop deletes the rule just as well as a variable.
+			looped[name] = true
+		}
+	}
+	for _, port := range []int{apiPort, sendspin.Port} {
+		if !looped[strconv.Itoa(port)] {
+			t.Errorf("deploy/uninstall.sh deletes no rule for tcp/%d, which the daemon opens", port)
+		}
 	}
 }
 
