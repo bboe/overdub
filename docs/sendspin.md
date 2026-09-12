@@ -274,6 +274,73 @@ fragment, so a long chain cannot grow past the ceiling one kilobyte at a time.
 The read limit is 2048 bytes through the cleartext phase, where every legitimate
 message is a few hundred, and opens to 65535 only once the channel is encrypted.
 
+## What the matched PSK is allowed to buy
+
+`server/activate` declares what a connection is for, and which declarations are
+legitimate depends entirely on **which PSK matched during the handshake**. The
+table is short and the consequences are not:
+
+| matched | allowed activity sets |
+|---|---|
+| long-term | `[]`, `['playback']` |
+| pairing | `[]`, `['pairing']` |
+| Sentinel | `[]`, `['pairing']`, and `['playback']` only with unpaired access enabled |
+
+Playback and pairing are mutually exclusive, so no set holds both. A
+pairing-PSK connection is therefore **never** playback-capable, whatever it
+declares, and a test asserts that rather than leaving it implied.
+
+Refusing correctly is the fiddly part, because two different refusals look alike
+from the code and mean opposite things to an operator. The spec settles it with a
+worked example, which is checked here as a test: a Sentinel connection to a client
+with unpaired access **disabled**, sent `activities: ['playback']` and
+`active_roles: ['player@v1']`, is refused `pairing_required` -- because enabling
+unpaired access would have made it admissible, so the operator's fix is to pair
+or to enable it. The same connection sent `activities: ['pairing']` with the same
+roles is refused `unauthorized` -- because no unpaired-access setting makes a
+pairing connection carry roles, so nothing the operator toggles will help. One
+reason says "you need a credential", the other says "you asked for something that
+cannot exist". Answering the wrong one sends the operator to the wrong place.
+
+There is a third refusal that is not a refusal of the connection: a `pairing`
+activity naming a method the matched PSK disallows, or one this client does not
+offer, gets `pair/abort` with `method_not_supported` and **leaves the connection
+open**. The rules are applied in that order -- `pairing_required`, then
+`unauthorized`, then `method_not_supported` -- because more than one can be true
+at once.
+
+`active_roles` is what a first activation is expected to carry, and it persists
+across later ones that omit it. A first activation that omits it is not refused,
+because the spec does not say it must be: the roles are read as empty, which is
+the same state a server reaches by giving every role up.
+
+The asymmetry to watch: if a later activation changes `activities`
+so the connection is no longer playback-capable and **does not** resend
+`active_roles`, the persisted roles are treated as empty rather than the message
+being rejected. If it resends them explicitly on such a connection, that is
+`unauthorized`. So the same end state is reached by silence and refused when
+stated, which is deliberate: silence is a server narrowing a connection, and a
+statement is a server claiming something it may not have.
+
+## What the Dot declares
+
+`player@v1`, one format -- `pcm`, 48000 Hz, **mono**, 16-bit -- and
+`unpaired_access` enabled, which is what lets Music Assistant reach playback over
+a Sentinel-keyed connection once its operator approves the Dot, with no pairing
+exchange at all. Pairing remains offered, because every client must offer the
+Pairing PSK method, and it stays the way to get a long-term credential.
+
+Only roles named in `supported_roles` can become active. A server activating
+something else -- `display@v1`, say -- has its unknown roles dropped rather than
+obeyed, so the Dot never holds a connection slot or reports state for a role it
+does not implement.
+
+A test pins the declared format against `audio.ChimeRate` and
+`audio.ChimeChannels` themselves rather than against a copy of their values,
+because the two share one OpenSL player and a mismatch would not fail at the
+format: it would fail as silence, or as a chime at the wrong pitch. Comparing
+against literals is what makes that claim look kept while the chime moves.
+
 ## Uninstalling has to take the identity with it
 
 `uninstall.sh` removes the Sendspin key alongside the ESPHome one, and reads both
