@@ -85,10 +85,35 @@ What the reader refuses, each with a test: an unmasked frame (a client MUST mask
 a reserved bit, a control frame that is fragmented or over 125 bytes, a length
 that is not minimally encoded, a 64-bit length with its high bit set, a
 one-byte close frame, a continuation with nothing in flight, a new message
-arriving mid-fragment, and an unknown opcode. Lengths are checked against the
-read limit **before** the payload is allocated, and again as fragments
-accumulate, so neither a single frame nor a long chain of them can make the
-daemon allocate past the limit.
+arriving mid-fragment, an unknown opcode, and a message built from more frames
+than the ceiling allows. Lengths are checked against the read limit **before**
+the payload is allocated, and again as fragments accumulate, so neither a single
+frame nor a long chain of them can make the daemon allocate past the limit.
+
+Bytes are not the only budget, which is why there are frame counts as well. A
+chain of empty continuation frames allocates nothing, so it trips neither length
+check, and costs a read and a loop apiece: the peer spends almost nothing and the
+daemon spends the rest of the connection. Two counters end it, both 4,096 and
+each with its own test. `maxWSFrames` bounds the fragments of one WebSocket
+message; `maxMessageFrames` bounds the Sendspin frames reassembled into one
+message above it. They are separate because the layers are, and a chain still
+legal at one is refused at the other. Neither number is anywhere near something
+legitimate: both layers refuse a message past 65,535 bytes as it accumulates, so
+two frames carry the largest message either layer allows, and the counters exist
+only to end chains of near-empty ones.
+
+The upgrade is bounded before any of that, though not by a single number.
+`maxRequestBytes` (8,192) is checked inside the line reader, so it caps each line
+rather than the whole request; with `maxRequestLines` (64) alongside it the
+request is bounded at about 512 KB. What that buys is that a peer cannot hold the
+socket open feeding headers one at a time.
+
+The frame writer takes a mutex, and not for the framing. Each frame is one
+`Write`, and Go holds a per-connection write lock of its own, so frames still
+arrive whole with `Conn.mu` removed -- measured over a real socket with payloads
+the kernel has to split. The mutex is there for the pair either side of the
+write: arming the deadline and then writing have to be one step, or one caller
+arms a deadline that another caller's write spends.
 
 ## Identity, and the one secret that is not staged
 
@@ -184,6 +209,103 @@ strictness about everything else, refusing an unknown version, a body that is
 not base32, and a payload shorter than the version defines. Payload bytes
 **beyond** the 64 defined are ignored rather than refused, because the spec
 reserves them for later versions.
+
+## The handshake, and three inversions in it
+
+**We are the WebSocket server and the Sendspin client, and we speak first.**
+Music Assistant discovers the Dot by mDNS and dials it, so the Dot accepts the
+TCP connection -- and then sends `client/init` as the first application message
+anyway. Accepting a connection and opening a conversation on it is not the usual
+pairing of roles, and reading the sequence as "whoever dialled speaks first" gets
+it backwards.
+
+**The Noise roles are the other way round from the WebSocket roles.** The server
+is always the Noise **initiator** and the client the **responder**, whichever
+side dialled. So the Dot accepts the socket, sends the first application message,
+and is the responder in the handshake carried inside it.
+
+**As responder we encrypt with the second CipherState and decrypt with the
+first.** `Split()` returns the pair in Noise's canonical order -- the first is the
+initiator's sending key -- and `flynn/noise` returns them in that same order from
+both `WriteMessage` and `ReadMessage`, so the two sides must read the same pair
+oppositely. Getting it backwards does not look like a bug in framing or in
+direction; it looks like a wrong key, because that is what a wrong key is. The
+two-way transport tests pin it by running a real server side rather than by
+reading the library.
+
+## What made `flynn/noise` usable here
+
+`KKpsk2` mixes the PSK at the end of the **second** message, and the server names
+the PSK it used in the payload of the **first** -- so a client cannot know which
+key it needs until after it has decrypted something. That works because the
+message-1 payload is encrypted without the PSK mixed in, and because
+`flynn/noise` explicitly permits a `psk{2+}` handshake to be constructed with no
+key set and take one later through `SetPresharedKey`. Its own source says so:
+"for psk{2+} we may not know the correct psk yet so it might not be set." Without
+that the library could not be used for this pattern at all, and the whole plan
+would have needed a different one.
+
+The prologue is the **exact wire bytes** of `client/init` followed by
+`server/init`, not a re-encoding of the parsed messages, so both are kept as
+received and sent rather than marshalled a second time. A re-encoding that
+differs by one space fails the handshake and says nothing about why.
+
+## A miss and a misbinding are not the same thing
+
+The client compares the server's `psk_id` against its own candidates **of the
+declared category only**: a key held as a pairing PSK but declared `lt` is a
+miss, not a match, and the spec is explicit that the category binds.
+
+A **miss** -- no candidate matches -- completes the handshake with the Sentinel
+PSK rather than failing. That is the Sentinel Fallback, and it exists because a
+client that lost its pairing record should still reach a server that can offer
+re-pairing. The Sentinel is a published constant and authenticates nobody; what
+it buys is a session in which pairing can happen.
+
+A **misbinding** -- a `psk_id` matching a stored long-term key that was issued to a
+different `server_id` -- must fail the handshake rather than fall back. It is not a
+lost record; it is a key being used by something other than what it was issued to,
+and the Sentinel fallback would paper over exactly the case worth refusing. **That
+rule is not implemented, because there is nothing for it to check.** No long-term
+key can exist until pairing does, so the store that would hold one is not here
+either: `PSKSet` carries the pairing PSK alone. The rule is written down because
+the pairing flow has to bring it back, and re-deriving it from the spec later is
+how it gets got wrong.
+
+The `server_id` a session records is re-encoded rather than kept as it arrived,
+which is what would make that check a comparison of keys rather than of text.
+`base64.RawURLEncoding` ignores the unused bits of the final character, so more
+than one string decodes to the same key: measured on a 32-byte key, **four**
+spellings decode identically, the canonical one and three others. `DecodeID`
+takes the key out and `EncodeID` puts it back in the single spelling the Dot will
+ever store or compare. Nothing stores one today, for the reason above; what this
+costs now is one re-encode per handshake.
+
+What *is* implemented is that `lt` remains a category the Dot accepts on the wire.
+A server may declare it -- one that paired with a different client, or a build
+whose categories we do not store -- and the answer is a miss and the Sentinel
+fallback, not a refusal. Dropping `lt` from the accepted set instead sends the
+handshake into the unknown-category error, which a test catches by the connection
+timing out.
+
+## Two fragmentation layers, and they are unrelated
+
+WebSocket has its own fragmentation, and Sendspin defines another inside the
+encrypted channel: message type `1`, with a flags byte, and the original type
+carried on the first fragment only. Both are implemented, they nest, and they are
+not the same mechanism -- a message can arrive whole at the WebSocket layer and
+still be one Sendspin fragment of several.
+
+The inner layer exists because a Noise transport message cannot exceed 65535
+bytes, which leaves 65518 for a payload once the 16-byte tag and the type byte
+are taken. Reassembly holds one message per direction, refuses a first fragment
+while one is in flight, a continuation with none in flight, a plain data frame
+arriving mid-message, a reserved flag bit, and a fragment naming the fragment
+type as its own -- each with a test. The accumulated size is checked on every
+fragment, so a long chain cannot grow past the ceiling one kilobyte at a time.
+
+The read limit is 2048 bytes through the cleartext phase, where every legitimate
+message is a few hundred, and opens to 65535 only once the channel is encrypted.
 
 ## Uninstalling has to take the identity with it
 
