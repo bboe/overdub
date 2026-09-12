@@ -39,6 +39,23 @@ what is left.
 `com.amazon.device.software.ota` is left hidden on purpose. An OTA rewrites
 `boot.img`, which removes Magisk and takes root and overdub with it.
 
+**`uninstall.sh` filters what the device echoed in two passes, and that is not
+symmetry.** The fixed paths are matched exactly; the Sendspin key's temporary
+siblings are matched by prefix, because a run killed between the write and the
+link leaves one behind under a random suffix, and `grep -Fx` cannot match a
+prefix. Naming a path in the sweep and forgetting it in the filter is the
+mistake this script has made once, with the Sendspin key: the device echoes back
+whichever of the paths it was asked about still exist, the script keeps the ones
+it recognises, and a key the `rm` had failed to remove was echoed, dropped, and
+reported as a clean uninstall. Three paths the script removes are not in that
+list at all -- the adb key and the two staging files -- so they are removed
+without being verified. `rm -f` reports nothing and `adb shell` exits 0 whatever
+happened remotely, so nothing else would have said so.
+
+It is an allowlist rather than "anything the device echoed" for the reason the
+rest of these scripts are: `adb` merges the device's stderr into its stdout, so a
+linker warning from `su` would read as a leftover file.
+
 **A release is a tarball, and `install.sh` reads its own surroundings to know
 it.** Building this needs an NDK, a JDK and an Android SDK between them, for a
 device whose whole audience is people who have already rooted one, so the
@@ -164,8 +181,9 @@ a daemon that exits immediately, if it had no key for example, would otherwise
 append a failure every five seconds for the rest of the boot. Counted rather
 than measured: this toolbox has no `wc`.
 
-`deploy/uninstall.sh` reverses that, key included. The boot script goes first and
-alone,
+`deploy/uninstall.sh` reverses that, both keys included: the ESPHome key and the
+Sendspin identity, each named in the sweep that decides whether the uninstall
+succeeded as well as in the removal. The boot script goes first and alone,
 because it is the only thing that starts the daemon at boot: a reboot part way
 through then leaves a Dot with nothing running rather than a supervisor
 respawning a half-deleted install.

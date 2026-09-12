@@ -8,6 +8,7 @@ BOOT=/sbin/.core/img/.core/service.d/overdub.sh
 BIN=/data/local/bin/overdub
 LOG=/data/local/tmp/overdub.log
 KEY=/data/local/bin/.overdub-noise-key
+SENDKEY=/data/local/bin/.overdub-sendspin-key
 ADBKEY=/data/local/bin/adb_keys
 ADBKEYS=/data/misc/adb/adb_keys
 STAGE=/data/local/tmp/overdub-install
@@ -27,7 +28,7 @@ overdub_pid() {
 adb shell "su -c 'rm -f $BOOT'"
 
 adb shell "su -c '
-  rm -f $BIN ${BIN}.new $KEY $ADBKEY
+  rm -f $BIN ${BIN}.new $KEY $SENDKEY ${SENDKEY}.new-* $ADBKEY
   rm -rf $STAGE $MAP
   rm -f /data/local/tmp/overdub /data/local/tmp/s.sh
 '"
@@ -46,7 +47,7 @@ adb shell "su -c '
 sleep 6   # the supervisor recreates the log every 5
 
 answer=$(adb shell "su -c '
-  for path in $BOOT $BIN ${BIN}.new $KEY $STAGE $MAP $LOG; do
+  for path in $BOOT $BIN ${BIN}.new $KEY $SENDKEY ${SENDKEY}.new-* $STAGE $MAP $LOG; do
     [ -e \"\$path\" ] && echo \"\$path\"
   done
   echo swept
@@ -56,8 +57,12 @@ if ! printf '%s\n' "$answer" | grep -qx swept; then
   echo "  confirmed removed. Re-run this script with the Dot connected." >&2
   exit 1
 fi
-left=$(printf '%s\n' "$answer" |
-  grep -Fx -e "$BOOT" -e "$BIN" -e "${BIN}.new" -e "$KEY" -e "$STAGE" -e "$MAP" -e "$LOG" || true)
+left=$(
+  printf '%s\n' "$answer" |
+    grep -Fx -e "$BOOT" -e "$BIN" -e "${BIN}.new" -e "$KEY" -e "$SENDKEY" -e "$STAGE" \
+      -e "$MAP" -e "$LOG" || true
+  printf '%s\n' "$answer" | grep -E "^${SENDKEY//./[.]}[.]new-" || true
+)
 
 fail=0
 for path in $left; do
