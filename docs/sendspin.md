@@ -180,6 +180,100 @@ not base32, and a payload shorter than the version defines. Payload bytes
 **beyond** the 64 defined are ignored rather than refused, because the spec
 reserves them for later versions.
 
+## The handshake, and three inversions in it
+
+**We are the WebSocket server and the Sendspin client, and we speak first.**
+Music Assistant discovers the Dot by mDNS and dials it, so the Dot accepts the
+TCP connection -- and then sends `client/init` as the first application message
+anyway. Accepting a connection and opening a conversation on it is not the usual
+pairing of roles, and reading the sequence as "whoever dialled speaks first" gets
+it backwards.
+
+**The Noise roles are the other way round from the WebSocket roles.** The server
+is always the Noise **initiator** and the client the **responder**, whichever
+side dialled. So the Dot accepts the socket, sends the first application message,
+and is the responder in the handshake carried inside it.
+
+**As responder we encrypt with the second CipherState and decrypt with the
+first.** `Split()` returns the pair in Noise's canonical order -- the first is the
+initiator's sending key -- and `flynn/noise` returns them in that same order from
+both `WriteMessage` and `ReadMessage`, so the two sides must read the same pair
+oppositely. Getting it backwards does not look like a bug in framing or in
+direction; it looks like a wrong key, because that is what a wrong key is. The
+two-way transport tests pin it by running a real server side rather than by
+reading the library.
+
+## What made `flynn/noise` usable here
+
+`KKpsk2` mixes the PSK at the end of the **second** message, and the server names
+the PSK it used in the payload of the **first** -- so a client cannot know which
+key it needs until after it has decrypted something. That works because the
+message-1 payload is encrypted without the PSK mixed in, and because
+`flynn/noise` explicitly permits a `psk{2+}` handshake to be constructed with no
+key set and take one later through `SetPresharedKey`. Its own source says so:
+"for psk{2+} we may not know the correct psk yet so it might not be set." Without
+that the library could not be used for this pattern at all, and the whole plan
+would have needed a different one.
+
+The prologue is the **exact wire bytes** of `client/init` followed by
+`server/init`, not a re-encoding of the parsed messages, so both are kept as
+received and sent rather than marshalled a second time. A re-encoding that
+differs by one space fails the handshake and says nothing about why.
+
+## A miss and a misbinding are not the same thing
+
+The client compares the server's `psk_id` against its own candidates **of the
+declared category only**: a key held as a pairing PSK but declared `lt` is a
+miss, not a match, and the spec is explicit that the category binds.
+
+A **miss** -- no candidate matches -- completes the handshake with the Sentinel
+PSK rather than failing. That is the Sentinel Fallback, and it exists because a
+client that lost its pairing record should still reach a server that can offer
+re-pairing. The Sentinel is a published constant and authenticates nobody; what
+it buys is a session in which pairing can happen.
+
+A **misbinding** -- a `psk_id` matching a stored long-term key that was issued to a
+different `server_id` -- must fail the handshake rather than fall back. It is not a
+lost record; it is a key being used by something other than what it was issued to,
+and the Sentinel fallback would paper over exactly the case worth refusing. **That
+rule is not implemented, because there is nothing for it to check.** No long-term
+key can exist until pairing does, so the store that would hold one is not here
+either: `PSKSet` carries the pairing PSK alone. The rule is written down because
+the pairing flow has to bring it back, and re-deriving it from the spec later is
+how it gets got wrong.
+
+What *is* implemented is that `lt` remains a category the Dot accepts on the wire.
+A server may declare it -- one that paired with a different client, or a build
+whose categories we do not store -- and the answer is a miss and the Sentinel
+fallback, not a refusal. Dropping `lt` from the accepted set instead sends the
+handshake into the unknown-category error, which a test catches by the connection
+timing out.
+
+A `server_id` is still compared and kept in its **canonical** base64url spelling
+rather than as the peer sent it. Go's decoder ignores the unused trailing bits, so
+one 32-byte key has several valid spellings, and a server returning under a
+different spelling of itself would not be recognised as the same server. Nothing
+is keyed by it yet; the canonical form is what makes that safe when something is.
+
+## Two fragmentation layers, and they are unrelated
+
+WebSocket has its own fragmentation, and Sendspin defines another inside the
+encrypted channel: message type `1`, with a flags byte, and the original type
+carried on the first fragment only. Both are implemented, they nest, and they are
+not the same mechanism -- a message can arrive whole at the WebSocket layer and
+still be one Sendspin fragment of several.
+
+The inner layer exists because a Noise transport message cannot exceed 65535
+bytes, which leaves 65518 for a payload once the 16-byte tag and the type byte
+are taken. Reassembly holds one message per direction, refuses a first fragment
+while one is in flight, a continuation with none in flight, a plain data frame
+arriving mid-message, a reserved flag bit, and a fragment naming the fragment
+type as its own -- each with a test. The accumulated size is checked on every
+fragment, so a long chain cannot grow past the ceiling one kilobyte at a time.
+
+The read limit is 2048 bytes through the cleartext phase, where every legitimate
+message is a few hundred, and opens to 65535 only once the channel is encrypted.
+
 ## Uninstalling has to take the identity with it
 
 `uninstall.sh` removes the Sendspin key alongside the ESPHome one, and reads both
