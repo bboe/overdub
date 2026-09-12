@@ -234,7 +234,7 @@ func (s *Server) publish(what string, readings []reading) []reading {
 	}
 	s.mu.Unlock()
 	for _, line := range failed {
-		s.peerLogf("%s", line)
+		s.untrustedLog.Printf("%s", line)
 	}
 	return changed
 }
@@ -270,7 +270,7 @@ func (s *Server) FirePress(objectID string, eventType EventType, count int, hold
 	})...)
 	s.mu.Unlock()
 	for _, line := range failed {
-		s.peerLogf("%s", line)
+		s.untrustedLog.Printf("%s", line)
 	}
 }
 

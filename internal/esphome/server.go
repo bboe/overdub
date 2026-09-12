@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bboe/overdub/internal/device"
+	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
 const (
@@ -37,12 +38,6 @@ const (
 	SoundEvery = 1
 
 	MinSensorTick = 30 * time.Second
-
-	logWindow = time.Minute
-	logBurst  = 20
-	logTotal  = 5000
-
-	maxLoggedString = 64
 
 	commandQueue = 4
 )
@@ -218,42 +213,39 @@ type Server struct {
 	liveWake   chan struct{}
 	sensorWake chan struct{}
 
-	logMu        sync.Mutex
-	logWindowEnd time.Time
-	logLines     int
-	logDropped   int
-	logWritten   int
+	untrustedLog untrustedlog.Log
 }
 
 func NewServer(name, model, mac string, psk []byte) *Server {
 	return &Server{
-		name:       name,
-		model:      model,
-		mac:        mac,
-		psk:        psk,
-		keyUptime:  entityKey("uptime"),
-		keyWifi:    entityKey("wifi_signal"),
-		keyVolume:  entityKey("volume"),
-		keyCPU:     entityKey("cpu_temperature"),
-		keyMemory:  entityKey("memory_available"),
-		keyJack:    entityKey("jack_volume"),
-		keyJackOn:  entityKey("audio_jack"),
-		keySound:   entityKey("speaker_playing"),
-		keySpeaker: entityKey("speaker"),
-		keyMicMute: entityKey("microphone_muted"),
-		keyADB:     entityKey("network_adb"),
-		keyAlexa:   entityKey("alexa_registered"),
-		keyText:    entityKey("alexa_command"),
-		keyCommand: entityKey("send_command"),
-		buttons:    newButtons(),
-		uptime:     device.UptimeSeconds,
-		wifi:       device.WifiSignal,
-		volumes:    device.MusicVolumes,
-		jack:       device.JackOccupied,
-		sound:      device.SpeakerPlaying,
-		cpu:        device.CPUTemperature,
-		micMute:    device.MicMuted,
-		alexa:      device.AlexaRegistered,
+		name:         name,
+		model:        model,
+		mac:          mac,
+		psk:          psk,
+		untrustedLog: untrustedlog.Log{Subject: "esphome api"},
+		keyUptime:    entityKey("uptime"),
+		keyWifi:      entityKey("wifi_signal"),
+		keyVolume:    entityKey("volume"),
+		keyCPU:       entityKey("cpu_temperature"),
+		keyMemory:    entityKey("memory_available"),
+		keyJack:      entityKey("jack_volume"),
+		keyJackOn:    entityKey("audio_jack"),
+		keySound:     entityKey("speaker_playing"),
+		keySpeaker:   entityKey("speaker"),
+		keyMicMute:   entityKey("microphone_muted"),
+		keyADB:       entityKey("network_adb"),
+		keyAlexa:     entityKey("alexa_registered"),
+		keyText:      entityKey("alexa_command"),
+		keyCommand:   entityKey("send_command"),
+		buttons:      newButtons(),
+		uptime:       device.UptimeSeconds,
+		wifi:         device.WifiSignal,
+		volumes:      device.MusicVolumes,
+		jack:         device.JackOccupied,
+		sound:        device.SpeakerPlaying,
+		cpu:          device.CPUTemperature,
+		micMute:      device.MicMuted,
+		alexa:        device.AlexaRegistered,
 		micPress: func() error {
 			return fmt.Errorf("no button to press: the switch is not wired to one")
 		},
@@ -333,53 +325,12 @@ func (s *Server) Listen(addr string) error {
 			if errors.Is(err, net.ErrClosed) {
 				return err
 			}
-			s.peerLogf("esphome api: accept: %v", err)
+			s.untrustedLog.Printf("esphome api: accept: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
 		go s.serveConn(c)
 	}
-}
-
-func (s *Server) peerLogf(format string, args ...any) {
-	dropped, allow, last := s.logAllow()
-	if dropped > 0 {
-		log.Printf("esphome api: %d lines suppressed", dropped)
-	}
-	if allow {
-		log.Printf(format, args...)
-	}
-	if last {
-		log.Printf("esphome api: %d lines this run; nothing a peer does is logged"+
-			" again until a restart", logTotal)
-	}
-}
-
-func (s *Server) logAllow() (dropped int, allow, last bool) {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	if s.logWritten >= logTotal {
-		return 0, false, false
-	}
-	if now := time.Now(); now.After(s.logWindowEnd) {
-		s.logWindowEnd = now.Add(logWindow)
-		s.logLines = 0
-		dropped, s.logDropped = s.logDropped, 0
-	}
-	if s.logLines >= logBurst {
-		s.logDropped++
-		return dropped, false, false
-	}
-	s.logLines++
-	s.logWritten++
-	return dropped, true, s.logWritten == logTotal
-}
-
-func truncate(s string) string {
-	if len(s) > maxLoggedString {
-		return s[:maxLoggedString] + "..."
-	}
-	return s
 }
 
 func (s *Server) serveConn(netConn net.Conn) {
@@ -388,14 +339,14 @@ func (s *Server) serveConn(netConn net.Conn) {
 	s.mu.Lock()
 	if len(s.conns) >= maxConns {
 		s.mu.Unlock()
-		s.peerLogf("esphome api: %s refused: %d connections already", netConn.RemoteAddr(), maxConns)
+		s.untrustedLog.Printf("esphome api: %s refused: %d connections already", netConn.RemoteAddr(), maxConns)
 		netConn.Close()
 		return
 	}
 	s.conns[conn] = struct{}{}
 	s.mu.Unlock()
 
-	s.peerLogf("esphome api: %s connected", netConn.RemoteAddr())
+	s.untrustedLog.Printf("esphome api: %s connected", netConn.RemoteAddr())
 	written := make(chan struct{})
 	writing := false
 	defer func() {
@@ -410,7 +361,7 @@ func (s *Server) serveConn(netConn net.Conn) {
 			}
 		}
 		netConn.Close()
-		s.peerLogf("esphome api: %s disconnected", netConn.RemoteAddr())
+		s.untrustedLog.Printf("esphome api: %s disconnected", netConn.RemoteAddr())
 	}()
 
 	reader := bufio.NewReader(netConn)
@@ -420,11 +371,11 @@ func (s *Server) serveConn(netConn net.Conn) {
 	netConn.SetReadDeadline(handshakeDeadline)
 	lead, err := reader.Peek(1)
 	if err != nil {
-		s.peerLogf("esphome api: %s: %v", netConn.RemoteAddr(), err)
+		s.untrustedLog.Printf("esphome api: %s: %v", netConn.RemoteAddr(), err)
 		return
 	}
 	if lead[0] != leadEncrypted {
-		s.peerLogf("esphome api: %s tried plaintext", netConn.RemoteAddr())
+		s.untrustedLog.Printf("esphome api: %s tried plaintext", netConn.RemoteAddr())
 		netConn.SetWriteDeadline(time.Now().Add(s.handshakeWait))
 		_ = writeNoiseFrame(writer, nil)
 		_ = writer.Flush()
@@ -433,11 +384,11 @@ func (s *Server) serveConn(netConn net.Conn) {
 
 	session, err := noiseAccept(netConn, reader, writer, s.name, s.psk, handshakeDeadline)
 	if err != nil {
-		s.peerLogf("esphome api: %s handshake failed: %v", netConn.RemoteAddr(), err)
+		s.untrustedLog.Printf("esphome api: %s handshake failed: %v", netConn.RemoteAddr(), err)
 		return
 	}
 	conn.rw = session
-	s.peerLogf("esphome api: %s encrypted session established", netConn.RemoteAddr())
+	s.untrustedLog.Printf("esphome api: %s encrypted session established", netConn.RemoteAddr())
 
 	writing = true
 	go func() {
@@ -458,28 +409,32 @@ func (s *Server) serveConn(netConn net.Conn) {
 			if decrypted && !pinged && resumable(err) {
 				pinged = true
 				if err := s.send(conn, msgPingRequest, nil); err != nil {
-					s.peerLogf("esphome api: %s ping: %v", netConn.RemoteAddr(), err)
+					s.untrustedLog.Printf("esphome api: %s ping: %v", netConn.RemoteAddr(), err)
 					return
 				}
 				continue
 			}
-			s.peerLogf("esphome api: %s read: %v", netConn.RemoteAddr(), err)
+			s.untrustedLog.Printf("esphome api: %s read: %v", netConn.RemoteAddr(), err)
 			return
 		}
 		decrypted = true
 		pinged = false
 		if err := s.handle(conn, msgType, payload); err != nil {
-			s.peerLogf("esphome api: %s handling message %d: %v", netConn.RemoteAddr(), msgType, err)
+			s.untrustedLog.Printf("esphome api: %s handling message %d: %v", netConn.RemoteAddr(), msgType, err)
 			return
 		}
-		if conn.said != "" {
-			s.peerLogf("esphome api: %s hello from %q", netConn.RemoteAddr(), conn.said)
-			conn.said = ""
-		}
-		if conn.noted != "" {
-			s.peerLogf("%s", conn.noted)
-			conn.noted = ""
-		}
+		s.noteFrom(conn)
+	}
+}
+
+func (s *Server) noteFrom(conn *conn) {
+	if conn.said != "" {
+		s.untrustedLog.Printf("esphome api: %s hello from %q", conn.sock.RemoteAddr(), conn.said)
+		conn.said = ""
+	}
+	if conn.noted != "" {
+		s.untrustedLog.Printf("%s", conn.noted)
+		conn.noted = ""
 	}
 }
 
@@ -495,7 +450,7 @@ func (s *Server) send(conn *conn, msgType int, payload []byte) error {
 func (s *Server) writeLoop(conn *conn) {
 	for f := range conn.out {
 		if err := conn.rw.write(f.msgType, f.payload); err != nil {
-			s.peerLogf("esphome api: %s write: %v", conn.sock.RemoteAddr(), err)
+			s.untrustedLog.Printf("esphome api: %s write: %v", conn.sock.RemoteAddr(), err)
 			conn.sock.Close()
 			return
 		}
@@ -534,7 +489,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}); err != nil {
 			return err
 		}
-		conn.said = truncate(client)
+		conn.said = untrustedlog.Cut(client)
 		var msg pb
 		msg.u32(1, 1)  // api_version_major
 		msg.u32(2, 12) // api_version_minor
@@ -725,7 +680,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
 	if !slices.Contains(buttonModes, choice) {
 		conn.noted = fmt.Sprintf("esphome api: %s asked %s for mode %q, which was not offered",
-			conn.sock.RemoteAddr(), b.objectID, truncate(choice))
+			conn.sock.RemoteAddr(), b.objectID, untrustedlog.Cut(choice))
 		return
 	}
 	if b.setMode == nil || b.mode() == choice {
@@ -744,7 +699,7 @@ func (s *Server) setADBLocked(conn *conn, choice string) {
 	want, ok := device.ParseADBMode(choice)
 	if !ok || (want == device.ADBSecure && !s.adbSecureOK()) {
 		conn.noted = fmt.Sprintf("esphome api: %s asked network adb for %q, which was not offered",
-			conn.sock.RemoteAddr(), truncate(choice))
+			conn.sock.RemoteAddr(), untrustedlog.Cut(choice))
 		return
 	}
 	if s.adbHasPending || s.adbWorking {
@@ -784,37 +739,37 @@ const adbSettleFor = 2 * time.Second
 func (s *Server) setADBMode(want device.ADBMode) {
 	err := s.adbSet(want)
 	if err != nil {
-		s.peerLogf("network adb: %v", err)
+		s.untrustedLog.Printf("network adb: %v", err)
 	}
 	time.Sleep(s.adbSettle)
 
 	live, known := s.adbMode()
 	switch {
 	case !known:
-		s.peerLogf("network adb: asked for %v, and the device could not be read", want)
+		s.untrustedLog.Printf("network adb: asked for %v, and the device could not be read", want)
 	case live != want:
-		s.peerLogf("network adb: asked for %v, device is %v", want, live)
+		s.untrustedLog.Printf("network adb: asked for %v, device is %v", want, live)
 		if want == device.ADBSecure && live == device.ADBInsecure {
 			if err := s.adbSet(device.ADBOff); err != nil {
-				s.peerLogf("network adb: %v", err)
+				s.untrustedLog.Printf("network adb: %v", err)
 			}
 			time.Sleep(s.adbSettle)
 			live, known = s.adbMode()
 			if known {
-				s.peerLogf("network adb: closed instead; device is %v", live)
+				s.untrustedLog.Printf("network adb: closed instead; device is %v", live)
 			} else {
-				s.peerLogf("network adb: closed instead, and the device could not be read")
+				s.untrustedLog.Printf("network adb: closed instead, and the device could not be read")
 			}
 		}
 	case live == device.ADBSecure && err == nil:
-		s.peerLogf("network adb: LISTENING on tcp/%d, key required; root is still one su away", device.ADBPort)
+		s.untrustedLog.Printf("network adb: LISTENING on tcp/%d, key required; root is still one su away", device.ADBPort)
 	case live == device.ADBInsecure:
-		s.peerLogf("network adb: LISTENING on tcp/%d with no authentication; this is a root-capable shell", device.ADBPort)
+		s.untrustedLog.Printf("network adb: LISTENING on tcp/%d with no authentication; this is a root-capable shell", device.ADBPort)
 	}
 
 	if known && live == device.ADBOff {
 		if err := s.adbDeny(); err != nil {
-			s.peerLogf("network adb: %v", err)
+			s.untrustedLog.Printf("network adb: %v", err)
 		}
 	}
 
@@ -906,14 +861,14 @@ func (s *Server) setMic(want bool) {
 func (s *Server) applyMic(want bool) (muted, settled bool) {
 	muted, known := s.micMute()
 	if !known {
-		s.peerLogf("microphone: asked for %s, and the device could not be read", micWord(want))
+		s.untrustedLog.Printf("microphone: asked for %s, and the device could not be read", micWord(want))
 		return false, false
 	}
 	if muted == want {
 		return muted, true
 	}
 	if err := s.micPress(); err != nil {
-		s.peerLogf("microphone: %v", err)
+		s.untrustedLog.Printf("microphone: %v", err)
 		return false, false
 	}
 	time.Sleep(s.micSettle)
@@ -921,13 +876,13 @@ func (s *Server) applyMic(want bool) (muted, settled bool) {
 	muted, known = s.micMute()
 	switch {
 	case !known:
-		s.peerLogf("microphone: asked for %s, and the device could not be read back", micWord(want))
+		s.untrustedLog.Printf("microphone: asked for %s, and the device could not be read back", micWord(want))
 		return false, false
 	case muted != want:
-		s.peerLogf("microphone: asked for %s, device is %s", micWord(want), micWord(muted))
+		s.untrustedLog.Printf("microphone: asked for %s, device is %s", micWord(want), micWord(muted))
 		return muted, false
 	}
-	s.peerLogf("microphone: %s", micWord(muted))
+	s.untrustedLog.Printf("microphone: %s", micWord(muted))
 	return muted, true
 }
 

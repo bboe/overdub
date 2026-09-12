@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bboe/overdub/internal/device"
+	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
 // From aioesphomeapi's MediaPlayerEntityFeature.
@@ -120,7 +121,7 @@ func (s *Server) NotePlaybackFailed(detail string) {
 	if detail == "" {
 		detail = "no reason given"
 	}
-	s.peerLogf("playback: alexa reported a failure: %s", truncate(detail))
+	s.untrustedLog.Printf("playback: alexa reported a failure: %s", untrustedlog.Cut(detail))
 	s.NotePlayback(false)
 }
 
@@ -133,11 +134,11 @@ func (s *Server) playing() bool {
 func (s *Server) playLocked(conn *conn, url string, announcement bool) {
 	if s.play == nil {
 		conn.noted = fmt.Sprintf("esphome api: %s asked to play %s, and there is nothing here "+
-			"that plays", conn.sock.RemoteAddr(), truncate(url))
+			"that plays", conn.sock.RemoteAddr(), untrustedlog.Cut(url))
 		return
 	}
 	conn.noted = fmt.Sprintf("esphome api: %s asked to play %s (announcement=%v)",
-		conn.sock.RemoteAddr(), truncate(url), announcement)
+		conn.sock.RemoteAddr(), untrustedlog.Cut(url), announcement)
 
 	s.playWant, s.playHasPending = url, true
 	if s.playWorking {
@@ -163,7 +164,7 @@ func (s *Server) playWorker() {
 			continue
 		}
 		if err := play(url); err != nil {
-			s.peerLogf("playback: %s", truncate(err.Error()))
+			s.untrustedLog.Printf("playback: %s", untrustedlog.Cut(err.Error()))
 			s.NotePlayback(false)
 		}
 	}
@@ -206,13 +207,13 @@ func (s *Server) commandLocked(conn *conn, text string) {
 	}
 	if s.command == nil {
 		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s, and no credential was "+
-			"found to run it with", conn.sock.RemoteAddr(), truncate(text))
+			"found to run it with", conn.sock.RemoteAddr(), untrustedlog.Cut(text))
 		return
 	}
 	if len(s.cmdQueue) >= commandQueue {
 		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s, and %d are already "+
 			"waiting; it was dropped rather than queued",
-			conn.sock.RemoteAddr(), truncate(text), len(s.cmdQueue))
+			conn.sock.RemoteAddr(), untrustedlog.Cut(text), len(s.cmdQueue))
 		return
 	}
 	if text == "" {
@@ -220,7 +221,7 @@ func (s *Server) commandLocked(conn *conn, text string) {
 			conn.sock.RemoteAddr())
 	} else {
 		conn.noted = fmt.Sprintf("esphome api: %s asked alexa to run %s",
-			conn.sock.RemoteAddr(), truncate(text))
+			conn.sock.RemoteAddr(), untrustedlog.Cut(text))
 	}
 
 	s.cmdQueue = append(s.cmdQueue, text)
@@ -251,7 +252,7 @@ func (s *Server) commandWorker() {
 			continue
 		}
 		if err := send(text); err != nil {
-			s.peerLogf("alexa command: %v", err)
+			s.untrustedLog.Printf("alexa command: %v", err)
 		}
 	}
 }
@@ -306,7 +307,7 @@ func (s *Server) setVolume(want volumeWant) {
 func (s *Server) applyVolume(want volumeWant) {
 	step, max, ok := s.readVolumeStep()
 	if !ok {
-		s.peerLogf("volume: asked for %s, and the level could not be read", want)
+		s.untrustedLog.Printf("volume: asked for %s, and the level could not be read", want)
 		return
 	}
 	target := clampStep(want.target(step, max), max)
@@ -315,11 +316,11 @@ func (s *Server) applyVolume(want volumeWant) {
 		return
 	}
 	if s.volumeKeys == nil {
-		s.peerLogf("volume: asked for %s, and there are no keys to press", want)
+		s.untrustedLog.Printf("volume: asked for %s, and there are no keys to press", want)
 		return
 	}
 	if err := s.volumeKeys(delta > 0, abs(delta)); err != nil {
-		s.peerLogf("volume: %v", err)
+		s.untrustedLog.Printf("volume: %v", err)
 		return
 	}
 	time.Sleep(s.volumeSettle)
@@ -327,12 +328,12 @@ func (s *Server) applyVolume(want volumeWant) {
 	landed, _, ok := s.readVolumeStep()
 	switch {
 	case !ok:
-		s.peerLogf("volume: asked for step %d of %d, and the level could not be read back",
+		s.untrustedLog.Printf("volume: asked for step %d of %d, and the level could not be read back",
 			target, max)
 	case landed != target:
-		s.peerLogf("volume: asked for step %d of %d, device is at %d", target, max, landed)
+		s.untrustedLog.Printf("volume: asked for step %d of %d, device is at %d", target, max, landed)
 	default:
-		s.peerLogf("volume: step %d of %d", landed, max)
+		s.untrustedLog.Printf("volume: step %d of %d", landed, max)
 	}
 }
 

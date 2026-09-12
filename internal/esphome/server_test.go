@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bboe/overdub/internal/device"
+	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
 func TestSendDropsRatherThanBlockingOnAStalledClient(t *testing.T) {
@@ -381,59 +382,6 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 	}
 }
 
-func TestTheLogRateLimitCapsWhatOnePeerCanWrite(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	for i := 0; i < 500; i++ {
-		s.peerLogf("esphome api: line %d", i)
-	}
-	if lines := strings.Count(out.String(), "\n"); lines > logBurst+1 {
-		t.Errorf("500 peer events wrote %d lines, want at most %d", lines, logBurst+1)
-	}
-}
-
-func TestTheRateLimitHoldsAcrossConcurrentPeers(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	var wg sync.WaitGroup
-	for i := 0; i < maxConns; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				s.peerLogf("esphome api: line %d", j)
-			}
-		}()
-	}
-	wg.Wait()
-
-	if lines := strings.Count(out.String(), "\n"); lines > logBurst+1 {
-		t.Errorf("%d peers wrote %d lines in one window, want at most %d",
-			maxConns, lines, logBurst+1)
-	}
-}
-
-func TestPeerLoggingStopsAtItsCeilingForTheRun(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
-	for i := 0; i < logTotal+logBurst*3; i++ {
-		s.logMu.Lock()
-		s.logWindowEnd = time.Time{}
-		s.logMu.Unlock()
-		s.peerLogf("esphome api: line %d", i)
-	}
-	if lines := strings.Count(out.String(), "\n"); lines > logTotal+2 {
-		t.Errorf("wrote %d lines, want at most %d: the run has no ceiling",
-			lines, logTotal+2)
-	}
-}
-
 func TestAMalformedHelloIsNotAnswered(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -492,9 +440,9 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 		client.Close()
 		<-done
 	}
-	if lines := strings.Count(out.String(), "\n"); lines > 2*logBurst {
+	if lines := strings.Count(out.String(), "\n"); lines > 2*untrustedlog.Burst {
 		t.Errorf("200 connect/disconnect cycles wrote %d log lines, want at most %d",
-			lines, 2*logBurst)
+			lines, 2*untrustedlog.Burst)
 	}
 
 	before := out.String()
@@ -2358,5 +2306,169 @@ func TestTheFirstSubscriberGetsNoRegistrationUntilThePollTakesOne(t *testing.T) 
 	if s.publish("sensors", s.readTicked()); !carries("the woken poll") {
 		t.Error("the poll that the subscriber's wake starts never sent the registration the " +
 			"snapshot had nothing to say about")
+	}
+}
+
+func TestWhatAPeerMadeUsNoteIsSpentFromItsBudget(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	c := &conn{sock: fakeAddr{}}
+
+	c.noted = "esphome api: a peer changed something"
+	s.noteFrom(c)
+	if !strings.Contains(out.String(), "a peer changed something") {
+		t.Fatalf("the note was never logged at all:\n%s", out.String())
+	}
+	if c.noted != "" {
+		t.Error("the note was not cleared, so it would be logged again next message")
+	}
+
+	c.said = "a client name"
+	s.noteFrom(c)
+	if c.said != "" {
+		t.Error("the hello was not cleared, so every later message re-logs it and one" +
+			" connection spends the whole burst on the same line")
+	}
+
+	for i := 0; i < untrustedlog.Burst; i++ {
+		s.untrustedLog.Printf("esphome api: line %d", i)
+	}
+	before := out.String()
+
+	c.noted = "esphome api: this one is past the budget"
+	c.said = "past the budget too"
+	s.noteFrom(c)
+
+	if strings.Contains(out.String()[len(before):], "past the budget") {
+		t.Error("a note escaped the rate limit; every line a peer can cause has to spend from it")
+	}
+}
+
+func TestAPeerSuppliedStringIsBoundedBeforeItIsNoted(t *testing.T) {
+	long := strings.Repeat("z", 300)
+
+	for _, c := range []struct {
+		name string
+		note func(t *testing.T, s *Server, conn *conn)
+	}{
+		{"a network adb choice", func(_ *testing.T, s *Server, conn *conn) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.setADBLocked(conn, long)
+		}},
+		{"a button mode choice", func(t *testing.T, s *Server, conn *conn) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, b := range s.buttons {
+				s.setModeLocked(conn, b, long)
+				return
+			}
+			t.Fatal("no button is offered, so this case asserts nothing")
+		}},
+		{"an alexa command", func(t *testing.T, s *Server, conn *conn) {
+			s.UseCommand(func(string) error { return nil })
+			if err := s.handle(conn, msgTextCommand, keyedText(s.keyText, long)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a url to play", func(_ *testing.T, s *Server, conn *conn) {
+			s.UsePlay(func(string) error { return nil })
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.playLocked(conn, long, false)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var out lockedBuffer
+			defer restoreLog(t, &out)()
+
+			s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+			s.UseButton("action_button", func() string { return "intercept" }, func(string) {})
+			conn := &conn{sock: fakeAddr{}}
+
+			c.note(t, s, conn)
+
+			if conn.noted == "" {
+				t.Fatal("nothing was noted, so this path no longer reports to the peer")
+			}
+			if strings.Contains(conn.noted, long) {
+				t.Errorf("the note carries all %d bytes the peer supplied; a peer sets the"+
+					" length of every line it can cause unless it is cut", len(long))
+			}
+		})
+	}
+}
+
+func TestAPlaybackFailureSpendsThePeerBudget(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	for i := 0; i < untrustedlog.Burst; i++ {
+		s.untrustedLog.Printf("esphome api: line %d", i)
+	}
+	before := out.String()
+
+	s.NotePlaybackFailed("alexa said no, at length")
+
+	if strings.Contains(out.String()[len(before):], "alexa said no") {
+		t.Error("a playback failure escaped the rate limit; a peer asking for a clip that" +
+			" cannot play is what causes it, so it spends the peer's budget")
+	}
+}
+
+func TestAFailedPushSpendsThePeerBudget(t *testing.T) {
+	stall := func(t *testing.T, s *Server) {
+		t.Helper()
+		near, far := net.Pipe()
+		t.Cleanup(func() { near.Close(); far.Close() })
+		stalled := &conn{sock: fakeAddr{Conn: near}, out: make(chan frame), states: true, services: true}
+		s.mu.Lock()
+		s.conns[stalled] = struct{}{}
+		s.mu.Unlock()
+	}
+
+	for _, c := range []struct {
+		name string
+		push func(s *Server)
+	}{
+		{"a sensor publish", func(s *Server) {
+			s.publish("volume", []reading{{key: s.keyVolume, value: 40, ok: true}})
+		}},
+		{"a button press", func(s *Server) {
+			s.FirePress("action_button", EventPressEnd, 1, 0)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var reported lockedBuffer
+			restore := restoreLog(t, &reported)
+			s := testServer(t, testPSK(t))
+			stall(t, s)
+			c.push(s)
+			restore()
+			if !strings.Contains(reported.String(), "failed") {
+				t.Fatalf("this path no longer reports a failed push, so the check below"+
+					" would pass on a push that reports nothing:\n%s", reported.String())
+			}
+
+			var out lockedBuffer
+			defer restoreLog(t, &out)()
+			spent := testServer(t, testPSK(t))
+			stall(t, spent)
+			for i := 0; i < untrustedlog.Burst; i++ {
+				spent.untrustedLog.Printf("esphome api: line %d", i)
+			}
+			before := len(out.String())
+
+			c.push(spent)
+
+			if len(out.String()) > before {
+				t.Errorf("a failed push escaped the rate limit; a peer that holds a connection"+
+					" open and stops reading is what causes these, so they spend its budget:\n%s",
+					out.String()[before:])
+			}
+		})
 	}
 }

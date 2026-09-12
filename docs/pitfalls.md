@@ -158,14 +158,22 @@ is there because a peer did something, and `%q` renders a frame of `\xff` as
 four times its size on one line: measured, one `HelloRequest` wrote 131,207
 bytes. The log is truncated at boot and every twentieth restart, and a peer
 writing to it never makes the daemon exit, so neither truncation arrives. Peer
-strings are cut to 64 bytes before they are quoted, and API lines are limited
-twice over: 20 a minute, and 5,000 for the run. The rate alone is not enough:
-21 lines a minute at the measured 311-byte worst case is 9 MB a day, and
-nothing truncates it. After the ceiling nothing a peer does is logged again
-until the daemon restarts, the count of what was dropped included, because a
-line a minute saying so grows the same file. Connection churn is the same
-hazard at a smaller size, a connect and a disconnect line apiece, so those are
-limited too rather than only the lines carrying a peer's own bytes.
+strings are cut to 64 bytes and an ellipsis before they are quoted, and peer
+lines are limited twice over: 20 a minute, and 5,000 for the run.
+`internal/untrustedlog` holds the rule, so a second peer-facing subsystem
+cannot keep its own copy of these numbers and drift from them. It does not hold
+one budget between them: the counters live per `Log`, so a second subsystem
+gets its own twenty a minute and its own five thousand, and what reaches the
+disk is the sum. That is a decision made by constructing a second `Log` rather
+than a constant copied by accident, which is the part worth having; if the
+total ever matters more than telling the subsystems apart, the counters belong
+in the package rather than the value. The rate alone is not enough: 21 lines a
+minute at the measured 311-byte worst case is 9 MB a day, and nothing truncates
+it. After the ceiling nothing a peer does is logged again until the daemon
+restarts, the count of what was dropped included, because a line a minute
+saying so grows the same file. Connection churn is the same hazard at a smaller
+size, a connect and a disconnect line apiece, so those are limited too rather
+than only the lines carrying a peer's own bytes.
 
 **An empty pre-shared key is not a weak key, it is no key.** `flynn/noise` reads
 an empty `PresharedKey` as *no psk modifier at all*, so `NNpsk0` quietly becomes

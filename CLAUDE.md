@@ -17,7 +17,8 @@ deploy/uninstall.sh              # remove it again, and give the button back
 gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
-go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/  # no arm build
+go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ \
+        ./internal/untrustedlog/                  # -race has no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
@@ -46,6 +47,8 @@ internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
 internal/evdev     evdev and uinput primitives
 internal/mdns      the mDNS responder, answering for every service the Dot
                    offers; it knows nothing about any of them
+internal/untrustedlog
+                   what a peer may spend making this daemon write to /data
 ```
 
 ## Comments

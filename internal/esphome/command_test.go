@@ -3,6 +3,7 @@ package esphome
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -195,10 +196,7 @@ func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	s.logMu.Lock()
-	written := s.logWritten
-	s.logMu.Unlock()
-	if written == 0 {
+	if s.untrustedLog.Written() == 0 {
 		t.Error("the failure did not go through the peer rate limit, which a peer can cause")
 	}
 }
@@ -352,11 +350,13 @@ func TestAFloodOfCommandsIsBoundedAndSaysSo(t *testing.T) {
 	defer close(release)
 
 	c := &conn{sock: fakeAddr{}}
+	var told []string
 	for i := range commandQueue + 4 {
 		if err := s.handle(c, msgTextCommand,
 			keyedText(s.keyText, fmt.Sprintf("command %d", i))); err != nil {
 			t.Fatal(err)
 		}
+		told = append(told, c.noted)
 	}
 
 	s.mu.Lock()
@@ -366,8 +366,10 @@ func TestAFloodOfCommandsIsBoundedAndSaysSo(t *testing.T) {
 		t.Errorf("%d commands are queued, want at most %d: a peer holding the key can "+
 			"otherwise queue without bound", queued, commandQueue)
 	}
-	if !strings.Contains(c.noted, "dropped rather than queued") {
-		t.Errorf("the peer was told %q, which does not say its command was dropped", c.noted)
+	if !slices.ContainsFunc(told, func(said string) bool {
+		return strings.Contains(said, "dropped rather than queued")
+	}) {
+		t.Errorf("the peer was told %q, and none of it says a command was dropped", told)
 	}
 }
 

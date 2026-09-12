@@ -256,11 +256,11 @@ ever recognise the case a peer would not bother sending.
 
 The log line saying which way the button went is carried out of `handle` on the
 connection, the way the hello line is, because the log is a file on `/data` and
-the lock gates the accept path and every other connection. It is the only record
-that separates a button nobody is answering from one Home Assistant let go of,
-and it is not a guarantee: it goes through `peerLogf` like every other line a
-peer causes, so a peer that has already spent the run's ceiling on connection
-churn moves the button unrecorded.
+the lock gates the accept path and every other connection. It is the only
+record that separates a button nobody is answering from one Home Assistant let
+go of, and it is not a guarantee: it goes through `s.untrustedLog.Printf` like
+every other line a peer causes, so a peer that has already spent the run's
+ceiling on connection churn moves the button unrecorded.
 
 Exempting it from that budget is the obvious fix and is wrong. `conn.noted` is
 set once per state *change*, which is once per message a peer sends, not once

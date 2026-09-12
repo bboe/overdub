@@ -39,14 +39,24 @@ key and a mode that may both be halves of something else -- and the two are
 the only messages whose payloads are read at all: the rest carry nothing this
 daemon needs, so their bodies are never looked at.
 
-Every line a peer can cause goes through the rate limit: the accept loop's,
-each connection's, and the sensor push's. Three lines in the package are
-written outside the count: the line the listener writes once at startup, the
-one saying how many were suppressed, and the one saying the ceiling is reached.
-Only the first is beyond a peer's reach, since exceeding the burst is what
-causes a suppressed-count line. All three stay bounded anyway: the
+Every line a peer can cause goes through the rate limit `internal/untrustedlog`
+keeps: the accept loop's, each connection's, the sensor push's, the button
+press's, and the three written from workers of their own -- the playback
+watcher's, the play worker's and the command worker's. Seven lines are written
+outside the count, five here and two in that package: the line the listener
+writes once at startup, the two saying a tick was raised to its floor, the two
+saying the entity list was dropped so it is sent again, and -- in the package
+-- the one saying how many lines were suppressed and the one saying the ceiling
+is reached.
+
+Only the first three are beyond a peer's reach. A peer sets how many of the
+relist pair are written, one per connection it is holding, up to the eight the
+listener allows, and they carry its address and nothing else of its own.
+Exceeding the burst is what causes a suppressed-count line, so that one is a
+peer's to cause as well. All seven stay bounded anyway: the three are written
+once a run and the relist pair at most eight lines each, once; the
 suppressed-count line is written at most once a window and stops at the ceiling
-with everything else, and the ceiling line is written once.
+with everything else; and the ceiling line is written once.
 
 No log write happens with the server lock held, which is why the hello line is
 carried out of `handle` by the read loop, a message that will not parse is
