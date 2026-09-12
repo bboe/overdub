@@ -19,7 +19,7 @@ func samples(t *testing.T) []int16 {
 }
 
 func TestChimeIsTheLengthItClaims(t *testing.T) {
-	want := int(chimeSeconds*chimeRate) * 2
+	want := int(chimeSeconds*ChimeRate) * 2
 	if got := len(chimePCM()); got != want {
 		t.Errorf("got %d bytes, want %d", got, want)
 	}

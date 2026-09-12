@@ -3,8 +3,8 @@ package audio
 import "math"
 
 const (
-	chimeRate     = 48000
-	chimeChannels = 1
+	ChimeRate     = 48000
+	ChimeChannels = 1
 
 	chimeSeconds = 0.40
 	chimeGain    = 0.22
@@ -26,10 +26,10 @@ var chimeNotes = []note{
 }
 
 func chimePCM() []byte {
-	frames := int(chimeSeconds * chimeRate)
+	frames := int(chimeSeconds * ChimeRate)
 	buf := make([]byte, frames*2)
 	for i := range frames {
-		t := float64(i) / chimeRate
+		t := float64(i) / ChimeRate
 		var v float64
 		for _, n := range chimeNotes {
 			if t < n.start || t >= n.start+n.dur {

@@ -120,6 +120,10 @@ type Session struct {
 	inFragment   bool
 	fragment     []byte
 	fragmentType byte
+
+	offered  map[string]pairMethod
+	unpaired bool
+	roles    []string
 }
 
 func (s *Session) Matched() category { return s.matched }

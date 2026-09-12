@@ -28,7 +28,7 @@ func NewChime() (*Chime, error) {
 	}
 	clip := chimePCM()
 	pcm := C.CBytes(clip)
-	rc := C.audio_init((*C.uchar)(pcm), C.size_t(len(clip)), chimeRate, chimeChannels)
+	rc := C.audio_init((*C.uchar)(pcm), C.size_t(len(clip)), ChimeRate, ChimeChannels)
 	if rc != 0 {
 		C.free(pcm)
 		open.Store(false)
