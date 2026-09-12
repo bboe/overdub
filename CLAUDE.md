@@ -18,7 +18,7 @@ gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
 go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ \
-        ./internal/untrustedlog/                  # -race has no arm build
+        ./internal/sendspin/ ./internal/untrustedlog/   # -race has no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
@@ -47,6 +47,7 @@ internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
 internal/evdev     evdev and uinput primitives
 internal/mdns      the mDNS responder, answering for every service the Dot
                    offers; it knows nothing about any of them
+internal/sendspin   the Sendspin client: the WebSocket it arrives over
 internal/untrustedlog
                    what a peer may spend making this daemon write to /data
 ```
@@ -95,6 +96,7 @@ evening.
 | change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |
 | touch the Alexa command path, the credential, or MapDump | `docs/command.md` |
 | run anything against the real device | `docs/hardware.md` |
+| touch the Sendspin client, its WebSocket, or its handshake | `docs/sendspin.md` |
 
 @docs/constraints.md
 @docs/pitfalls.md
