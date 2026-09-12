@@ -92,3 +92,99 @@ arriving mid-fragment, and an unknown opcode. Lengths are checked against the
 read limit **before** the payload is allocated, and again as fragments
 accumulate, so neither a single frame nor a long chain of them can make the
 daemon allocate past the limit.
+
+## Identity, and the one secret that is not staged
+
+`client_id` is the base64url form of a Curve25519 public key, 43 characters, and
+it is both the routing identifier and the static key the Noise handshake
+authenticates. A `pairing PSK` sits beside it: per device, from a CSPRNG,
+long-lived, and not consumed by a successful pairing, so it can pair the Dot with
+any number of servers.
+
+**The daemon generates both itself, on first run, and they never cross adb.**
+That is a departure from the ESPHome key, which `install.sh` generates locally and
+stages through `/data/local/tmp`. Two reasons. Deriving an X25519 public key is
+not something shell can do, so the private key would have to be made off-device
+and pushed. And `docs/pitfalls.md` already records what staging a secret costs:
+`adb push` does not carry the local mode, `/data/local/tmp` is `0771` with the
+`o+x` that lets any uid reach a file by name, and a key written locally as `0600`
+lands there `0666`. The ESPHome key pays for that with a private staging
+directory created and removed around the push. A secret that is never pushed
+needs none of it.
+
+The key file is 64 raw bytes: the static private key, then the pairing PSK. The
+public key is derived rather than stored, because a stored copy can go stale
+against the private key it claims to match. `flynn/noise` derives it as
+`curve25519.X25519(priv, Basepoint)`, and `crypto/ecdh` -- already in this tree's
+dependency closure, so not a new import -- computes the same value.
+`TestStoredPrivateKeyAgreesWithTheNoiseLibrary` pins that, because the two
+disagreeing would not fail: it would give the Dot a `client_id` no server could
+match against the handshake, which reads like a rejected key.
+
+A load **refuses** a file any other uid can read, and that check is not
+decoration: the pairing token is exactly `client_key || pairing_psk`, so a
+readable key file is a readable token, and a token is all anyone needs to pair as
+this Dot. Group counts as well as other -- `0604` is the whole hazard and `0640`
+hands the key to `shell`.
+
+A key file of the right length is not yet a key. Either half arriving all zeros is
+refused rather than used: X25519 clamps whatever it is handed, so a zero private
+key yields a public key and a working handshake, and a zero pairing PSK is a token
+anybody can guess. A length check alone passes a 64-byte file of zeros, and
+nothing downstream of it complains.
+
+The file arrives whole or not at all. It is written to a sibling named
+`<key>.new-<random>` at `0600`, flushed with `fsync`, closed, and then put in
+place with `link`, which fails if the key already exists. Two daemons racing on a
+first boot -- which the five-second supervisor respawn makes reachable -- then
+either win the link or read a file that is already complete. Creating the real
+path first and writing into it afterwards would leave the loser reading nothing,
+which is why it is not done that way. What this does not survive is a kill
+between the write and the link: the sibling stays, holding a valid but unused
+key, so `uninstall.sh` sweeps `<key>.new-*` as well as the key itself.
+
+## The pairing token
+
+Clients must implement the Pairing PSK method and no other, which is the one with
+no PAKE round and no pairing code: the operator carries a token from the Dot into
+the server, out of band. The token is `SP:`, a version character, and a base32
+body.
+
+Its encoding has one step that looks like a mistake and is not: after
+base32-encoding per RFC 4648 and stripping the `=` padding, **every `2` becomes a
+`9`**. Decoding maps `9` back to `2`. The reason is not the QR alphanumeric set:
+base32 emits only `A-Z` and `2-7`, every one of which is already in that set, so
+the transliteration buys nothing there. Why the spec does it is not recorded in
+the spec. It is matched here because a token
+is only useful if both ends spell it the same way, and the published vector is
+what settles the spelling. Meeting that vector without the transliteration is
+impossible, and getting it wrong produces a token that looks right and decodes to
+rubbish.
+
+Two published constants are asserted against the spec rather than trusted: the
+Sentinel PSK, `SHA-256("sendspin-sentinel-psk-v1")`; and its `psk_id`, which is
+the general rule `base64url(SHA-256("sendspin-psk-id-v1" || PSK))` applied to it.
+Both matched on the first run, which is the only reason the derivations above can
+be stated as facts.
+
+**No encoder or decoder ships.** Nothing can consume a token until the pairing
+flow exists, and a token the daemon can neither show nor receive would be code
+that only looks like a feature. The encoding is written down above because the
+spec's version-0 reference vector settles it, and the pairing pass should not
+have to derive it again.
+
+What a decoder will owe when it arrives, from the spec: leniency about what an
+operator types -- trimmed, upper-cased, a missing `SP:` tolerated -- and
+strictness about everything else, refusing an unknown version, a body that is
+not base32, and a payload shorter than the version defines. Payload bytes
+**beyond** the 64 defined are ignored rather than refused, because the spec
+reserves them for later versions.
+
+## Uninstalling has to take the identity with it
+
+`uninstall.sh` removes the Sendspin key alongside the ESPHome one, and reads both
+back in the sweep that decides whether the uninstall succeeded. Leaving it would
+not look like a failure: the daemon would be gone, the button would be Alexa's
+again, and a file whose 64 bytes are the whole pairing credential would still be
+sitting in `/data/local/bin`. The token derived from it stays valid, so anything
+that had it could pair as a Dot that no longer runs this.

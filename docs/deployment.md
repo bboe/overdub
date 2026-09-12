@@ -164,8 +164,9 @@ a daemon that exits immediately, if it had no key for example, would otherwise
 append a failure every five seconds for the rest of the boot. Counted rather
 than measured: this toolbox has no `wc`.
 
-`deploy/uninstall.sh` reverses that, key included. The boot script goes first and
-alone,
+`deploy/uninstall.sh` reverses that, both keys included: the ESPHome key and the
+Sendspin identity, each named in the sweep that decides whether the uninstall
+succeeded as well as in the removal. The boot script goes first and alone,
 because it is the only thing that starts the daemon at boot: a reboot part way
 through then leaves a Dot with nothing running rather than a supervisor
 respawning a half-deleted install.

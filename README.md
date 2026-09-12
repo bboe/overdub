@@ -252,10 +252,12 @@ respawning a half-deleted install. The daemon gets `SIGTERM` rather than being
 killed outright, so it gives the button back and destroys its uinput clones on
 the way out.
 
-Everything goes: the boot script, the binary, the API key, `mapdump.jar` and the
-directory it sits in, and the log the boot script writes. `/data/local/bin` goes
-with them if nothing else is left in it. Removing the jar revokes nothing: see
-[Alexa commands](#alexa-commands).
+Everything goes: the boot script, the binary, the API key, the Sendspin identity,
+`mapdump.jar` and the directory it sits in, and the log the boot script writes.
+`/data/local/bin` goes with them if nothing else is left in it. Removing the jar
+revokes nothing: see [Alexa commands](#alexa-commands). The Sendspin identity
+matters as much as the API key does -- the pairing token is derived from it, so a
+copy left behind stays valid for a Dot that no longer runs this.
 
 The tcp/6053 rule the daemon opened goes too, once the daemon is confirmed
 gone, so no reboot is needed. An uninstall that reports trouble stops before
