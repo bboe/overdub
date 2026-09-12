@@ -639,8 +639,10 @@ each decision is defending against.
 * [Hard constraints](docs/constraints.md): what cannot change, and why
 * [The button](docs/button.md): the grab, the clone, the modes, and what a
   press reports
-* [The Home Assistant API](docs/api.md): the entities, the polls, discovery,
-  and the encryption
+* [The Home Assistant API](docs/api.md): the entities, the polls, and the
+  encryption
+* [Finding the Dot](docs/mdns.md): the mDNS responder, and what it advertises
+  for
 * [Network adb, and the microphone](docs/device.md): the two things Home
   Assistant can switch on the Dot itself
 * [Audio](docs/audio.md): what it takes to make a sound here, and the chime

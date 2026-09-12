@@ -1,7 +1,10 @@
-package esphome
+// Package mdns answers the multicast DNS queries a browser sends, for every
+// service this device offers. It knows nothing about any of them.
+package mdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -38,15 +41,34 @@ const (
 	unicastBurst  = 20
 	unicastWindow = time.Second
 
-	esphomeService = "_esphomelib._tcp.local."
-	dnssdMeta      = "_services._dns-sd._udp.local."
+	dnssdMeta = "_services._dns-sd._udp.local."
+
+	maxTXTString = 255
+	maxLabel     = 63
+	maxName      = 255
 )
+
+type Advert struct {
+	Service string
+	Port    uint16
+	Records []string
+}
+
+type answer struct {
+	adverts []served
+	host    bool
+}
+
+type served struct {
+	Advert
+	ptr     bool
+	resolve bool
+}
 
 type Responder struct {
 	Instance string
-	MAC      string
 	Iface    string
-	Port     uint16
+	Services []Advert
 
 	mu         sync.Mutex
 	conn       *net.UDPConn
@@ -124,10 +146,16 @@ func (m *Responder) onLink(ip net.IP) bool {
 	return m.subnet != nil && m.subnet.Contains(ip)
 }
 
-func (m *Responder) serviceName() string { return m.Instance + "." + esphomeService }
-func (m *Responder) hostName() string    { return m.Instance + ".local." }
+func (m *Responder) instanceFor(service string) string { return m.Instance + "." + service }
+
+func (m *Responder) adverts() []Advert { return m.Services }
+func (m *Responder) hostName() string  { return m.Instance + ".local." }
 
 func (m *Responder) Run() {
+	if err := m.checkRecords(); err != nil {
+		log.Printf("mdns: %v; not advertising", err)
+		return
+	}
 	waiting, failing := false, false
 	for {
 		m.mu.Lock()
@@ -254,7 +282,9 @@ func (m *Responder) serve() error {
 	defer close(done)
 
 	ip := m.address()
-	log.Printf("mdns: announcing %s at %s:%d", m.serviceName(), ip, m.Port)
+	for _, a := range m.adverts() {
+		log.Printf("mdns: announcing %s at %s:%d", m.instanceFor(a.Service), ip, a.Port)
+	}
 	go func() {
 		if err := m.announce(conn, group); err != nil {
 			select {
@@ -281,14 +311,24 @@ func (m *Responder) serve() error {
 			}
 			return fmt.Errorf("read: %w", err)
 		}
-		dst, answer := m.replyTo(src, group, buffer[:n])
-		if !answer {
+		dst, send, wanted := m.replyTo(src, group, buffer[:n])
+		if !wanted {
 			continue
 		}
-		if _, err := conn.WriteToUDP(m.records(ttlShared), dst); err != nil {
+		if err := m.writeTo(conn, m.recordsFor(ttlShared, send), dst); err != nil {
 			m.noteReplyFailure(dst, group, err)
 		}
 	}
+}
+
+var errNothingToSend = errors.New("built no records to send")
+
+func (m *Responder) writeTo(conn *net.UDPConn, payload []byte, dst *net.UDPAddr) error {
+	if len(payload) == 0 {
+		return errNothingToSend
+	}
+	_, err := conn.WriteToUDP(payload, dst)
+	return err
 }
 
 func (m *Responder) beginCycle() {
@@ -297,30 +337,30 @@ func (m *Responder) beginCycle() {
 	m.restart, m.sendFailed = false, nil
 }
 
-func (m *Responder) replyTo(src, group *net.UDPAddr, packet []byte) (*net.UDPAddr, bool) {
+func (m *Responder) replyTo(src, group *net.UDPAddr, packet []byte) (*net.UDPAddr, answer, bool) {
 	if !m.onLink(src.IP) {
-		return nil, false
+		return nil, answer{}, false
 	}
-	unicast, wanted := m.wants(packet)
+	send, unicast, wanted := m.wants(packet)
 	if !wanted {
-		return nil, false
+		return nil, answer{}, false
 	}
 	m.mu.Lock()
 	withdrawn := m.gone
 	m.mu.Unlock()
 	if withdrawn {
-		return nil, false
+		return nil, answer{}, false
 	}
 	if unicast {
 		if !m.mayUnicast() {
-			return nil, false
+			return nil, answer{}, false
 		}
-		return src, true
+		return src, send, true
 	}
 	if !m.mayMulticast() {
-		return nil, false
+		return nil, answer{}, false
 	}
-	return group, true
+	return group, send, true
 }
 
 func (m *Responder) announce(conn *net.UDPConn, group *net.UDPAddr) error {
@@ -334,7 +374,7 @@ func (m *Responder) announce(conn *net.UDPConn, group *net.UDPAddr) error {
 		if gone {
 			return nil
 		}
-		if _, err := conn.WriteToUDP(payload, group); err != nil {
+		if err := m.writeTo(conn, payload, group); err != nil {
 			return err
 		}
 		time.Sleep(time.Second)
@@ -376,62 +416,108 @@ func (m *Responder) watchAddress(conn *net.UDPConn, done <-chan struct{}) {
 	}
 }
 
-func (m *Responder) wants(packet []byte) (unicast bool, wanted bool) {
+func (m *Responder) wants(packet []byte) (send answer, unicast bool, wanted bool) {
 	var parser dnsmessage.Parser
 	header, err := parser.Start(packet)
 	if err != nil || header.Response {
-		return false, false
+		return answer{}, false, false
 	}
 
+	adverts := m.adverts()
+	browse := make([]bool, len(adverts))
+	resolve := make([]bool, len(adverts))
 	matched := false
+	var asked struct{ unicast, multicast bool }
 	for {
 		question, err := parser.Question()
 		if err == dnsmessage.ErrSectionDone {
 			break
 		}
 		if err != nil {
-			return false, false
-		}
-		if matched {
-			continue
+			return answer{}, false, false
 		}
 		name := strings.ToLower(question.Name.String())
 		qtype := uint16(question.Type)
-		if (name == esphomeService && (qtype == dnsTypePTR || qtype == dnsTypeANY)) ||
-			(name == strings.ToLower(m.serviceName()) && (qtype == dnsTypeSRV || qtype == dnsTypeTXT || qtype == dnsTypeANY)) ||
-			(name == strings.ToLower(m.hostName()) && (qtype == dnsTypeA || qtype == dnsTypeANY)) {
-			matched, unicast = true, uint16(question.Class)&dnsUnicastResponse != 0
+		ours := false
+		if name == strings.ToLower(m.hostName()) && (qtype == dnsTypeA || qtype == dnsTypeANY) {
+			ours, send.host = true, m.address() != nil
+		}
+		for i, a := range adverts {
+			if name == strings.ToLower(a.Service) && (qtype == dnsTypePTR || qtype == dnsTypeANY) {
+				ours, browse[i] = true, true
+			}
+			if name == strings.ToLower(m.instanceFor(a.Service)) &&
+				(qtype == dnsTypeSRV || qtype == dnsTypeTXT || qtype == dnsTypeANY) {
+				ours, resolve[i] = true, true
+			}
+		}
+		if ours {
+			matched = true
+			if uint16(question.Class)&dnsUnicastResponse != 0 {
+				asked.unicast = true
+			} else {
+				asked.multicast = true
+			}
 		}
 	}
-	if !matched || m.alreadyKnown(&parser) {
-		return false, false
+	if !matched {
+		return answer{}, false, false
 	}
-	return unicast, true
+
+	known := m.knownAnswers(&parser, adverts)
+	for i, a := range adverts {
+		ptr := browse[i] && !known[i]
+		if !ptr && !resolve[i] {
+			continue
+		}
+		send.adverts = append(send.adverts, served{Advert: a, ptr: ptr, resolve: resolve[i]})
+	}
+	if len(send.adverts) == 0 && !send.host {
+		return answer{}, false, false
+	}
+	return send, asked.unicast && !asked.multicast, true
 }
 
-func (m *Responder) alreadyKnown(parser *dnsmessage.Parser) bool {
+func (m *Responder) knownAnswers(parser *dnsmessage.Parser, adverts []Advert) []bool {
+	known := make([]bool, len(adverts))
 	for {
-		answer, err := parser.AnswerHeader()
+		header, err := parser.AnswerHeader()
 		if err != nil {
-			return false
+			return known
 		}
-		if answer.Type != dnsmessage.TypePTR || !strings.EqualFold(answer.Name.String(), esphomeService) {
+		if header.Type != dnsmessage.TypePTR {
 			if parser.SkipAnswer() != nil {
-				return false
+				return known
 			}
 			continue
 		}
 		ptr, err := parser.PTRResource()
 		if err != nil {
-			return false
+			return known
 		}
-		if strings.EqualFold(ptr.PTR.String(), m.serviceName()) && answer.TTL >= ttlShared/2 {
-			return true
+		if header.TTL < ttlShared/2 {
+			continue
+		}
+		for i, a := range adverts {
+			if strings.EqualFold(header.Name.String(), a.Service) &&
+				strings.EqualFold(ptr.PTR.String(), m.instanceFor(a.Service)) {
+				known[i] = true
+			}
 		}
 	}
 }
 
 func (m *Responder) records(ttl uint32) []byte {
+	adverts := m.adverts()
+	send := answer{adverts: make([]served, 0, len(adverts))}
+	for _, a := range adverts {
+		send.adverts = append(send.adverts, served{Advert: a, ptr: true})
+	}
+	return m.recordsFor(ttl, send)
+}
+
+func (m *Responder) recordsFor(ttl uint32, send answer) []byte {
+	adverts := send.adverts
 	hostTTL := ttl
 	if hostTTL > ttlHost {
 		hostTTL = ttlHost
@@ -439,45 +525,82 @@ func (m *Responder) records(ttl uint32) []byte {
 	const shared = dnsmessage.ClassINET
 	const unique = dnsmessage.Class(dnsClassIN | dnsCacheFlush)
 
-	service, err := dnsmessage.NewName(esphomeService)
-	if err != nil {
-		return nil
-	}
-	instance, err := dnsmessage.NewName(m.serviceName())
-	if err != nil {
-		return nil
-	}
 	host, err := dnsmessage.NewName(m.hostName())
 	if err != nil {
 		return nil
 	}
+	names := make([][2]dnsmessage.Name, 0, len(adverts))
+	for _, a := range adverts {
+		service, err := dnsmessage.NewName(a.Service)
+		if err != nil {
+			return nil
+		}
+		instance, err := dnsmessage.NewName(m.instanceFor(a.Service))
+		if err != nil {
+			return nil
+		}
+		names = append(names, [2]dnsmessage.Name{service, instance})
+	}
 
 	build := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true, Authoritative: true})
-	err = build.StartAnswers()
-	if err == nil {
-		err = build.PTRResource(
-			dnsmessage.ResourceHeader{Name: service, Class: shared, TTL: ttl},
-			dnsmessage.PTRResource{PTR: instance})
+	aRecord := func() error {
+		ip := m.address()
+		if ip == nil || ip.To4() == nil {
+			return nil
+		}
+		var a [4]byte
+		copy(a[:], ip.To4())
+		return build.AResource(
+			dnsmessage.ResourceHeader{Name: host, Class: unique, TTL: hostTTL},
+			dnsmessage.AResource{A: a})
 	}
+	serviceRecords := func(i int, a served) error {
+		if err := build.SRVResource(
+			dnsmessage.ResourceHeader{Name: names[i][1], Class: unique, TTL: min(ttl, hostTTL)},
+			dnsmessage.SRVResource{Target: host, Port: a.Port}); err != nil {
+			return err
+		}
+		return build.TXTResource(
+			dnsmessage.ResourceHeader{Name: names[i][1], Class: unique, TTL: ttl},
+			dnsmessage.TXTResource{TXT: a.Records})
+	}
+
+	err = build.StartAnswers()
+	for i, a := range adverts {
+		if err != nil {
+			break
+		}
+		if a.ptr {
+			err = build.PTRResource(
+				dnsmessage.ResourceHeader{Name: names[i][0], Class: shared, TTL: ttl},
+				dnsmessage.PTRResource{PTR: names[i][1]})
+		}
+	}
+	for i, a := range adverts {
+		if err != nil {
+			break
+		}
+		if a.resolve {
+			err = serviceRecords(i, a)
+		}
+	}
+	if err == nil && send.host {
+		err = aRecord()
+	}
+
 	if err == nil {
 		err = build.StartAdditionals()
 	}
-	if err == nil {
-		err = build.SRVResource(
-			dnsmessage.ResourceHeader{Name: instance, Class: unique, TTL: min(ttl, hostTTL)},
-			dnsmessage.SRVResource{Target: host, Port: m.Port})
+	for i, a := range adverts {
+		if err != nil {
+			break
+		}
+		if !a.resolve {
+			err = serviceRecords(i, a)
+		}
 	}
-	if err == nil {
-		err = build.TXTResource(
-			dnsmessage.ResourceHeader{Name: instance, Class: unique, TTL: ttl},
-			dnsmessage.TXTResource{TXT: m.txt()})
-	}
-	if ip := m.address(); err == nil && ip.To4() != nil {
-		var a [4]byte
-		copy(a[:], ip.To4())
-		err = build.AResource(
-			dnsmessage.ResourceHeader{Name: host, Class: unique, TTL: hostTTL},
-			dnsmessage.AResource{A: a})
+	if err == nil && !send.host {
+		err = aRecord()
 	}
 	if err != nil {
 		return nil
@@ -489,17 +612,64 @@ func (m *Responder) records(ttl uint32) []byte {
 	return packet
 }
 
-func (m *Responder) txt() []string {
-	mac := strings.ToLower(strings.ReplaceAll(m.MAC, ":", ""))
-	return []string{
-		"mac=" + mac,
-		"api_encryption=" + noiseCipherName,
-		"version=" + esphomeVersion,
-		"friendly_name=" + m.Instance,
-		"platform=overdub",
-		"board=biscuit",
-		"network=wifi",
+var errNoRecords = errors.New("a responder needs a service, a port and TXT records")
+
+var errUnbuildable = errors.New("a responder's names and records must fit the wire format")
+
+func validName(name string) error {
+	if !strings.HasSuffix(name, ".") {
+		return fmt.Errorf("%q does not end in a dot", name)
 	}
+	if len(name) > maxName {
+		return fmt.Errorf("%q is %d bytes, over %d", name, len(name), maxName)
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if label == "" {
+			return fmt.Errorf("%q has an empty label", name)
+		}
+		if len(label) > maxLabel {
+			return fmt.Errorf("%q has a %d-byte label, over %d", name, len(label), maxLabel)
+		}
+	}
+	return nil
+}
+
+func (m *Responder) checkRecords() error {
+	if len(m.Services) == 0 {
+		return fmt.Errorf("%w: none were given", errNoRecords)
+	}
+	for _, a := range m.Services {
+		if a.Service == "" || len(a.Records) == 0 || a.Port == 0 {
+			return fmt.Errorf("%w: %q", errNoRecords, a.Service)
+		}
+	}
+	if err := validName(m.hostName()); err != nil {
+		return fmt.Errorf("%w: host %w", errUnbuildable, err)
+	}
+	seen := map[string]bool{}
+	for _, a := range m.Services {
+		if err := validName(a.Service); err != nil {
+			return fmt.Errorf("%w: %w", errUnbuildable, err)
+		}
+		if err := validName(m.instanceFor(a.Service)); err != nil {
+			return fmt.Errorf("%w: %w", errUnbuildable, err)
+		}
+		if seen[strings.ToLower(a.Service)] {
+			return fmt.Errorf("%w: %q is carried twice, so one instance would answer with two ports",
+				errNoRecords, a.Service)
+		}
+		seen[strings.ToLower(a.Service)] = true
+		for _, r := range a.Records {
+			if len(r) > maxTXTString {
+				return fmt.Errorf("%w: %q: a TXT string is %d bytes, over %d",
+					errUnbuildable, a.Service, len(r), maxTXTString)
+			}
+		}
+	}
+	if m.records(ttlShared) == nil {
+		return fmt.Errorf("%w: nothing this responder carries can be packed", errUnbuildable)
+	}
+	return nil
 }
 
 func (m *Responder) goodbyeRecords() []byte { return m.records(0) }
@@ -528,7 +698,7 @@ func (m *Responder) Goodbye() {
 			time.Sleep(goodbyeGap)
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, err := conn.WriteToUDP(payload, group); err != nil {
+		if err := m.writeTo(conn, payload, group); err != nil {
 			return
 		}
 	}

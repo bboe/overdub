@@ -1,8 +1,9 @@
 //go:build linux
 
-package esphome
+package mdns
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"os"
@@ -42,7 +43,7 @@ func firstIPv4(t *testing.T) (string, net.IP, *net.IPNet) {
 
 func TestServeClearsThePreviousCycleOnARealSocket(t *testing.T) {
 	name, ip, subnet := firstIPv4(t)
-	responder := &Responder{Instance: "overdub-selftest", MAC: "00:00:5E:00:53:2A", Iface: name, Port: 6053}
+	responder := &Responder{Instance: "overdub-selftest", Iface: name, Services: testServices()}
 	responder.mu.Lock()
 	responder.ip, responder.subnet = ip, subnet
 	responder.restart = true
@@ -103,7 +104,7 @@ func replyIsLive(t *testing.T, responder *Responder) {
 	defer asker.Close()
 	target := &net.UDPAddr{IP: address, Port: mdnsPort}
 
-	question := query(1, []string{esphomeService}, dnsTypePTR, dnsClassIN|dnsUnicastResponse)
+	question := query(1, []string{testService}, dnsTypePTR, dnsClassIN|dnsUnicastResponse)
 	if _, err := asker.WriteToUDP(question, target); err != nil {
 		t.Fatalf("could not ask: %v", err)
 	}
@@ -122,18 +123,18 @@ func replyIsLive(t *testing.T, responder *Responder) {
 		if record.ttl == 0 {
 			t.Errorf("type %d came back at TTL 0, which retires the record it is meant to advertise", record.rrType)
 		}
-		if record.rrType == dnsTypePTR && record.points == responder.serviceName() {
+		if record.rrType == dnsTypePTR && record.points == responder.instanceFor(testService) {
 			live = true
 		}
 	}
 	if !live {
-		t.Errorf("the reply carried no PTR for %s", responder.serviceName())
+		t.Errorf("the reply carried no PTR for %s", responder.instanceFor(testService))
 	}
 }
 
 func TestGoodbyeOpensItsOwnSocketWhenServeHasNone(t *testing.T) {
 	name, ip, subnet := firstIPv4(t)
-	responder := &Responder{Instance: "overdub-selftest", MAC: "00:00:5E:00:53:2A", Iface: name, Port: 6053}
+	responder := &Responder{Instance: "overdub-selftest", Iface: name, Services: testServices()}
 	responder.mu.Lock()
 	responder.ip, responder.subnet = ip, subnet
 	responder.mu.Unlock()
@@ -166,7 +167,7 @@ func TestGoodbyeOpensItsOwnSocketWhenServeHasNone(t *testing.T) {
 
 func TestWatchAddressStopsWithTheSocket(t *testing.T) {
 	name, ip, subnet := firstIPv4(t)
-	responder := &Responder{Instance: "overdub-selftest", MAC: "00:00:5E:00:53:2A", Iface: name, Port: 6053}
+	responder := &Responder{Instance: "overdub-selftest", Iface: name, Services: testServices()}
 	responder.mu.Lock()
 	responder.ip, responder.subnet = ip, subnet
 	responder.mu.Unlock()
@@ -199,7 +200,7 @@ func TestWatchAddressStopsWithTheSocket(t *testing.T) {
 
 func TestOpenSetsEverySocketOptionTheResponderDependsOn(t *testing.T) {
 	name, ip, subnet := firstIPv4(t)
-	responder := &Responder{Instance: "overdub-selftest", MAC: "00:00:5E:00:53:2A", Iface: name, Port: 6053}
+	responder := &Responder{Instance: "overdub-selftest", Iface: name, Services: testServices()}
 	responder.mu.Lock()
 	responder.ip, responder.subnet = ip, subnet
 	responder.mu.Unlock()
@@ -282,4 +283,182 @@ func joinedTheGroup(t *testing.T, iface string) bool {
 		}
 	}
 	return false
+}
+
+func TestTheReadLoopRepliesForTheServiceThatWasAskedFor(t *testing.T) {
+	name, ip, subnet := firstIPv4(t)
+	responder := &Responder{Instance: "overdub-selftest", Iface: name, Services: twoServices()}
+	responder.mu.Lock()
+	responder.ip, responder.subnet = ip, subnet
+	responder.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- responder.serve() }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		responder.mu.Lock()
+		conn := responder.conn
+		responder.mu.Unlock()
+		if conn != nil {
+			break
+		}
+		select {
+		case err := <-done:
+			if errors.Is(err, syscall.ENOPROTOOPT) {
+				t.Skipf("no multicast socket in this environment: %v", err)
+			}
+			t.Fatalf("serve returned before it had a socket: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("serve never opened a socket")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	defer func() {
+		responder.Goodbye()
+		responder.mu.Lock()
+		if responder.conn != nil {
+			responder.conn.Close()
+		}
+		responder.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("serve did not return after its socket was closed")
+		}
+	}()
+
+	asker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip})
+	if err != nil {
+		t.Fatalf("no asking socket: %v", err)
+	}
+	defer asker.Close()
+
+	question := query(1, []string{secondService}, dnsTypePTR, dnsClassIN|dnsUnicastResponse)
+	if _, err := asker.WriteToUDP(question, &net.UDPAddr{IP: ip, Port: mdnsPort}); err != nil {
+		t.Fatalf("could not ask: %v", err)
+	}
+	if err := asker.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 9000)
+	n, _, err := asker.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("the read loop sent no reply: %v", err)
+	}
+
+	asked, unasked := false, false
+	for _, record := range walkRecords(t, buffer[:n]) {
+		if strings.EqualFold(record.name, secondService) ||
+			strings.EqualFold(record.name, responder.instanceFor(secondService)) {
+			asked = true
+		}
+		if strings.EqualFold(record.name, testService) ||
+			strings.EqualFold(record.name, responder.instanceFor(testService)) {
+			unasked = true
+		}
+	}
+	if !asked {
+		t.Errorf("the reply carried nothing for %s, which is what was asked for", secondService)
+	}
+	if unasked {
+		t.Errorf("the reply carried records for %s, which nothing asked about", testService)
+	}
+}
+
+func TestInterfaceIPv4FindsTheAddressTheResponderBindsTo(t *testing.T) {
+	name, ip, _ := firstIPv4(t)
+	got, subnet, err := interfaceIPv4(name)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if !got.Equal(ip) {
+		t.Errorf("%s gave %v, want %v", name, got, ip)
+	}
+	if got.IsLoopback() {
+		t.Errorf("%s gave the loopback address %v", name, got)
+	}
+	if subnet == nil || !subnet.Contains(got) {
+		t.Errorf("%s gave subnet %v, which does not contain %v", name, subnet, got)
+	}
+}
+
+func countOurs(conn *net.UDPConn, instance string, window time.Duration) (int, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(window)); err != nil {
+		return 0, err
+	}
+	seen := 0
+	buffer := make([]byte, 9000)
+	for {
+		n, _, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			return seen, nil
+		}
+		if bytes.Contains(buffer[:n], []byte(instance)) {
+			seen++
+		}
+	}
+}
+
+func TestAnAnnouncementAndAGoodbyeAreEachSentTwice(t *testing.T) {
+	_, ip, subnet := firstIPv4(t)
+	const instance = "overdub-selftest"
+	responder := &Responder{Instance: instance, Services: testServices()}
+	responder.mu.Lock()
+	responder.ip, responder.subnet = ip, subnet
+	responder.mu.Unlock()
+
+	listener, err := responder.open()
+	if err != nil {
+		if errors.Is(err, syscall.ENOPROTOOPT) {
+			t.Skipf("no multicast socket in this environment: %v", err)
+		}
+		t.Fatalf("open a listening socket: %v", err)
+	}
+	defer listener.Close()
+
+	sender, err := responder.open()
+	if err != nil {
+		t.Fatalf("open a sending socket: %v", err)
+	}
+	defer sender.Close()
+
+	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
+
+	type count struct {
+		seen int
+		err  error
+	}
+	counted := make(chan count, 1)
+	listen := func() {
+		seen, err := countOurs(listener, instance, 5*time.Second)
+		counted <- count{seen, err}
+	}
+
+	go listen()
+	time.Sleep(200 * time.Millisecond)
+	if err := responder.announce(sender, group); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := <-counted; got.err != nil {
+		t.Fatalf("counting announcements: %v", got.err)
+	} else if got.seen != 2 {
+		t.Errorf("announce put %d packets on the wire, want 2: RFC 6762 asks for the repeat", got.seen)
+	}
+
+	responder.mu.Lock()
+	responder.conn = sender
+	responder.mu.Unlock()
+
+	go listen()
+	time.Sleep(200 * time.Millisecond)
+	responder.Goodbye()
+	if got := <-counted; got.err != nil {
+		t.Fatalf("counting goodbyes: %v", got.err)
+	} else if got.seen != 2 {
+		t.Errorf("Goodbye put %d packets on the wire, want 2", got.seen)
+	}
 }

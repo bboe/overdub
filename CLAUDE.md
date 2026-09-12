@@ -17,7 +17,7 @@ deploy/uninstall.sh              # remove it again, and give the button back
 gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
-go test -race ./internal/esphome/ ./internal/device/   # -race has no arm build
+go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/  # no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 ```
 
@@ -42,8 +42,10 @@ internal/button    the exclusive grab, the clone, the read loop, whether the
 internal/device    the Dot itself: its network, the firewall rule, network
                    adb, and the microphone mute
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
-                   the mDNS responder Home Assistant finds the Dot by
+                   the advert Home Assistant finds the Dot by
 internal/evdev     evdev and uinput primitives
+internal/mdns      the mDNS responder, answering for every service the Dot
+                   offers; it knows nothing about any of them
 ```
 
 ## Comments
@@ -83,7 +85,8 @@ evening.
 | before you | read |
 |---|---|
 | change what a key press does -- the grab, the clone, the modes, the gestures | `docs/button.md` |
-| add or change an entity, or touch the polls, the deadlines, mDNS, or the key | `docs/api.md` |
+| add or change an entity, or touch the polls, the deadlines, or the key | `docs/api.md` |
+| touch the mDNS responder, or what a service advertises | `docs/mdns.md` |
 | turn on network adb, or touch the microphone mute | `docs/device.md` |
 | make a sound, or play one | `docs/audio.md` |
 | change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |

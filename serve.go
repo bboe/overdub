@@ -17,6 +17,7 @@ import (
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
+	"github.com/bboe/overdub/internal/mdns"
 )
 
 const (
@@ -49,7 +50,7 @@ const (
 	multiGap = 350 * time.Millisecond
 )
 
-var advertised atomic.Pointer[esphome.Responder]
+var advertised atomic.Pointer[mdns.Responder]
 
 var api atomic.Pointer[esphome.Server]
 
@@ -251,7 +252,11 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 
 	api.Store(server)
 
-	responder := &esphome.Responder{Instance: name, MAC: mac, Iface: wifiIface, Port: apiPort}
+	responder := &mdns.Responder{
+		Instance: name,
+		Iface:    wifiIface,
+		Services: []mdns.Advert{esphome.Advert(name, mac, apiPort)},
+	}
 	advertised.Store(responder)
 	go responder.Run()
 
