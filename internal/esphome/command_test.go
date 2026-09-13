@@ -13,7 +13,7 @@ const commandWait = 2 * time.Second
 
 func commandServer(t *testing.T) (*Server, chan string) {
 	t.Helper()
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	sent := make(chan string, 4)
 	s.UseCommand(func(text string) error {
 		sent <- text
@@ -150,7 +150,7 @@ func TestACommandsFailureIsNotCutToTheLengthOfAPeerString(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	done := make(chan struct{}, 1)
 	const reason = "extract token: exit status 1: step: system context = android.app.ContextImpl@1; " +
 		"step: map context = com.amazon.imp; accounts: 0"
@@ -177,7 +177,7 @@ func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	done := make(chan struct{}, 1)
 	s.UseCommand(func(string) error {
 		defer func() { done <- struct{}{} }()
@@ -202,7 +202,7 @@ func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
 }
 
 func TestTheCommandEntityIsListedOnlyWhenThereIsACredential(t *testing.T) {
-	quiet := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	quiet := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for _, entity := range listed(t, quiet) {
 		if entity[0].num == uint64(msgListText) || entity[0].num == uint64(msgListService) {
 			t.Error("a server with no way to run a command still offers one, so Home Assistant " +
@@ -284,7 +284,7 @@ func TestWiringTheCommandLateRelistsForEverySubscriber(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	early := &conn{out: make(chan frame, sendQueue), sock: closedAddr{}, states: true}
 	s.mu.Lock()
 	s.conns[early] = struct{}{}
@@ -305,7 +305,7 @@ func TestCommandsQueueRatherThanReplaceEachOther(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	release := make(chan struct{})
 	ran := make(chan string, 4)
 	s.UseCommand(func(text string) error {
@@ -341,7 +341,7 @@ func TestAFloodOfCommandsIsBoundedAndSaysSo(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	release := make(chan struct{})
 	s.UseCommand(func(string) error {
 		<-release
@@ -457,7 +457,7 @@ func TestAClearQueuedBehindACommandStillWins(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	release := make(chan struct{})
 	s.UseCommand(func(string) error {
 		<-release

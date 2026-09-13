@@ -46,7 +46,7 @@ func listedSelect(t *testing.T, s *Server) (map[int]pbField, []string) {
 }
 
 func TestTheButtonModeIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	entity, options := listedSelect(t, s)
 
 	if got := string(entity[1].data); got != "action_button_mode" {
@@ -365,7 +365,7 @@ func TestTogglingCannotOutrunTheWakeGap(t *testing.T) {
 }
 
 func TestTheButtonIsWiredAsOnePiece(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	if s.button("action_button").mode == nil {
 		t.Fatal("a server with no button has no reader, so readTicked panics")
 	}
@@ -420,7 +420,7 @@ func TestAModeThatWasNeverOfferedIsRefused(t *testing.T) {
 }
 
 func TestEveryButtonIsListedAsAnEventAndASelect(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	c := &conn{out: make(chan frame, 64)}
 	if err := s.listEntities(c); err != nil {
 		t.Fatalf("listEntities: %v", err)
@@ -459,7 +459,7 @@ func TestEveryButtonIsListedAsAnEventAndASelect(t *testing.T) {
 }
 
 func TestAnUnwiredButtonReportsAnOfferedMode(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for _, objectID := range []string{"action_button", "mute_button"} {
 		b := s.button(objectID)
 		if b == nil {

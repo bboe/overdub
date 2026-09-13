@@ -20,7 +20,7 @@ const testTimeout = 5 * time.Second
 
 func testServer(t *testing.T, psk []byte) *Server {
 	t.Helper()
-	return NewServer("kitchen", "Echo Dot (2nd Generation)", "00:00:5E:00:53:2A", psk)
+	return NewServer("kitchen", "Echo Dot (2nd Generation)", "", "00:00:5E:00:53:2A", psk)
 }
 
 func testPSK(t *testing.T) []byte {
@@ -468,7 +468,7 @@ func TestAReplayedHandshakeDoesNotBuyTheGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", psk)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", psk)
 	s.handshakeWait = 600 * time.Millisecond
 	near, far := net.Pipe()
 	served := make(chan struct{})

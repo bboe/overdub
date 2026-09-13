@@ -44,7 +44,7 @@ func listedEvent(t *testing.T, s *Server) (map[int]pbField, []string) {
 }
 
 func TestTheActionButtonIsListedAsAnEventEntity(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	entity, eventTypes := listedEvent(t, s)
 
 	if got := string(entity[1].data); got != "action_button" {
@@ -114,7 +114,7 @@ func TestTheEventNamesAndNumbersAreESPHomeS(t *testing.T) {
 }
 
 func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	quiet := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}}
 	loud := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
 	s.mu.Lock()
@@ -151,7 +151,7 @@ func TestFirePressReachesEverySubscriberAndNobodyElse(t *testing.T) {
 }
 
 func TestAPressIsNotPublished(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	s.FirePress("action_button", EventPressEnd, 0, 0)
 
 	s.mu.Lock()
@@ -222,7 +222,7 @@ func actionData(t *testing.T, payload []byte) (service string, isEvent bool, dat
 }
 
 func TestThePressCountRidesAServiceCall(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true, services: true}
 	s.mu.Lock()
 	s.conns[c] = struct{}{}
@@ -270,7 +270,7 @@ func TestThePressCountRidesAServiceCall(t *testing.T) {
 }
 
 func TestTheCountGoesOnlyToAClientThatAskedForServices(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	states := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
 	services := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, services: true}
 	s.mu.Lock()
@@ -304,7 +304,7 @@ func TestSubscribingToServicesIsWhatTurnsTheCountOn(t *testing.T) {
 		t.Errorf("HomeassistantServiceResponse is %d, want 35", msgHomeassistantAct)
 	}
 
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}}
 	s.mu.Lock()
 	s.conns[c] = struct{}{}
@@ -338,7 +338,7 @@ func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 		{"a single press", EventPressEnd, 0, 0, "", ""},
 		{"a run of seven", EventMultiEnd, 7, 0, "", "7"},
 	} {
-		s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+		s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 		c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, services: true}
 		s.mu.Lock()
 		s.conns[c] = struct{}{}
@@ -366,7 +366,7 @@ func TestOnlyAHoldCarriesItsDuration(t *testing.T) {
 
 func TestTheServiceCallNamesTheButtonThatFired(t *testing.T) {
 	for _, objectID := range []string{"action_button", "mute_button"} {
-		s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+		s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 		c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, services: true}
 		s.mu.Lock()
 		s.conns[c] = struct{}{}

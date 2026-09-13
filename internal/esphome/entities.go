@@ -47,7 +47,15 @@ var actionEvents = []EventType{
 	EventPressEnd, EventMultiEnd, EventLongPressStart, EventLongPressEnd,
 }
 
-const esphomeVersion = "2026.8.0"
+const (
+	esphomeVersion = "2026.8.0"
+	manufacturer   = "Amazon"
+	unversioned    = "unversioned"
+)
+
+func projectName(model string) string {
+	return manufacturer + "." + model
+}
 
 func (s *Server) deviceInfo() []byte {
 	var msg pb
@@ -56,7 +64,9 @@ func (s *Server) deviceInfo() []byte {
 	msg.str(3, s.mac)
 	msg.str(4, esphomeVersion)
 	msg.str(6, s.model)
-	msg.str(12, "Amazon")
+	msg.str(8, projectName(s.model)) // project_name
+	msg.str(9, s.version)            // project_version
+	msg.str(12, manufacturer)
 	msg.str(13, s.name) // friendly_name
 	return msg.b
 }

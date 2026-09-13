@@ -1,6 +1,9 @@
 package esphome
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func listed(t *testing.T, s *Server) []map[int]pbField {
 	t.Helper()
@@ -47,7 +50,7 @@ func listedWithState(t *testing.T, s *Server) []map[int]pbField {
 }
 
 func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	want := map[string]struct {
 		key         uint32
@@ -132,7 +135,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 }
 
 func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	found := 0
 	for _, entity := range listed(t, s) {
@@ -197,7 +200,7 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 }
 
 func TestTheJackIsListedAsABinarySensor(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	found := 0
 	for _, entity := range listed(t, s) {
@@ -249,7 +252,7 @@ func TestTheJackIsListedAsABinarySensor(t *testing.T) {
 }
 
 func TestTheMicrophoneIsListedAsASwitch(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	found := 0
 	for _, entity := range listed(t, s) {
@@ -287,7 +290,7 @@ func TestTheMicrophoneIsListedAsASwitch(t *testing.T) {
 }
 
 func TestTheRegistrationIsListedAsABinarySensor(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	found := 0
 	for _, entity := range listed(t, s) {
@@ -318,5 +321,52 @@ func TestTheRegistrationIsListedAsABinarySensor(t *testing.T) {
 	}
 	if found != 1 {
 		t.Errorf("%d alexa_registered entities were listed, want 1", found)
+	}
+}
+
+func TestDeviceInfoCarriesTheVersionHomeAssistantShowsAsFirmware(t *testing.T) {
+	for _, tt := range []struct{ given, want string }{
+		{"v1.2.3", "v1.2.3"},
+		{"", unversioned},
+	} {
+		s := NewServer("kitchen", "Echo Dot (2nd Generation)", tt.given, "00:00:5E:00:53:2A", nil)
+
+		fields := map[int]string{}
+		if err := pbWalk(s.deviceInfo(), func(f pbField) {
+			fields[f.field] = string(f.data)
+		}); err != nil {
+			t.Fatalf("deviceInfo did not parse: %v", err)
+		}
+
+		if fields[9] != tt.want {
+			t.Errorf("project_version = %q, want %q", fields[9], tt.want)
+		}
+		if fields[4] != esphomeVersion {
+			t.Errorf("esphome_version = %q, want %q", fields[4], esphomeVersion)
+		}
+	}
+}
+
+func TestProjectNameSplitsIntoTheManufacturerAndModelWeAlreadySend(t *testing.T) {
+	const model = "Echo Dot (2nd Generation)"
+	s := NewServer("kitchen", model, "v1.2.3", "00:00:5E:00:53:2A", nil)
+
+	fields := map[int]string{}
+	if err := pbWalk(s.deviceInfo(), func(f pbField) {
+		fields[f.field] = string(f.data)
+	}); err != nil {
+		t.Fatalf("deviceInfo did not parse: %v", err)
+	}
+
+	parts := strings.Split(fields[8], ".")
+	if len(parts) != 2 {
+		t.Fatalf("project_name %q splits into %d parts; Home Assistant indexes [1] and panics on one",
+			fields[8], len(parts))
+	}
+	if parts[0] != fields[12] {
+		t.Errorf("project_name names manufacturer %q, device_info sends %q", parts[0], fields[12])
+	}
+	if parts[1] != fields[6] {
+		t.Errorf("project_name names model %q, device_info sends %q", parts[1], fields[6])
 	}
 }

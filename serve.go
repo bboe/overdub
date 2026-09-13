@@ -52,6 +52,8 @@ const (
 
 var advertised atomic.Pointer[mdns.Responder]
 
+const deviceModel = "Echo Dot (2nd Generation)"
+
 var api atomic.Pointer[esphome.Server]
 
 func withdraw() {
@@ -200,7 +202,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 		}
 		log.Printf("%s appeared", wifiIface)
 	}
-	server := esphome.NewServer(name, "Echo Dot (2nd Generation)", mac, psk)
+	server := esphome.NewServer(name, deviceModel, version, mac, psk)
 	for code, b := range buttons {
 		server.UseButton(b.objectID,
 			func() string { return i.Mode(code).String() },

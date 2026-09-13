@@ -120,9 +120,10 @@ type conn struct {
 }
 
 type Server struct {
-	name  string
-	model string
-	mac   string
+	name    string
+	model   string
+	version string
+	mac     string
 
 	psk []byte
 
@@ -216,10 +217,14 @@ type Server struct {
 	untrustedLog untrustedlog.Log
 }
 
-func NewServer(name, model, mac string, psk []byte) *Server {
+func NewServer(name, model, version, mac string, psk []byte) *Server {
+	if version == "" {
+		version = unversioned
+	}
 	return &Server{
 		name:         name,
 		model:        model,
+		version:      version,
 		mac:          mac,
 		psk:          psk,
 		untrustedLog: untrustedlog.Log{Subject: "esphome api"},

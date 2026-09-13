@@ -110,7 +110,7 @@ func serveOne(t *testing.T, s *Server) net.Conn {
 }
 
 func TestTheNinthConnectionIsRefused(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < maxConns; i++ {
 		serveOne(t, s)
 	}
@@ -145,7 +145,7 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 }
 
 func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	s.uptime = func() (float32, bool) { return 1234, true }
 	quiet := &conn{out: make(chan frame, sendQueue)}
 	loud := &conn{out: make(chan frame, sendQueue), states: true}
@@ -165,7 +165,7 @@ func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
 }
 
 func TestAClientThatSaysNothingLosesItsSlot(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	s.handshakeWait = 200 * time.Millisecond
 	silent := serveOne(t, s)
 	if err := silent.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -386,7 +386,7 @@ func TestAMalformedHelloIsNotAnswered(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	conn := &conn{sock: fakeAddr{}, out: make(chan frame, sendQueue)}
 	if err := s.handle(conn, msgHelloRequest, []byte{0x08}); err == nil {
 		t.Error("a truncated HelloRequest was accepted")
@@ -425,7 +425,7 @@ func TestChurnCannotOutrunTheLogRateLimit(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	psk := testPSK(t)
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", psk)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", psk)
 
 	for i := 0; i < 200; i++ {
 		client, server := net.Pipe()
@@ -854,7 +854,7 @@ func TestTheKeepaliveBudgetMatchesESPHome(t *testing.T) {
 		t.Errorf("idleWait is %v, want ESPHome's KEEPALIVE_DISCONNECT_TIMEOUT of 150s", idleWait)
 	}
 
-	if live := NewServer("dot", "model", "00:00:5E:00:53:00", make([]byte, noisePSKLen)); live.pingWait != 60*time.Second {
+	if live := NewServer("dot", "model", "", "00:00:5E:00:53:00", make([]byte, noisePSKLen)); live.pingWait != 60*time.Second {
 		t.Errorf("NewServer starts a connection on %v, want %v", live.pingWait, pingAfter)
 	}
 
@@ -1947,7 +1947,7 @@ func TestAWakeThatCannotBeSentIsDroppedRatherThanWaitedOn(t *testing.T) {
 }
 
 func TestTheSensorCountMatchesTheListing(t *testing.T) {
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	if got := len(listedWithState(t, s)); got != sensorCount {
 		t.Errorf("the server lists %d entities with a state and sensorCount is %d", got, sensorCount)
 	}
@@ -2131,7 +2131,7 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 }
 
 func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for _, tt := range []struct {
 		name      string
 		got, want any
@@ -2269,7 +2269,7 @@ func TestTheFirstSubscriberGetsNoRegistrationUntilThePollTakesOne(t *testing.T) 
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	stubSensors(s)
 	s.publish("sensors", s.readTicked())
 
@@ -2313,7 +2313,7 @@ func TestWhatAPeerMadeUsNoteIsSpentFromItsBudget(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	c := &conn{sock: fakeAddr{}}
 
 	c.noted = "esphome api: a peer changed something"
@@ -2384,7 +2384,7 @@ func TestAPeerSuppliedStringIsBoundedBeforeItIsNoted(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
 
-			s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+			s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 			s.UseButton("action_button", func() string { return "intercept" }, func(string) {})
 			conn := &conn{sock: fakeAddr{}}
 
@@ -2405,7 +2405,7 @@ func TestAPlaybackFailureSpendsThePeerBudget(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
-	s := NewServer("dot-test", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < untrustedlog.Burst; i++ {
 		s.untrustedLog.Printf("esphome api: line %d", i)
 	}

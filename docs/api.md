@@ -924,8 +924,24 @@ The line is matched on the whole interface name. `lo` is not in this file, so it
 is not what the match is for: `p2p0` is, and so is any driver that adds a second
 wireless netdev whose name contains ours.
 
-`DeviceInfoResponse` carries an `esphome_version` of `2026.8.0`, which Home
-Assistant shows as the device's firmware version. It names a real ESPHome
+`DeviceInfoResponse` carries a `project_name` of `Amazon.Echo Dot (2nd
+Generation)` and a `project_version` of the tag the binary was built from, and
+between them they are what Home Assistant shows as the firmware version:
+`v1.0.0 (ESPHome 2026.8.0)`. A build with no tag says `unversioned` rather than
+nothing, because the field renders whether or not it is empty.
+
+The dot in that name is load-bearing, and not ours. Home Assistant derives the
+manufacturer and the model from `project_name.split(".")` when one is sent,
+taking `[0]` and `[1]`, so a name without a dot raises an `IndexError` inside
+the integration rather than failing here. Composing it from the manufacturer and
+model already sent is what keeps the device page identical to what it showed
+before the version was added, and a test asserts the split gives back those two
+fields rather than asserting the literal. A second test asserts the model
+`serve.go` sends carries no dot of its own, because one there would not fail the
+split -- it would quietly take `[1]` as the fragment before it and show a
+truncated model.
+
+`esphome_version` remains `2026.8.0`. It names a real ESPHome
 release: ESPHome versions by calendar the way Home Assistant does, which is why
 the two look alike. Nothing on the Dot corresponds to it. It has to parse as a
 version, because the bluetooth-proxy firmware check runs it through

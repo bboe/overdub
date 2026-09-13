@@ -98,11 +98,13 @@ jobs:
   # and ask for. A fork's pull request cannot carry a refs/tags ref, so the
   # condition is the whole guard on everything below it.
   #
-  # The slash is excluded because `startsWith` is broader than the `tags: v*`
-  # filter this replaced: `*` does not match `/` there, so `v1.0/rc1` used to be
-  # ignored and would now be built. Every path below is derived from the tag, so
-  # a slash in it publishes a tarball whose SHA256SUMS and attestation both name
-  # a file the release does not contain.
+  # The slash is excluded here as well as by the trigger's own `v*`, which does
+  # not match one either, so today this can never be false. It stays because it
+  # guards something the trigger does not: every path below is derived from the
+  # tag, and a slash in it publishes a tarball whose SHA256SUMS and attestation
+  # both name a file the release does not contain. A `startsWith` on its own is
+  # broader than the filter, so loosening the trigger would make this the only
+  # thing standing between a tag like v1.0/rc1 and a broken release.
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '/')

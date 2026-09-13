@@ -314,7 +314,7 @@ func TestEveryOfferedModeParsesBackToAMode(t *testing.T) {
 }
 
 func TestEveryWatchedKeyHasAnEntityAndEveryEntityAKey(t *testing.T) {
-	s := esphome.NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := esphome.NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 
 	for code, want := range map[uint16]string{138: "action_button", 113: "mute_button"} {
 		b, ok := buttons[code]
@@ -385,5 +385,12 @@ func TestTheCommandNeedsBothAJarAndAnAccount(t *testing.T) {
 					tt.jar, tt.registered, tt.known, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTheModelWeSendCarriesNoDotOfItsOwn(t *testing.T) {
+	if strings.Contains(deviceModel, ".") {
+		t.Errorf("deviceModel is %q; Home Assistant splits project_name on the dot and "+
+			"takes [1] as the model, so a dot here truncates it on the device page", deviceModel)
 	}
 }

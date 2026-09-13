@@ -9,7 +9,7 @@ import (
 )
 
 func TestSoundIsReportedOnlyAfterItHasLasted(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	playing := false
 	s.sound = func() (bool, bool) { return playing, true }
@@ -40,7 +40,7 @@ func TestSoundIsReportedOnlyAfterItHasLasted(t *testing.T) {
 }
 
 func TestABlipDoesNotAccumulate(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	playing := false
 	s.sound = func() (bool, bool) { return playing, true }
@@ -57,7 +57,7 @@ func TestABlipDoesNotAccumulate(t *testing.T) {
 }
 
 func TestAnUnreadableSoundIsMissingAndResetsTheClock(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	state, ok := true, true
 	s.sound = func() (bool, bool) { return state, ok }
 
@@ -82,7 +82,7 @@ func TestAnUnreadableSoundIsMissingAndResetsTheClock(t *testing.T) {
 }
 
 func TestAFailedReadDoesNotBringTheWithdrawalForward(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	playing, ok := true, true
 	s.sound = func() (bool, bool) { return playing, ok }
@@ -111,7 +111,7 @@ func TestAFailedReadDoesNotBringTheWithdrawalForward(t *testing.T) {
 }
 
 func TestTheShippedDelaysIgnoreTheChimeAndReportSpeech(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	if s.onDelay != SoundOnDelay || s.offDelay != SoundOffDelay {
 		t.Fatalf("a new server has delays of %v/%v, want the shipped %v/%v",
 			s.onDelay, s.offDelay, SoundOnDelay, SoundOffDelay)
@@ -154,7 +154,7 @@ func TestTheShippedDelaysIgnoreTheChimeAndReportSpeech(t *testing.T) {
 }
 
 func TestASamplingGapDoesNotDecideAnEdgeOnItsOwn(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing := true
@@ -185,7 +185,7 @@ func TestASamplingGapDoesNotDecideAnEdgeOnItsOwn(t *testing.T) {
 }
 
 func TestASamplingGapDoesNotWithdrawSoundThatIsStillPlaying(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing := true
@@ -214,7 +214,7 @@ func TestASamplingGapDoesNotWithdrawSoundThatIsStillPlaying(t *testing.T) {
 }
 
 func TestAGapAcrossAFailedReadDoesNotReportSoundAgain(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing, ok := true, true
@@ -244,7 +244,7 @@ func TestAGapAcrossAFailedReadDoesNotReportSoundAgain(t *testing.T) {
 }
 
 func TestResumingAfterNobodyWasListeningForgetsTheReading(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	s.soundGap = 100 * time.Millisecond
 	playing := true
@@ -277,7 +277,7 @@ func TestResumingAfterNobodyWasListeningForgetsTheReading(t *testing.T) {
 }
 
 func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "00:00:5E:00:53:2A", nil)
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
 	s.sound = func() (bool, bool) { return true, true }
 	s.cpu = func() (float32, bool) { return 41.3, true }
