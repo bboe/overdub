@@ -1,6 +1,15 @@
 name: CI
 
-on: [push, pull_request]
+# Both triggers are needed and they must not overlap. A push to a fork raises
+# nothing here, so pull_request is what covers a contributor; pull_request never
+# fires for a tag, so push is what covers a release, and the merge onto main.
+# Unfiltered, the two ran the whole suite twice for every branch that had a pull
+# request open.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
 
 # The default for every job below, and this runs on pull requests from anyone,
 # so the token should not be able to write. The release job raises its own and

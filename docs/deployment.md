@@ -49,9 +49,16 @@ fact about the directory rather than an assertion anybody can get wrong: a
 source tree always has both, and the tarball deliberately has neither the
 toolchain nor the script that would drive one. The test is whether that file
 exists rather than whether it can be run, and docs/pitfalls.md says what the
-other reading installs. Everything downstream is
-unchanged, hash check included -- what it compares against is simply a file that
-was built elsewhere.
+other reading installs. Everything downstream is unchanged, hash check included
+-- what it compares against is simply a file that was built elsewhere.
+
+The workflow's two triggers cover different things and are filtered so they do
+not overlap. A push to a fork raises no event in this repository, so
+`pull_request` is what tests a contributor's work; `pull_request` never fires
+for a tag, so `push` is what cuts a release, and what tests the merge onto
+main. Unfiltered, every branch with a pull request open ran the whole suite
+twice, which is also why the first draft of the gate had to reason about two
+`build` results for one commit.
 
 The release is a job in the CI workflow rather than a workflow of its own, and
 that is what lets it be gated. `needs:` does not reach across workflows, so two
