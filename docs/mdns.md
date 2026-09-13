@@ -58,14 +58,97 @@ with nothing bounding the pair; `Goodbye` retires one responder, so two of them
 retire half a device; and `udp/5353` already carries Alexa's sockets, which is
 why the bind needs `SO_REUSEADDR` and `SO_REUSEPORT` at all.
 
+## The list can change while the responder is running
+
+`Advertise` replaces the list of services, because the Sendspin switch takes one
+away and puts it back without restarting anything. `Services` is what the
+responder was constructed with; the list it answers for is separate state under
+the responder's lock, copied from `Services` on first use, and every reader goes
+through the same accessor. A test changes the list from one goroutine while
+another builds records, so removing that lock is a `DATA RACE` rather than a
+difference nothing reports.
+
+A withdrawn service gets a goodbye of its own -- its PTR and its SRV and TXT at
+TTL 0, multicast twice -- rather than being left to expire. Without it a server
+that has already browsed keeps a record pointing at a port the daemon has just
+closed, for as long as the original TTL had left, which looks exactly like the
+Dot being broken rather than switched off. `Goodbye` at shutdown retires the
+whole device; this retires one service and leaves the rest answering, which is
+why it is not the same code path.
+
+That a goodbye reaches a cache rather than only leaving the Dot was measured
+against a real querier on the segment: browsing `_sendspin._tcp.` found the Dot
+once before the switch went off and nothing after it. A record is not proved gone
+by the packet going out, because the receiver decides what it keeps, so the
+reading is on the querier's side rather than ours.
+
+**Two announcements are the floor, not the plan.** RFC 6762 section 8.3 asks for at
+least two unsolicited responses a second apart, and allows up to eight so long as
+each gap is twice the last. This responder sends seven: one at once, and
+six more at gaps of 1, 2, 4, 8, 16 and 32 seconds, so the rungs land 1, 3, 7, 15,
+31 and 63 seconds after the first. What they buy is delivery of the **first** sighting: a
+peer that never had these records learns them from whichever rung arrives, so a
+pair of lost packets on a busy segment no longer costs a discovery.
+
+What the rungs do **not** buy is a second chance with a peer that already holds
+the records, and it is worth saying so here because the opposite is the obvious
+guess. A repeat carrying identical data is a refresh, and a querier is entitled to
+treat it as one: python-zeroconf, which Music Assistant browses through, fires no
+callback at all for a record already in its cache. So a rung cannot re-prompt a
+server that was dropped while the firewall rule was missing, and the rungs are
+not what recovers that case -- the client's own retry is, or, once it has given
+up, the changed TXT record docs/sendspin.md describes.
+
+The rungs run on a goroutine, and that is forced rather than tidy: a ladder
+spanning 63 seconds cannot be on any caller's path. What is behind it now is the
+switch rather than the API bind -- `disable` joins the advertising goroutine
+before it closes the listener, so a synchronous ladder would hold switching
+**off** for the whole minute. The API was the original reason and no longer is:
+`enable` advertises on a goroutine of its own, so `Advertise` is not on the path
+to the bind at all. It was, and with two sends a second apart the API bound two
+seconds behind the Sendspin listener, measured on a Dot twice.
+
+A withdrawal cancels the pending ladder, and it has to. `Advertise` retires a
+dropped service at TTL 0, and a rung firing a second later would announce it
+straight back into every cache it had just left -- so switching Sendspin off would
+close the port while the network was still being told where to find it. Without
+the cancel that is reproducible: two announcements follow the goodbye. `Goodbye`
+needs no such call, because it marks the responder gone and every rung checks
+that. Neither does the teardown in `serve`, because a rung compares against the
+socket the responder holds **now** rather than the one it held when the ladder
+started: `m.conn` ceasing to be that socket stops the next rung. Comparing
+against what it was at the start would not, and the difference is reachable --
+`Advertise` reads `m.conn` and then reaches `announce` a full `goodbyeGap` later
+on the withdrawal path, so an `Advertise` overlapping a teardown arrives holding a
+socket the responder has already let go of. What that still leaves is one rung's
+worth of race: the check is under the lock and the write is not, so a teardown
+landing in between costs a write to a closed socket and one recorded send failure,
+which the next cycle clears. Prompt rather than absolute.
+
+An added service draws a fresh announcement, and one that was already in the list
+draws neither: `Advertise` compares by service name and sends only for the
+difference, so calling it with the list already in force is silent.
+
+The validation runs before the swap, and it has to pack **the list being
+checked** rather than the one in force -- otherwise a change is validated against
+what it replaces, and a service that cannot be packed is accepted because its
+predecessor could. Nothing reachable today distinguishes the two: every candidate
+is caught by the explicit checks in front of the dry run, so this is a backstop
+for a record shape that does not exist yet rather than a bug that was observed.
+
 ## The rate limits are the only cap on amplification
 
 Forty bytes of query draw 328 to 700 back, at every host on the segment. A
-record is multicast at most once a second, and that budget is the responder's
-rather than each service's, so two multicast questions in the same second draw
-one reply between them. python-zeroconf sets the unicast bit on a browser's
-first query and so lands on the twenty-a-second unicast limit instead; measured,
-two browsers 36 ms apart were both answered. Unicast is held to twenty rather
+record is multicast at most once a second **in reply to a query**, and that
+budget is the responder's rather than each service's, so two multicast questions
+in the same second draw one reply between them. Announcements and goodbyes do
+not consult that budget -- they are ours to send, not a peer's to draw -- so an
+operator toggling the Sendspin switch produces multicast the limit does not
+govern, paced only by the second between the two sends each of them makes.
+
+python-zeroconf sets the unicast bit on a browser's first query and so lands on
+the twenty-a-second unicast limit instead; measured, two browsers 36 ms apart
+were both answered. Unicast is held to twenty rather
 than one because those replies reach only the host that asked, and a spoofed
 source would otherwise make this a reflector.
 

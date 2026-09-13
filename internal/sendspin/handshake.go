@@ -126,11 +126,10 @@ type Session struct {
 	fragment     []byte
 	fragmentType byte
 
-	offered    map[string]pairMethod
-	unpaired   bool
-	activated  bool
-	roles      []string
-	activities []string
+	offered   map[string]pairMethod
+	unpaired  bool
+	activated bool
+	roles     []string
 }
 
 func (s *Session) Matched() category { return s.matched }

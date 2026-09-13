@@ -31,6 +31,7 @@ const (
 	maxNoted = 16
 
 	handshakeWait   = 30 * time.Second
+	goodbyeWait     = 2 * time.Second
 	provisionalWait = 30 * time.Second
 	pingAfter       = 60 * time.Second
 	idleWait        = pingAfter * 5 / 2
@@ -103,17 +104,20 @@ type Client struct {
 	provisionalAfter time.Duration
 	rolelessAfter    time.Duration
 	pingEvery        time.Duration
+	goodbyeAfter     time.Duration
 
 	Peer *untrustedlog.Log
 
-	mu    sync.Mutex
-	held  *Session
-	conns int
+	mu     sync.Mutex
+	held   *Session
+	live   map[net.Conn]*Session
+	closed bool
 }
 
 var (
 	errBusy   = errors.New("another server already holds this client")
 	errNoRoom = errors.New("too many connections already")
+	errClosed = errors.New("sendspin is switched off")
 )
 
 type noteSet struct {
@@ -165,33 +169,90 @@ func (c *Client) Serve(ln net.Listener) error {
 			time.Sleep(time.Second)
 			continue
 		}
-		if err := c.enter(); err != nil {
-			c.Peer.Printf("sendspin: %s refused: %d connections already",
-				nc.RemoteAddr(), maxConns)
+		if err := c.enter(nc); err != nil {
+			c.Peer.Printf("sendspin: %s refused: %v", nc.RemoteAddr(), err)
 			nc.Close()
 			continue
 		}
 		go func() {
-			defer c.leave()
+			defer c.leave(nc)
 			c.serveConn(nc)
 		}()
 	}
 }
 
-func (c *Client) enter() error {
+func (c *Client) enter(nc net.Conn) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.conns >= maxConns {
+	if c.closed {
+		return errClosed
+	}
+	if len(c.live) >= maxConns {
 		return errNoRoom
 	}
-	c.conns++
+	if c.live == nil {
+		c.live = map[net.Conn]*Session{}
+	}
+	c.live[nc] = nil
 	return nil
 }
 
-func (c *Client) leave() {
+func (c *Client) track(nc net.Conn, session *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.conns--
+	if _, ok := c.live[nc]; ok {
+		c.live[nc] = session
+	}
+}
+
+func (c *Client) leave(nc net.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.live, nc)
+}
+
+func (c *Client) conns() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.live)
+}
+
+func (c *Client) Close() {
+	c.mu.Lock()
+	c.closed = true
+	live := make(map[net.Conn]*Session, len(c.live))
+	for nc, session := range c.live {
+		live[nc] = session
+	}
+	c.mu.Unlock()
+
+	budget := waitOr(c.goodbyeAfter, goodbyeWait)
+	var saying sync.WaitGroup
+	for nc, session := range live {
+		saying.Add(1)
+		go func() {
+			defer saying.Done()
+			if session != nil {
+				session.ws.setIdle(budget)
+				_ = nc.SetWriteDeadline(time.Now().Add(budget))
+				said := make(chan struct{})
+				defer close(said)
+				go func() {
+					select {
+					case <-said:
+					case <-time.After(2 * budget):
+						nc.Close()
+					}
+				}()
+				_ = session.Goodbye(goodbyeShutdown)
+				if err := session.closeWS(closeNormal, goodbyeShutdown); err == nil {
+					return
+				}
+			}
+			nc.Close()
+		}()
+	}
+	saying.Wait()
 }
 
 func (c *Client) serveConn(nc net.Conn) {
@@ -210,6 +271,7 @@ func (c *Client) serveConn(nc net.Conn) {
 		c.Peer.Printf("sendspin: %v", err)
 		return
 	}
+	c.track(nc, session)
 	name, err := session.Greet(c.Config)
 	if err != nil {
 		c.Peer.Printf("sendspin: %v", err)

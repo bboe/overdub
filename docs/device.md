@@ -157,6 +157,33 @@ property store and the INPUT chain rather than on disk, and deleting the rule
 would cut the connection the uninstall may be running over. So the script says
 so and leaves it to a reboot.
 
+## A setting that survives a reboot
+
+`Flag` and `SetFlag` keep one bit in an Android property named
+`persist.overdub.<name>`. The `persist.` prefix is the whole of the persistence:
+the property service writes those to `/data/property` itself, so a plain `setprop`
+outlives a reboot and nothing here depends on Magisk. `resetprop` is a different
+tool for a different job -- read-only `ro.*` properties, which is why the
+network-adb section above uses it for `ro.adb.secure` and nothing else does.
+
+Measured on a Dot, since this is the first custom property the daemon writes
+rather than a stock Android name. `setprop persist.overdub.sendspin 0` lands at
+`/data/property/persist.overdub.sendspin`, mode `-rw-------` root:root, one byte
+holding the value, and it reads back through `getprop`. It then survives a cold
+reboot: written `0`, the daemon came back reporting the flag off. No `resetprop`,
+no Magisk call. Written `1` it came back with the surface up as well, but that run
+proves nothing on its own -- an unset property also defaults to on, so a value lost
+across the reboot is indistinguishable from one that was kept. The `0` run is the
+one that discriminates, and it is the direction an operator cares about.
+
+`SetFlag` reads the property back and reports a write that did not take, on the
+assumption that `setprop` can fail by doing nothing the way most of this device
+does. A flag that was never written reads as unknown rather than as off, so the
+caller decides the default instead of inheriting one from a failed read, and that
+part is what makes the read-back worth having whether or not the write can fail
+silently. `persist.overdub.sendspin` is the only user today; docs/sendspin.md says
+what it decides.
+
 ## Whether the microphone is muted
 
 `internal/device/mic.go`, and a switch rather than a binary sensor: Home

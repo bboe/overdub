@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -32,9 +33,7 @@ func serveOn(t *testing.T, c *Client, ln net.Listener) {
 		ln.Close()
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			c.mu.Lock()
-			n := c.conns
-			c.mu.Unlock()
+			n := c.conns()
 			if n == 0 {
 				return
 			}
@@ -338,5 +337,205 @@ func TestTheServiceAndItsWindowsAreFixed(t *testing.T) {
 	}
 	if handshakeWait != 30*time.Second || provisionalWait != 30*time.Second {
 		t.Errorf("windows are %s and %s, want 30s and 30s", handshakeWait, provisionalWait)
+	}
+}
+
+func TestSwitchingOffWhileAPeerIsMidHandshakeDoesNotPanic(t *testing.T) {
+	// A connection is tracked from the moment it is accepted and carries no session
+	// until its handshake returns, so the map Close walks holds nil sessions for
+	// every peer still inside the handshake wait. Reaching one needs no key at all:
+	// connect to the port, send nothing, and ask for the switch to go off.
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for c.conns() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the connection was never tracked, so the nil session is not reached")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c.Close()
+}
+
+func TestTheGoodbyeIsBoundedByItsOwnDeadlineNotTheIdleOne(t *testing.T) {
+	// Every write re-arms the deadline from the session's idle window, so a deadline
+	// set on the socket before the write is simply replaced. A peer that stops
+	// reading then holds Close for the idle window instead of goodbyeWait, and the
+	// switch goroutine is behind it: the rule stays, and the flag is never written.
+	session, _, _ := pairedSession(t)
+	session.ws.setIdle(3 * time.Second)
+
+	c := &Client{Config: testConfig(), goodbyeAfter: 100 * time.Millisecond}
+	nc := session.ws.c
+	if err := c.enter(nc); err != nil {
+		t.Fatalf("enter: %v", err)
+	}
+	c.track(nc, session)
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		c.Close()
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		if took > time.Second {
+			t.Errorf("Close took %v against a goodbye budget of 100ms, so it waited on"+
+				" the idle deadline instead", took)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close never returned inside the idle window, so the goodbye is bound" +
+			" by the idle deadline rather than its own")
+	}
+}
+
+func TestTheGoodbyeIsBoundedEvenWhenAWriteIsAlreadyBlocked(t *testing.T) {
+	// Narrowing the idle window only reaches writes that start afterwards. A write
+	// already blocked in the kernel holds the session mutex under the deadline it
+	// armed on the way in, so the goodbye queues behind it for the whole idle window
+	// and the switch goroutine sits behind that: the rule stays and the flag is
+	// never written.
+	session, _, _ := pairedSession(t)
+	session.ws.setIdle(3 * time.Second)
+
+	c := &Client{Config: testConfig(), goodbyeAfter: 100 * time.Millisecond}
+	nc := session.ws.c
+	if err := c.enter(nc); err != nil {
+		t.Fatalf("enter: %v", err)
+	}
+	c.track(nc, session)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_ = session.Goodbye(goodbyeShutdown)
+	}()
+	<-started
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		c.Close()
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		if took > time.Second {
+			t.Errorf("Close took %v against a goodbye budget of 100ms, so it waited on"+
+				" the deadline the blocked write had already armed", took)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close never returned: a write already blocked holds the session mutex" +
+			" under the idle deadline, which narrowing the window cannot reach")
+	}
+}
+
+func TestTheGoodbyesOfManyStalledSessionsCostOneBudgetBetweenThem(t *testing.T) {
+	// The budget is per write, so spending it one session after another multiplies it
+	// by however many peers hold a session, and all of that sits in front of the rule
+	// being deleted and the flag being written.
+	const sessions = 4
+	c := &Client{Config: testConfig(), goodbyeAfter: 300 * time.Millisecond}
+	for i := 0; i < sessions; i++ {
+		session, _, _ := pairedSession(t)
+		nc := session.ws.c
+		if err := c.enter(nc); err != nil {
+			t.Fatalf("enter %d: %v", i, err)
+		}
+		c.track(nc, session)
+	}
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		c.Close()
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		if took > time.Second {
+			t.Errorf("Close took %v for %d stalled sessions against a 300ms budget, so"+
+				" the goodbyes are spent one after another rather than together",
+				took, sessions)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close never returned for four stalled sessions")
+	}
+}
+
+// deafConn ignores deadlines and blocks every write until it is closed, which is
+// what a connection looks like when something re-arms the deadline Close set on
+// it -- run does exactly that on its way in, with the 30-second provisional
+// window.
+type deafConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newDeafConn(inner net.Conn) *deafConn {
+	return &deafConn{Conn: inner, closed: make(chan struct{})}
+}
+
+func (d *deafConn) Write([]byte) (int, error) {
+	<-d.closed
+	return 0, net.ErrClosed
+}
+
+func (d *deafConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (d *deafConn) SetDeadline(time.Time) error { return nil }
+
+func (d *deafConn) Close() error {
+	d.once.Do(func() { close(d.closed) })
+	return d.Conn.Close()
+}
+
+func TestCloseGivesUpOnASessionWhoseDeadlineSomethingElseRearmed(t *testing.T) {
+	// Narrowing the window and arming the socket both assume nothing arms it again
+	// afterwards, and run does: its first statement sets an absolute 30-second
+	// deadline on the connection, and a session is tracked before that runs. So the
+	// bound cannot rest on a deadline alone -- the connection is dropped outright
+	// once the budget is spent twice over.
+	session, _, _ := pairedSession(t)
+	deaf := newDeafConn(session.ws.c)
+	session.ws.c = deaf
+
+	c := &Client{Config: testConfig(), goodbyeAfter: 150 * time.Millisecond}
+	if err := c.enter(deaf); err != nil {
+		t.Fatalf("enter: %v", err)
+	}
+	c.track(deaf, session)
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		c.Close()
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		if took > 2*time.Second {
+			t.Errorf("Close took %v against a 150ms budget, so a deadline armed by"+
+				" something else outlasted it", took)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close never returned: the goodbye is bounded by a deadline that" +
+			" anything else on the connection may re-arm")
 	}
 }

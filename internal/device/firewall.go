@@ -76,9 +76,21 @@ func DenyTCP(port int) error {
 	return fmt.Errorf("closing tcp/%d: the rule kept coming back", port)
 }
 
-func HoldTCPOpen(port int, every time.Duration) {
+func HoldTCPOpen(port int, every time.Duration, done <-chan struct{}) {
 	var quiet bool
-	for range time.Tick(every) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
 		err := AllowTCP(port)
 		if err != nil && !quiet {
 			log.Printf("firewall: re-asserting tcp/%d failed: %v (further failures are silent)", port, err)

@@ -520,3 +520,41 @@ Cached:           126472 kB
 		})
 	}
 }
+
+func TestHasIPv4RefusesLoopbackAndInterfacesThatAreNotThere(t *testing.T) {
+	// The Sendspin advert waits on this, and the responder it hands the address to
+	// picks by the same rule, so an answer of true has to mean an address a server
+	// could actually dial. Loopback is not one, and it is the address an interface
+	// has when it has nothing else.
+	if HasIPv4("lo") {
+		t.Error("loopback counts as an address, so the advert would go up before wlan0" +
+			" had one a server can reach")
+	}
+	if HasIPv4("overdub-no-such-interface") {
+		t.Error("an interface that does not exist reads as addressed")
+	}
+}
+
+func TestWaitForIPv4StopsAtItsDeadlineAndOnItsChannel(t *testing.T) {
+	// Both exits are load-bearing on a cold boot: the deadline is what lets the
+	// surface come up at all when wlan0 never gets an address, and the channel is
+	// what stops a switch-off waiting five minutes for one.
+	start := time.Now()
+	if WaitForIPv4("overdub-no-such-interface", 50*time.Millisecond, nil) {
+		t.Error("reported an address on an interface that does not exist")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("waited %v for a 50ms limit, so the deadline does not bound it", took)
+	}
+
+	stop := make(chan struct{})
+	close(stop)
+	start = time.Now()
+	if WaitForIPv4("overdub-no-such-interface", time.Hour, stop) {
+		t.Error("reported an address after being told to stop")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("waited %v with the stop channel already closed, so a teardown would"+
+			" sit behind the whole address wait", took)
+	}
+}

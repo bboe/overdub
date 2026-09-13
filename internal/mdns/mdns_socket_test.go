@@ -403,7 +403,7 @@ func countOurs(conn *net.UDPConn, instance string, window time.Duration) (int, e
 	}
 }
 
-func TestAnAnnouncementAndAGoodbyeAreEachSentTwice(t *testing.T) {
+func TestAnAnnouncementRepeatsAndAGoodbyeIsSentTwice(t *testing.T) {
 	_, ip, subnet := firstIPv4(t)
 	const instance = "overdub-selftest"
 	responder := &Responder{Instance: instance, Services: testServices()}
@@ -428,6 +428,10 @@ func TestAnAnnouncementAndAGoodbyeAreEachSentTwice(t *testing.T) {
 
 	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 
+	responder.mu.Lock()
+	responder.conn = sender
+	responder.mu.Unlock()
+
 	type count struct {
 		seen int
 		err  error
@@ -445,13 +449,11 @@ func TestAnAnnouncementAndAGoodbyeAreEachSentTwice(t *testing.T) {
 	}
 	if got := <-counted; got.err != nil {
 		t.Fatalf("counting announcements: %v", got.err)
-	} else if got.seen != 2 {
-		t.Errorf("announce put %d packets on the wire, want 2: RFC 6762 asks for the repeat", got.seen)
+	} else if got.seen < 2 {
+		t.Errorf("announce put %d packets on the wire, want at least 2: RFC 6762 asks for"+
+			" the repeat a second later, and for the rungs after it", got.seen)
 	}
-
-	responder.mu.Lock()
-	responder.conn = sender
-	responder.mu.Unlock()
+	responder.stopLadder()
 
 	go listen()
 	time.Sleep(200 * time.Millisecond)

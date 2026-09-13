@@ -15,6 +15,7 @@ STAGE=/data/local/tmp/overdub-install
 MAP=/data/local/map
 APIPORT=6053
 SENDPORT=8928
+SENDFLAG=persist.overdub.sendspin
 
 if ! adb shell 'su -c "id"' | tr -d '\r' | grep -q 'uid=0'; then
   echo "no root here: su -c id did not report uid=0" >&2
@@ -115,6 +116,20 @@ for port in "$APIPORT" "$SENDPORT"; do
     echo "  disk, so a reboot clears it." >&2
   fi
 done
+
+adb shell "su -c '
+  setprop persist.overdub.sendspin \"\"
+  rm -f /data/property/persist.overdub.sendspin
+'" >/dev/null 2>&1 || true
+
+flag_answer=$(adb shell "su -c 'getprop persist.overdub.sendspin; echo checked'" | tr -d '\r')
+if ! printf '%s\n' "$flag_answer" | grep -qx checked; then
+  echo "Could not read $SENDFLAG back; it may still be set." >&2
+elif [ -n "$(printf '%s\n' "$flag_answer" | grep -v -e '^checked$' -e '^$' || true)" ]; then
+  echo "$SENDFLAG is still set:" >&2
+  printf '  %s\n' "$(printf '%s\n' "$flag_answer" | grep -v -e '^checked$' -e '^$')" >&2
+  echo "  It only decides whether a future install starts Sendspin switched on." >&2
+fi
 
 echo
 echo "Home Assistant can no longer talk to this device: the API key it was"

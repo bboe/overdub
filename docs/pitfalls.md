@@ -147,9 +147,9 @@ INPUT -n -v | grep 6053` shows a packet counter, which separates "the device
 dropped it" from "the network did".
 
 `AllowTCP` checks and then appends, which is two calls and not one. One port
-needed no lock. With the adb select there are two, reached from the sensor poll
-and from the adb worker, and two arriving together both find their rule absent
-and both append it. The `-D` that closes a port removes one copy, so the chain
+needed no lock. There are now three, reached from the sensor poll, the adb worker
+and the Sendspin switch's own worker, and two arriving together both find their
+rule absent and both append it. The `-D` that closes a port removes one copy, so the chain
 keeps an ACCEPT nothing will ever delete for a port the select truthfully
 reports as closed. The chain is not ours alone either, so nothing tidies it up
 later. One mutex over both mutations is the whole fix.
@@ -192,6 +192,33 @@ an interface to read it from, and a rule added at boot is wiped afterwards.
 Measured on a cold boot: the daemon logged `waiting for wlan0 to appear` and
 waited 15 seconds, then added its rule, which was gone by 49 seconds and back by
 64. Setup that depends on the network must wait or re-assert, never run once.
+
+Measured again with `tcp/8928` alongside it, because a second port is a second
+chance to get this wrong.
+The daemon waited 9 seconds for `wlan0`, another 10 for an address, and had both
+rules; at ~40 seconds the `8928` rule was **gone** and Music Assistant could not
+connect; by 67 seconds it was back with a SYN counted against it, and the session
+came up. The thirty-second re-assert is what closes that window, and it closes it
+for whichever port is handed to it.
+
+The re-assert alone does not close the gap a peer meets in between, because it
+only fires on a tick. Measured across a reboot, in uptime rather than wall clock:
+the rule was added at 25 seconds, gone by 30, still gone at 52, and back at 57 --
+and the mDNS announcement went out at 36, in the middle of it. The port was
+advertised and unreachable at the same time, and a client that acted on that
+announcement was dropped with nothing logged, because the SYN never reached
+userspace. What closes it is asserting the rule once more immediately before
+announcing, so the announcement cannot be the thing that falls in the hole;
+docs/sendspin.md carries the ordering.
+
+Nothing the responder can send fixes that for a peer that already knows the
+records, because a repeated announcement carrying the same data is a refresh
+rather than news. Recovery is the client's own retry, and how long it is willing
+to retry is the whole story: Home Assistant reconnects on a timer and never showed
+this; Music Assistant gives up permanently after about eight and a half minutes,
+measured on a Dot by counting its SYNs against this very rule. docs/sendspin.md
+carries what the advert does about that, and docs/mdns.md what the announcement
+ladder is and is not for.
 
 **A log line is an unauthenticated write to `/data`.** Every line the API logs
 is there because a peer did something, and `%q` renders a frame of `\xff` as

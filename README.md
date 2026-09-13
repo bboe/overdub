@@ -33,7 +33,8 @@ will find it and show it as unavailable. Anything that can reach the Dot on
 `wlan0` can take that session, because the pairing flow is not implemented and
 the fallback key is a published constant; nothing behind it plays audio or reads
 anything off the device, but see [SECURITY.md](SECURITY.md) for what it does
-hold.
+hold. `switch.<name>_sendspin` turns the whole thing off -- the advert, the port
+and any session -- and the setting survives a reboot.
 
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
@@ -263,7 +264,10 @@ killed outright, so it gives the button back and destroys its uinput clones on
 the way out.
 
 Everything goes: the boot script, the binary, the API key, the Sendspin identity,
-`mapdump.jar` and the directory it sits in, and the log the boot script writes.
+`mapdump.jar` and the directory it sits in, the log the boot script writes, and
+the property that remembers whether Sendspin was switched off -- so installing
+again starts with it on rather than inheriting a decision nothing on the device
+explains.
 `/data/local/bin` goes with them if nothing else is left in it. Removing the jar
 revokes nothing: see [Alexa commands](#alexa-commands). The Sendspin identity
 matters as much as the API key does -- the pairing token is derived from it, so a
@@ -325,6 +329,7 @@ Dot's own firewall.
 | `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
 | `text.<name>_alexa_command` | config | a box that runs what you type on the Echo as though it had been spoken; listed only where `mapdump.jar` is installed and the Dot is registered |
 | `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
+| `switch.<name>_sendspin` | config | whether the Dot offers Sendspin at all: off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule and ends any session in progress. Survives a reboot. Listed only where the Dot could read its Sendspin identity |
 
 Uptime, signal and the registration are read once a minute, and again when Home
 Assistant subscribes. Both volumes, the jack, the temperature, the memory and the
