@@ -65,6 +65,12 @@ wants from anyone hardening the check beyond what README.md shows, and it is a
 promise to keep: moving the release job to a file of its own again would change
 what old and new releases attest to, and split a check that names one path.
 
+A tag carrying a hyphen is published as a prerelease, because semver says a
+hyphen is what marks one and GitHub infers nothing from the tag: `v0.1.0-rc1`
+and `v0.1.0-rc2` were both published as full releases, so both took the Latest
+release banner and the download link that follows it. What decides is the shape
+of the tag rather than a flag remembered at the time.
+
 A release that fails part way through needs a hand, deliberately. `gh release
 create` is not idempotent, so re-running the job for a tag stops at "a release
 with the same tag name already exists": delete the draft it left, then re-run
