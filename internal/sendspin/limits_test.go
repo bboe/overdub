@@ -52,9 +52,7 @@ func TestServeRefusesPastTheConnectionCap(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c.mu.Lock()
-		n := c.conns
-		c.mu.Unlock()
+		n := c.conns()
 		if n >= maxConns {
 			break
 		}
@@ -305,9 +303,7 @@ func TestASessionHoldingNoRoleDoesNotKeepItsConnectionSlot(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c.mu.Lock()
-		conns := c.conns
-		c.mu.Unlock()
+		conns := c.conns()
 		if conns == 0 {
 			return
 		}
@@ -357,9 +353,7 @@ func waitForConns(t *testing.T, c *Client, want int, complaint string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c.mu.Lock()
-		got := c.conns
-		c.mu.Unlock()
+		got := c.conns()
 		if got == want {
 			return
 		}
@@ -421,8 +415,9 @@ func TestRegainingARoleCallsOffTheBound(t *testing.T) {
 	}))
 
 	time.Sleep(600 * time.Millisecond)
+	conns := c.conns()
 	c.mu.Lock()
-	conns, held := c.conns, c.held
+	held := c.held
 	c.mu.Unlock()
 	if conns != 1 || held == nil {
 		t.Errorf("conns = %d, held = %v; declaring a role again must call off the bound",
@@ -534,8 +529,9 @@ func TestAnAudioChunkDoesNotDropTheSession(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
 	time.Sleep(300 * time.Millisecond)
 
+	conns := c.conns()
 	c.mu.Lock()
-	conns, held := c.conns, c.held
+	held := c.held
 	c.mu.Unlock()
 	if conns != 1 || held == nil {
 		t.Errorf("conns = %d, held = %v; an unhandled binary message ended the session",
@@ -636,8 +632,9 @@ func TestTimeHoldingARoleIsNotChargedAsRoleless(t *testing.T) {
 	widen()
 	time.Sleep(100 * time.Millisecond)
 
+	conns := c.conns()
 	c.mu.Lock()
-	conns, held := c.conns, c.held
+	held := c.held
 	c.mu.Unlock()
 	if conns != 1 || held == nil {
 		t.Errorf("conns = %d, held = %v; the time it spent holding a role was charged"+
@@ -705,6 +702,63 @@ func TestTheConfiguredPairingKeyIsWhatTheHandshakeUses(t *testing.T) {
 	serveOn(t, c, ln)
 	bringUpWith(t, c, ln, serverPlan{psk: c.Keys.PairingPSK, cat: categoryPairing})
 }
+
+func TestCloseEndsLiveSessionsAndRefusesNewOnes(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	bringUp(t, c, ln)
+	if c.conns() != 1 {
+		t.Fatalf("conns = %d, want 1 before closing", c.conns())
+	}
+
+	c.Close()
+	waitForConns(t, c, 0, "Close left a session running")
+
+	c.mu.Lock()
+	held := c.held
+	c.mu.Unlock()
+	if held != nil {
+		t.Error("Close left the exclusive slot held")
+	}
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+	if err := nc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if _, err := nc.Read(make([]byte, 1)); err == nil {
+		t.Error("a connection was accepted after Close")
+	} else if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Error("a connection after Close was left open rather than refused")
+	}
+}
+
+func TestCloseSaysGoodbyeBeforeItDropsTheSession(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	c.Close()
+
+	kind, payload := nextJSON(t, peer, server)
+	if kind != typeClientGoodbye {
+		t.Fatalf("Close sent %s first, want %s", kind, typeClientGoodbye)
+	}
+	var said goodbye
+	if err := json.Unmarshal(payload, &said); err != nil {
+		t.Fatalf("decoding client/goodbye: %v", err)
+	}
+	if said.Reason != goodbyeShutdown {
+		t.Errorf("reason = %q, want %q", said.Reason, goodbyeShutdown)
+	}
+	waitForConns(t, c, 0, "Close left a session running after the goodbye")
+}
+
 func TestAnEnvelopeTypeCannotForgeALogLine(t *testing.T) {
 	var out lockedLog
 	was := log.Writer()

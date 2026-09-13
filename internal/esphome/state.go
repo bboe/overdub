@@ -118,6 +118,9 @@ func (s *Server) readLive() []reading {
 		s.micObserved(muted)
 		out = append(out, reading{key: s.keyMicMute, value: boolValue(muted), ok: true, kind: kindSwitch})
 	}
+	if s.sendspinOn != nil {
+		out = append(out, reading{key: s.keySendspin, value: boolValue(s.sendspinOn()), ok: true, kind: kindSwitch})
+	}
 	return out
 }
 

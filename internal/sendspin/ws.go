@@ -32,6 +32,7 @@ const (
 )
 
 const (
+	closeNormal   = 1000
 	closeNoStatus = 1005
 )
 
@@ -357,3 +358,14 @@ func (w *Conn) WriteText(payload []byte) error { return w.write(opText, payload)
 func (w *Conn) WriteBinary(payload []byte) error { return w.write(opBinary, payload) }
 
 func (w *Conn) Ping() error { return w.write(opPing, nil) }
+
+func (w *Conn) Close(code int, reason string) error {
+	payload := make([]byte, 2, 2+len(reason))
+	binary.BigEndian.PutUint16(payload, uint16(code))
+	payload = append(payload, reason...)
+	err := w.write(opClose, payload)
+	if cerr := w.c.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}

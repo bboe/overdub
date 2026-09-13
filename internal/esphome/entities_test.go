@@ -370,3 +370,59 @@ func TestProjectNameSplitsIntoTheManufacturerAndModelWeAlreadySend(t *testing.T)
 		t.Errorf("project_name names model %q, device_info sends %q", parts[1], fields[6])
 	}
 }
+
+func TestTheSendspinSwitchIsListedAndCarriesItsOwnKey(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	if found := sendspinSwitchIn(listed(t, s)); found != nil {
+		t.Error("a Sendspin switch was listed before one was wired up")
+	}
+
+	s.UseSendspin(func() bool { return true }, func(bool) {})
+	sw := sendspinSwitchIn(listed(t, s))
+	if sw == nil {
+		t.Fatal("no Sendspin switch was listed, so Home Assistant never offers one")
+	}
+	if got := uint32(sw[2].num); got != s.keySendspin {
+		t.Errorf("the listed switch carries key %d, want %d: a command for it would be"+
+			" matched against a different entity", got, s.keySendspin)
+	}
+	if got := uint32(sw[2].num); got == s.keyMicMute {
+		t.Error("the Sendspin switch shares the microphone's key")
+	}
+}
+
+func sendspinSwitchIn(entities []map[int]pbField) map[int]pbField {
+	for _, e := range entities {
+		if int(e[0].num) == msgListSwitch && string(e[1].data) == "sendspin" {
+			return e
+		}
+	}
+	return nil
+}
+
+func TestASendspinSwitchCommandReachesTheSwitchAndNothingElse(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	var told []bool
+	s.UseSendspin(func() bool { return true }, func(on bool) { told = append(told, on) })
+
+	c := &conn{out: make(chan frame, 32), sock: fakeAddr{}}
+	var cmd pb
+	cmd.fixed32(1, s.keySendspin)
+	cmd.boolean(2, false)
+	if err := s.handle(c, msgSwitchCommand, cmd.b); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(told) != 1 || told[0] {
+		t.Fatalf("the switch was told %v, want one off", told)
+	}
+
+	var other pb
+	other.fixed32(1, s.keyMicMute)
+	other.boolean(2, true)
+	if err := s.handle(c, msgSwitchCommand, other.b); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(told) != 1 {
+		t.Errorf("the microphone's command reached the Sendspin switch: %v", told)
+	}
+}

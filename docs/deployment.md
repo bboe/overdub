@@ -227,11 +227,19 @@ remotely.
 
 The firewall rules go last, and after the daemon is confirmed dead rather than
 before. There are two, `tcp/6053` and `tcp/8928`, and the script loops over them.
-The daemon re-asserts both every thirty seconds, so a deletion taken earlier would
-be undone before the next line of the script ran. Each is deleted in a loop,
+The daemon re-asserts `tcp/6053` every thirty seconds, and `tcp/8928` only while
+Sendspin is switched on, so a deletion taken earlier would be undone before the
+next line of the script ran. Each is deleted in a loop,
 because the chain is not ours alone and one pass proves nothing, and then read
 back. A rule left behind is reported rather than failed on: nothing listens behind
 it once the daemon is gone, and it does not survive a reboot in any case.
+
+`persist.overdub.sendspin` goes with them. It is the one thing an uninstall leaves
+behind that would change what the *next* install does: a Dot switched off through
+Home Assistant would come back switched off, with nothing on disk to say why. The
+script clears the property, removes its file under `/data/property`, and reads it
+back; a value that survives is reported rather than failed on, because it decides
+nothing until something is installed again.
 
 The ports are Go constants -- `apiPort` in `serve.go` and `sendspin.Port` -- and
 shell cannot read either, so the script assigns them to variables of its own. A

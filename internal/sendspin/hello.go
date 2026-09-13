@@ -292,6 +292,12 @@ func (s *Session) Activate(payload json.RawMessage) ([]string, error) {
 	return s.roles, nil
 }
 
+func (s *Session) closeWS(code int, reason string) error {
+	s.writing.Lock()
+	defer s.writing.Unlock()
+	return s.ws.Close(code, reason)
+}
+
 func (s *Session) Goodbye(reason string) error {
 	return s.WriteJSON(typeClientGoodbye, goodbye{Reason: reason})
 }

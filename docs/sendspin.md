@@ -421,10 +421,130 @@ the same A record, which is not a conflict: mDNS conflict detection is about
 different data under one name, and this is the same data, one device advertising
 two services.
 
-The advert goes up only once the listener is behind it. `startSendspin` opens the
-socket before the responder is built, and a Dot that could not read its key or
-could not bind the port advertises no Sendspin service at all rather than
-advertising one that refuses every connection.
+The advert goes up only once the listener is behind it. `enable` opens the socket
+before it advertises, and a Dot that could not read its key or could not bind the
+port advertises no Sendspin service at all rather than advertising one that
+refuses every connection.
+
+## Turning it off entirely
+
+`switch.<name>_sendspin` removes the surface rather than declining to use it. All
+of what the section above describes goes: the mDNS advert is withdrawn with a
+goodbye, the listener closes, the `tcp/8928` rule is deleted and stops being
+re-asserted, and the sessions already running end. What is left is a Dot that
+does not answer on the port and is not discoverable on it, which is the only kind
+of "off" an operator can check from somewhere else on the network.
+
+The order is not a reversal, and the rule is why. Going down: the advert first,
+so nothing new is told where to connect while the rest goes, then the listener,
+then the sessions, then the rule. Coming up: bind, open the rule, serve,
+advertise. The rule is last down and second up, because it must never be the
+thing that outlives the socket -- a rule for a port nothing listens on is
+re-asserted for the life of the daemon and deleted by nothing, which the section
+above gives as its own hazard. Everything else is torn down in the order that
+stops a new server arriving mid-teardown.
+
+A kill cannot say goodbye either, and the rule outlives the socket in exactly that
+case. `SIGTERM` withdraws the advert and exits without deleting it, because
+deleting it is an `iptables` call that waits on netd's lock while the daemon is
+trying to stop, and the supervisor has it back within five seconds. What closes
+that window is the next start rather than the last stop: it either brings the
+surface up, which needs the rule, or sweeps it. `uninstall.sh` covers the case
+where there is no next start.
+
+A reboot cannot say goodbye, and nothing at startup should try. Switching off
+through the switch withdraws the advert, and so does a clean stop -- `SIGTERM`
+reaches `withdraw()`, which retires every service at TTL 0, measured flushing the
+record out of a real querier's cache. A reboot or a `SIGKILL` gets no such chance,
+so a server that browsed earlier can hold a record pointing at a closed port for
+as long as `ttlShared` has left. That is mDNS rather than a defect: retracting a
+name the daemon has not claimed this boot would be a goodbye for something that
+was never announced, it could not go out until the responder had an address --
+which is later than it sounds, and measured below -- and by then the stale
+record has already produced the right answer, which is a server finding the
+player unreachable.
+
+Deleting the rule also has to wait for the goroutine that re-asserts it. Closing
+that goroutine's channel only asks it to stop; a tick already delivered would
+re-append the rule after the delete had run, leaving an ACCEPT for a port nothing
+listens on and nothing left to remove it. So `disable` waits for the goroutine to
+return before it calls `DenyTCP`, and `HoldTCPOpen` checks the channel again
+after the tick rather than only before it.
+
+Closing the listener is not enough by itself, which is what `Client.Close` is
+for. `Serve` returns when its listener closes, and that alone does nothing to a
+server already admitted: it keeps its connection, keeps the exclusive slot, and
+keeps sending. So `Close` closes every live connection as well as refusing new
+ones, and a switched-off Sendspin means the sessions are over rather than only
+that no new one can start.
+
+`Set` never blocks. Disabling calls `iptables`, which waits on the xtables lock
+netd holds constantly, and the caller is the ESPHome API goroutine answering a
+`SwitchCommandRequest`. So the switch hands the wanted state to a worker
+goroutine of its own, through a one-deep channel that is drained before it is
+refilled, and the API answers at once. Nothing reports the state optimistically:
+`On` reads what the worker achieved. The worker wakes the live poll when it is
+done, because `readLive` is read on `HeavyEvery` ticks rather than every tick --
+two and a half seconds -- and the worker outlives that anyway; without the wake
+the switch would sit in its old position for seconds after the operator moved it.
+docs/api.md carries the poll.
+
+The property is the other way round: it records what was **asked** for, not what
+was reached. A bind that fails writes the request anyway, so a port that was busy
+this once is retried at the next boot instead of the failure becoming permanent.
+The entity and the property can therefore disagree until a restart, and that is
+the intended reading rather than an oversight.
+
+The setting survives a reboot, in `persist.overdub.sendspin`. Android's property
+service writes a `persist.`-prefixed property to `/data/property` itself, so
+plain `setprop` is enough and no Magisk dependency is added. That is **not**
+`resetprop`, which exists for read-only `ro.*` properties: `internal/device` uses
+it for `ro.adb.secure` and for nothing else. The prefix is the whole of the
+persistence, so a test asserts it -- without it the switch silently comes back on
+at the next boot, and nothing else here would say so. Measured on a Dot: off
+across a cold reboot came back off, with the value in `/data/property` at mode
+`0600`. That is the direction that proves anything, because an unwritten property
+also reads as on -- a lost value and a remembered `1` look identical from outside.
+docs/device.md carries the readings.
+
+A Dot whose property has never been written defaults to **on**, which keeps the
+switch from changing what an existing install does. A `getprop` that **fails** is
+the opposite default: the surface stays off and the failure is logged, because a
+read that did not happen is not an instruction, and off is the recoverable
+direction -- the switch entity is still listed, so an operator can turn it back on,
+and the property is not rewritten, so the next restart reads it properly. Those
+two are different answers to different questions, which is why `Flag` reports
+"unset" and "could not read" separately rather than folding both into a default.
+A `setprop` that does not take is reported and the switch then holds only until
+the next restart, because `SetFlag` reads the property back rather than trusting
+the write.
+
+A daemon that starts with the surface off deletes the `tcp/8928` rule once, rather
+than assuming there is nothing to delete. A previous run that had the surface up
+and did not get to switch it off -- a `SIGKILL`, the supervisor killing it, a
+restart while the operator had it on -- leaves an ACCEPT in a chain this daemon
+does not own, and nothing else removes it: the port then stands open for the rest
+of the boot with nothing behind it while the switch truthfully reports off. Only
+hardware showed that; every test here passes either way, because the chain is not
+something the tree can read. So the sweep runs whenever the surface did not come
+up, which is broader than "the flag says off" on purpose: a key file that will not
+load builds no switch at all, and a bind that fails leaves the surface down with
+the flag still saying on, and both of those are runs that can inherit a rule. Its
+own failure is a log line rather than an error, because a rule that was not there
+is the ordinary case -- `DenyTCP` on an absent rule is one `iptables` call that
+reports nothing.
+
+A command that asks for the state the switch already holds costs nothing. The
+worker takes it, finds no transition to make, and stops there rather than writing
+the property again: `setprop` plus the read-back is two processes and a write to
+`/data/property`, and the ESPHome API will accept a `SwitchCommandRequest` as fast
+as a peer holding the key can send them. The ESPHome mute select turns away a
+command aiming at the state already reached for the same reason, and
+docs/device.md gives it for the adb select.
+
+The switch sits behind the ESPHome key and nothing else, so whoever holds that
+key can turn the surface back on. It is a control for the operator rather than a
+second credential, and SECURITY.md carries what that means for the port.
 
 ## The advert changes when the Dot reboots
 
@@ -463,6 +583,7 @@ popped and a new one started.
 
 What the token does **not** buy is more than one attempt. A revived task carries
 `retry_initial_connection=False`, so it dials once and stops if that dial fails.
+Which is why the advert waits until the port is reachable.
 
 The boot id rather than a fresh value per start, because the daemon restarts far
 more often than the device reboots. The supervisor respawns it every five
@@ -487,6 +608,48 @@ kernel's own identifier off the wire and the record short.
 What it costs is 21 bytes on every response carrying the TXT, and an update seen
 by every browser on the segment at each reboot rather than only by the servers
 that care.
+
+The advert goes up only once the port is reachable, and that ordering is the
+other half of the fix. Coming up, the listener binds and the rule is added at
+about 25 seconds of uptime, but the responder cannot announce until the interface
+has an address, which is a later event than the interface appearing: `wlan0` does
+not exist for the first 15 seconds, and the lease lands later still and moves
+between boots -- 50 seconds on the boot this fix was measured against, inside 36
+on the one docs/pitfalls.md records -- and netd rebuilds the INPUT chain in between, discarding the rule. The
+announcement therefore went out advertising a port that answered nothing, the
+one dial it bought was dropped, and the SYN never reached userspace to be logged
+at either end. Measured: a Dot that
+returned from a reboot with a fresh token stayed unreachable to Music Assistant
+for the whole run.
+
+So the switch waits for an IPv4 address and asserts the rule again immediately
+before it advertises. That is a second assert rather than a replacement: the rule
+also goes in when the listener binds, about 25 seconds in, and `HoldTCPOpen`
+re-asserts it every 30 seconds after that. Neither is enough on its own, because
+the re-assert only fires on a tick -- there is no assert before the first one --
+so the announcement can fall up to 30 seconds after netd wiped the rule. The early
+assert is harmless and worth keeping: nothing can reach the port before the
+address exists, and `AllowTCP` checks before it appends, so it cannot duplicate. A
+wipe after the announcement is harmless too, because the connection is already
+established and only new SYNs are dropped. Checking the rule instead of asserting
+it would not do: the check is stale the moment it returns, and netd is the one
+writing. Switching on by hand is unaffected -- the address is already there, so
+the wait returns at once.
+
+The wait is bounded at `addressWait`, five minutes. Past it the switch says so and
+advertises anyway, which sounds worse than it is: with no address the responder
+has never opened its socket, so `Advertise` records the service and sends nothing.
+What the fallback buys is that the service is in the list when an address does
+arrive, instead of the surface staying unannounced for the rest of the boot.
+
+Nothing is published once the switch has been turned off, and the check for that
+is `on` read under the switch's own lock rather than the hold channel. `disable`
+clears `on` under that lock before it withdraws the advert, so only two orderings
+are possible: either the advert goes up first and the withdrawal takes it away, or
+`on` is already false and it never goes up. A hold check alone leaves the gap
+between the check and the `Advertise`, which is the window the withdrawal races --
+and losing that race leaves `_sendspin._tcp` on the segment, cached for
+`ttlShared`, pointing at a listener that is about to close.
 
 A clean stop needs none of this: `SIGTERM` withdraws the advert at TTL 0, the
 cache drops it, and the next announcement is an `Added` like any first sighting.
@@ -628,7 +791,7 @@ unbounded accept loop is a goroutine and a read buffer per connection for as lon
 as a peer cares to open them, and an OOM kill brings the daemon back with the
 button ungrabbed.
 
-The four tunable windows are `Client` fields that fall back to the constants
+The five tunable windows are `Client` fields that fall back to the constants
 beside `handshakeWait` when they are zero. Nothing but a test sets them, and a
 test needs them short; a package-level variable would have done the same job
 while racing the connections a previous test is still closing.
@@ -674,6 +837,41 @@ own deadline from the idle window on every call, so neither inherits an absolute
 one. That also means clearing the provisional deadline achieves nothing once the
 idle window is set -- the next read or write overwrites it either way -- so there is
 no such call, and a reader looking for one is looking for the wrong mechanism.
+
+The same re-arming decides how the goodbye is bounded, and bounding it takes two
+measures rather than one, because a write escapes a budget in two different ways.
+`Client.Close` has two frames to write into a socket whose peer may have stopped
+reading. A deadline set on the connection is replaced by the next write, so `Close`
+narrows the session's **idle window** to `goodbyeWait`, which is the value the write
+path arms from, and every write that starts after that is bounded by it.
+
+What the narrowing cannot reach is a write already in flight. It holds the session's
+write mutex under the deadline it armed on the way in, so the goodbye queues behind
+that mutex for the whole 150-second idle window: measured at 3.1 seconds against a
+100-millisecond budget with the window at 3 seconds. So `Close` sets the write
+deadline on the socket as well, which does interrupt a blocked syscall where changing
+the idle window cannot. The price is a partial frame -- the stream is unreadable from
+there, so the goodbye behind it may not parse and what the peer really gets is the
+close -- and that is the honest outcome rather than a regression: a session whose
+write is stuck cannot be said goodbye to, and pretending it can is what cost the 150
+seconds. Both measures are needed, and neither replaces the other.
+
+Neither is sufficient either, because a deadline belongs to the connection rather
+than to `Close`, and anything else holding that connection may re-arm it. `run`
+does exactly that on its way in: its first act is an absolute 30-second provisional
+deadline, and a session is tracked before `Greet` returns, so a `Close` landing in
+between arms two seconds and then watches `run` replace it with thirty. So the
+bound does not rest on a deadline at all in the end -- each goodbye carries a
+watchdog that drops the connection outright once the budget is spent twice over,
+and a test pins it with a connection that ignores deadlines and blocks every
+write.
+
+The budget is per write and therefore per session, so `Close` says every goodbye at
+once rather than one after another. Spent serially, four stalled sessions took 2.4
+seconds and eight peers would cost eight budgets, all of it landing in front of
+`DenyTCP` and the flag write -- which is exactly where the switch's own promises are
+kept. Three tests pin this: a session whose peer never reads, a session whose write is
+already blocked when `Close` runs, and four stalled sessions at once.
 
 The `path` TXT record in the advert is not optional: a server that cannot read a
 path has nowhere to send the upgrade, and the name in it should match the one
