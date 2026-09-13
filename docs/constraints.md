@@ -32,7 +32,7 @@ from the daemon: it asks the binary what it is instead of telling it what to do.
 A binary built here needs no such question, because the tree that built it is
 right there; a binary somebody downloaded and installed six months ago has
 nothing else to answer with. So `build.sh` stamps `$OVERDUB_VERSION` through
-`-ldflags -X` when one is set, the release workflow sets it from the tag, and an
+`-ldflags -X` when one is set, the release job sets it from the tag, and an
 ordinary local build leaves it empty and says `overdub (unversioned build)`. The
 name carries the prefix because the variable is ambient: a bare `VERSION` is
 exported by half the Makefiles in the world, and `install.sh` hands whatever the

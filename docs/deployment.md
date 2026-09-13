@@ -53,6 +53,36 @@ other reading installs. Everything downstream is
 unchanged, hash check included -- what it compares against is simply a file that
 was built elsewhere.
 
+The release is a job in the CI workflow rather than a workflow of its own, and
+that is what lets it be gated. `needs:` does not reach across workflows, so two
+files would leave the release racing the tests it is meant to wait for, with
+nothing but a poll of the checks API to make it wait. In one file it says
+`needs: build` and a tag on a red commit produces nothing.
+
+The attestation names the workflow that produced the file, so every release is
+signed by `.github/workflows/ci.yml`. That path is what `--signer-workflow`
+wants from anyone hardening the check beyond what README.md shows, and it is a
+promise to keep: moving the release job to a file of its own again would change
+what old and new releases attest to, and split a check that names one path.
+
+A release that fails part way through needs a hand, deliberately. `gh release
+create` is not idempotent, so re-running the job for a tag stops at "a release
+with the same tag name already exists": delete the draft it left, then re-run
+the job from its own run page, because the tag already exists and pushing it
+again raises no event to trigger anything. The alternative is for the step to
+upload over whatever it finds, which would let a re-run silently replace the
+assets of a release that was already published, and a release whose bytes can
+change quietly is worth less than one that needs a deliberate deletion. Nothing
+is public in the meantime, because the draft is only published once both assets
+are up.
+
+The alternative, a second workflow on `workflow_run`, costs more than it looks.
+Such a job runs with the default branch as its ref, so the tag survives only as
+event data: `$GITHUB_REF_NAME` stops naming it, and the provenance attestation
+would record `refs/heads/main` rather than the tag, which is the one field a
+consumer checks. It also fires for pull requests from forks, and this job holds
+`contents: write` and `attestations: write`.
+
 What the tarball loses is the one thing a source install gets for free: the
 binary cannot be rebuilt from what is beside it and compared. So the release
 publishes `SHA256SUMS` and a provenance attestation, which say which workflow

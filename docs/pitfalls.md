@@ -36,7 +36,7 @@ matching exactly in size.
 Without the stamp the same tree always gives the same bytes, measured across
 repeat builds, a different directory, a checkout with no `.git`, and a dirty
 tree. `OVERDUB_VERSION` is an input to that rather than an exception to it: it is
-empty unless the release workflow sets it, and two builds of one tag agree. What does
+empty unless the release job sets it, and two builds of one tag agree. What does
 not agree is a release binary against a local build of the same tag, because the
 NDK on the runner is not the NDK on anybody's machine, and the released one is
 identified by its published hash rather than by being re-derived.
