@@ -2,6 +2,7 @@ package untrustedlog
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -271,4 +272,22 @@ func TestWrittenIsSafeToReadWhileLinesAreBeingWritten(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestALineIsBoundedWhateverTheCallSitePassed(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	var l Log
+	l.Printf("boom: %v", errors.New(strings.Repeat("9", 4000)))
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if len(line) > maxLine+64 {
+			t.Errorf("one line of %d bytes reached the log; a peer sets how much of /data"+
+				" it fills", len(line))
+		}
+	}
+	if !strings.Contains(out.String(), "boom:") {
+		t.Error("the line was dropped rather than cut")
+	}
 }

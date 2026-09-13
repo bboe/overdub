@@ -188,8 +188,11 @@ is there because a peer did something, and `%q` renders a frame of `\xff` as
 four times its size on one line: measured, one `HelloRequest` wrote 131,207
 bytes. The log is truncated at boot and every twentieth restart, and a peer
 writing to it never makes the daemon exit, so neither truncation arrives. Peer
-strings are cut to 64 bytes and an ellipsis before they are quoted, and peer
-lines are limited twice over: 20 a minute, and 5,000 for the run.
+strings are cut to 64 bytes and an ellipsis before they are quoted, every line is
+truncated at 512 bytes whatever the call site passed -- peer bytes arrive inside
+errors as well as as strings, and an error formatted with `%v` was never cut by
+anything -- and peer lines are limited twice over besides: 20 a minute, and 5,000
+for the run.
 `internal/untrustedlog` holds the rule, so a second peer-facing subsystem
 cannot keep its own copy of these numbers and drift from them. It does not hold
 one budget between them: the counters live per `Log`, so a second subsystem
