@@ -59,15 +59,27 @@ local_md5() {
   else md5 -q "$1"; fi
 }
 
-if git rev-parse --git-dir >/dev/null 2>&1; then
-  dirty=$(git status --porcelain || true)
-  if [ -n "$dirty" ]; then
-    echo "WARNING: this build carries uncommitted changes:" >&2
-    echo "$dirty" >&2
+if [ -f ./build.sh ]; then
+  if [ ! -x ./build.sh ]; then
+    echo "./build.sh is here but not executable, so this is a source tree that" >&2
+    echo "  cannot build. Refusing to install whatever build/overdub holds:" >&2
+    echo "  chmod +x build.sh" >&2
+    exit 1
   fi
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    dirty=$(git status --porcelain || true)
+    if [ -n "$dirty" ]; then
+      echo "WARNING: this build carries uncommitted changes:" >&2
+      echo "$dirty" >&2
+    fi
+  fi
+  ./build.sh
+elif [ -f build/overdub ]; then
+  echo "no build.sh here, so installing build/overdub as it stands ($(local_md5 build/overdub))."
+else
+  echo "no build.sh to build with, and no build/overdub to install." >&2
+  exit 1
 fi
-
-./build.sh
 
 boot_script=$(mktemp)
 sed "s/^NAME=\$/NAME=$NAME/" deploy/overdub.sh > "$boot_script"

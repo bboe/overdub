@@ -70,7 +70,7 @@ jobs:
       # 1.7 in JDK 20, and D8 wants 11 or newer.
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '17'
       - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
         with:

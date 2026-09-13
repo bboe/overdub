@@ -39,6 +39,31 @@ what is left.
 `com.amazon.device.software.ota` is left hidden on purpose. An OTA rewrites
 `boot.img`, which removes Magisk and takes root and overdub with it.
 
+**A release is a tarball, and `install.sh` reads its own surroundings to know
+it.** Building this needs an NDK, a JDK and an Android SDK between them, for a
+device whose whole audience is people who have already rooted one, so the
+release carries the built binary and the built jar beside the scripts that
+install them. There is no flag for that. `install.sh` builds when `build.sh` is
+next to it and installs `build/overdub` as it stands when it is not, which is a
+fact about the directory rather than an assertion anybody can get wrong: a
+source tree always has both, and the tarball deliberately has neither the
+toolchain nor the script that would drive one. The test is whether that file
+exists rather than whether it can be run, and docs/pitfalls.md says what the
+other reading installs. Everything downstream is
+unchanged, hash check included -- what it compares against is simply a file that
+was built elsewhere.
+
+What the tarball loses is the one thing a source install gets for free: the
+binary cannot be rebuilt from what is beside it and compared. So the release
+publishes `SHA256SUMS` and a provenance attestation, which say which workflow
+run and which commit produced the file, and `-version` says which tag the
+running daemon came from. None of that is as good as having built it, which is
+why the source path stays the documented default and the tarball says so.
+
+`THIRD-PARTY.txt` is in the tarball because the licences compiled into the
+binary ask for it there. Source distribution never needed it; this is the first
+build published as a binary, and it is the case those clauses are about.
+
 `deploy/install.sh` pushes the binary to `/data/local/bin/` and the boot script
 to Magisk's `service.d` (inside `magisk.img` on Magisk 17.3, hence the `/sbin`
 path). That script is deliberately thin: Android has no user-level supervisor,

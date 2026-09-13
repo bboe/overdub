@@ -1,0 +1,100 @@
+name: Release
+
+# A tag push runs CI too, because that workflow triggers on every push, so
+# nothing here re-runs the tests: this job only builds what ships and publishes
+# it. The two run side by side and this one does not wait on the other, so the
+# tag is what carries the promise: point it at a commit main has already gone
+# green on. Nothing here will stop a release cut from a red one.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and upload its assets
+      id-token: write      # sign the provenance attestation
+      attestations: write  # record it
+    steps:
+      # Pinned to commits rather than tags, as in ci.yml.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+        with:
+          packages: 'platforms;android-22 build-tools;34.0.0'
+
+      # OVERDUB_VERSION is the only thing the release build does differently: it
+      # stamps the tag into the binary, so a downloaded one can say what it is.
+      # The runner's NDK is not the NDK anybody else has, so this binary is not
+      # expected to match a local build byte for byte.
+      - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - run: OVERDUB_VERSION="$GITHUB_REF_NAME" ./build.sh
+
+      - name: Build mapdump.jar
+        run: |
+          export ANDROID_JAR="$ANDROID_SDK_ROOT/platforms/android-22/android.jar"
+          export R8_JAR="$ANDROID_SDK_ROOT/build-tools/34.0.0/lib/d8.jar"
+          deploy/mapdump/build.sh
+
+      # The tarball is the whole install: the scripts, the binary, the jar, and
+      # the documentation that explains them. Somebody unpacking it needs adb
+      # and a rooted Dot, and no Go, NDK, JDK or Android SDK at all.
+      #
+      # THIRD-PARTY.txt travels with it because clause 2 of the BSD licences
+      # compiled into the binary asks that it does.
+      - name: Assemble the tarball
+        run: |
+          # A run: step is bash -e without pipefail, so tar's failure in the
+          # pipeline below would be reported as gzip's success, and a truncated
+          # archive would be hashed, attested and published.
+          set -o pipefail
+          dir="overdub-$GITHUB_REF_NAME"
+          mkdir -p "$dir/build" "$dir/deploy/mapdump"
+          cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
+          cp -r docs "$dir/docs"
+          cp deploy/install.sh deploy/uninstall.sh deploy/restore-amazon.sh \
+             deploy/overdub.sh "$dir/deploy/"
+          cp build/overdub "$dir/build/overdub"
+          cp deploy/mapdump/mapdump.jar "$dir/deploy/mapdump/"
+          # Same inputs, same tarball: the mtimes, ordering and owner a tar
+          # otherwise picks up from the runner are pinned, and gzip -n keeps
+          # the name and timestamp out of the header.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --pretty=%ct)" -cf - "$dir" |
+            gzip -n > "$dir.tar.gz"
+          sha256sum "$dir.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+
+      # A missing notice is invisible to everything else here: the tarball
+      # unpacks, installs and runs without either file.
+      - name: The notices travel with the binary
+        run: |
+          tar tzf "overdub-$GITHUB_REF_NAME.tar.gz" |
+            grep -qFx "overdub-$GITHUB_REF_NAME/LICENSE.txt"
+          tar tzf "overdub-$GITHUB_REF_NAME.tar.gz" |
+            grep -qFx "overdub-$GITHUB_REF_NAME/THIRD-PARTY.txt"
+
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: overdub-${{ github.ref_name }}.tar.gz
+
+      # Drafted first and published second, because gh uploads the assets after
+      # creating the release: a failed upload would otherwise leave a release
+      # anybody can see and nobody can install from.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes \
+            "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS
+          gh release edit "$GITHUB_REF_NAME" --draft=false

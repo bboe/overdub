@@ -67,12 +67,13 @@ one.
   `/sbin/.core/img/.core/service.d`. That is the only path `install.sh` writes
   the boot script to, and it fails there rather than guessing. A Magisk that
   uses `/data/adb/service.d` needs that path changed first
-* Go 1.25 or later, and `adb`, on a development machine
-* An **Android NDK**, for the chime: it is played through OpenSL ES, so the
-  daemon is cgo and `build.sh` will not run without one. `brew install --cask
-  android-ndk` on macOS, or a release from
-  [developer.android.com/ndk](https://developer.android.com/ndk) elsewhere, with
-  `ANDROID_NDK_HOME` pointing at it
+* `adb`, on a development machine. A [release](#install-from-a-release) needs
+  nothing else
+* to build it yourself instead: Go 1.25 or later, and an **Android NDK** for the
+  chime. It is played through OpenSL ES, so the daemon is cgo and `build.sh`
+  will not run without one. `brew install --cask android-ndk` on macOS, or a
+  release from [developer.android.com/ndk](https://developer.android.com/ndk)
+  elsewhere, with `ANDROID_NDK_HOME` pointing at it
 * Home Assistant on the same subnet as the Dot
 
 The buttons on this hardware:
@@ -111,7 +112,47 @@ Skip this if the Dot never had EchoMuse. It restores every package that is
 currently hidden or disabled, not just EchoMuse's, so running it on a Dot where
 you have suppressed things yourself will undo that too.
 
+## Install from a release
+
+Each [release](https://github.com/bboe/overdub/releases) carries one tarball
+holding the scripts, the binary and `mapdump.jar`, already built. Unpack it and
+install from it; the rest of this file applies unchanged from there:
+
+```sh
+tar xf overdub-v1.0.0.tar.gz
+overdub-v1.0.0/deploy/install.sh kitchen
+```
+
+`SHA256SUMS` sits beside the tarball, and the build is attested, so GitHub can
+be asked which workflow run and which commit produced the file you have:
+
+```sh
+shasum -a 256 -c SHA256SUMS      # sha256sum -c, where you have that instead
+gh attestation verify overdub-v1.0.0.tar.gz --repo bboe/overdub
+```
+
+A released binary says what it is, which one built here does not:
+
+```sh
+adb shell 'su -c "/data/local/bin/overdub -version"'
+```
+
+The Dot's linker prints four `WARNING: linker:` lines of its own first, and adb
+merges them into the same stream. The version is the last line:
+
+```
+overdub v1.0.0
+```
+
+Build it yourself instead for anything you want to change, or if you would
+rather not run a binary somebody else compiled. The tarball carries no
+`build.sh`, and `install.sh` builds when it finds one and installs what is in
+`build/overdub` when it does not.
+
 ## Build
+
+This section needs the repository. The release tarball carries neither
+`build.sh` nor `deploy/mapdump/build.sh`, because it carries what they produce.
 
 ```sh
 ./build.sh

@@ -27,6 +27,18 @@ filesystem: the key at `noiseKeyPath`. A flag whose only correct value is
 already known, or that restates whether a file exists, is configuration that can
 be got wrong for no gain.
 
+`-version` is the exception, and it earns its place from the release rather than
+from the daemon: it asks the binary what it is instead of telling it what to do.
+A binary built here needs no such question, because the tree that built it is
+right there; a binary somebody downloaded and installed six months ago has
+nothing else to answer with. So `build.sh` stamps `$OVERDUB_VERSION` through
+`-ldflags -X` when one is set, the release workflow sets it from the tag, and an
+ordinary local build leaves it empty and says `overdub (unversioned build)`. The
+name carries the prefix because the variable is ambient: a bare `VERSION` is
+exported by half the Makefiles in the world, and `install.sh` hands whatever the
+caller has straight to `build.sh`, so somebody with one set from another project
+would install a stamped binary without ever asking for one.
+
 **The tree carries two direct dependencies, and neither is a convenience.**
 Everything else here is hand-rolled and checkable in isolation, including the
 protobuf. A Noise handshake is not: Go's standard library has X25519 in
@@ -64,7 +76,16 @@ mDNS library is not. Those all route through `github.com/miekg/dns`, about
 flynn/noise pulls in are all BSD-3-Clause, and all are compiled in. Source
 distribution needs nothing, but clause 2 asks that their notices travel with a
 *binary*, so `THIRD-PARTY.txt` carries them verbatim and belongs beside any
-build that is published.
+build that is published. The release tarball is the first build published as a
+binary, which is what made the rest of the list worth establishing rather than
+assuming: the Go standard library and runtime are linked in under the same Go
+Authors licence, and because the chime is cgo the NDK's clang does the link and
+embeds Bionic's startup objects (`_start`, `__libc_init`) and compiler-rt's ARM
+division builtins. Bionic's BSD-2-Clause notice is reproduced; compiler-rt is
+named and not reproduced, because the LLVM exception waives sections 4(a), 4(b)
+and 4(d) for exactly this case -- code embedded into object form by compiling
+it. Bionic's libc is not in the binary at all: `libc.so`, `libdl.so`,
+`liblog.so` and `libOpenSLES.so` are `NEEDED` entries the device resolves.
 
 **The chime is generated, not stored and not encoded.** It was an mp3 served
 over loopback http to Alexa's `SpeechSynthesizer`, and the chime is free of that

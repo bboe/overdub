@@ -32,6 +32,6 @@ rm -rf classes out mapdump.jar
 mkdir -p classes out
 javac -source 1.7 -target 1.7 -nowarn -bootclasspath "$ANDROID_JAR" -d classes MapDump.java
 java -cp "$R8_JAR" com.android.tools.r8.D8 --lib "$ANDROID_JAR" --min-api 22 --output out classes/*.class
-(cd out && zip -q ../mapdump.jar classes.dex)
+(cd out && TZ=UTC touch -t 198001010000 classes.dex && TZ=UTC zip -qX ../mapdump.jar classes.dex)
 rm -rf classes out
 ls -l mapdump.jar

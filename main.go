@@ -10,13 +10,28 @@ import (
 	"strings"
 )
 
+var version string
+
+func versionLine() string {
+	if version == "" {
+		return "overdub (unversioned build)"
+	}
+	return "overdub " + version
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetOutput(os.Stdout)
 
 	var flags config
 	flag.StringVar(&flags.Name, "name", "", "unique device name Home Assistant identifies this Dot by (required)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionLine())
+		return
+	}
 
 	if flags.Name == "" {
 		fmt.Fprintln(os.Stderr, "overdub: -name is required, and must be unique on the network")
@@ -27,6 +42,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "overdub: %v\n", err)
 		os.Exit(2)
 	}
+
+	log.Print(versionLine())
 
 	if err := serve(flags); err != nil {
 		withdraw()

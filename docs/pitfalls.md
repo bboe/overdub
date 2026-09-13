@@ -10,6 +10,15 @@ CI asserts that every tracked `.sh` is `100755`, as a rule rather than a list,
 so a script added later is covered without being remembered. Measured the hard
 way: `install.sh` was once committed `100644`, and the whole suite passed.
 
+Which is why `install.sh` asks whether `build.sh` **exists** rather than whether
+it is executable. The two readings differ exactly where the release branch was
+added: a source tree whose `build.sh` lost its bit -- a `core.fileMode=false`
+checkout, a copy through a filesystem that drops it, an unpacked source archive
+-- would answer "not executable", fall through to the tarball branch, and
+install whatever stale binary `build/` still held, reporting `binary verified`
+over it. A file that is there and cannot be run is a source tree that cannot
+build, and it stops.
+
 **`install.sh` can lie, so it verifies itself.** `cp` onto the running binary
 fails with ETXTBSY, silently: toolbox `cp` prints "Text file busy" and exits 0,
 and `adb shell` exits 0 whatever happened remotely, so `set -e` catches nothing.
@@ -26,7 +35,11 @@ matching exactly in size.
 
 Without the stamp the same tree always gives the same bytes, measured across
 repeat builds, a different directory, a checkout with no `.git`, and a dirty
-tree.
+tree. `OVERDUB_VERSION` is an input to that rather than an exception to it: it is
+empty unless the release workflow sets it, and two builds of one tag agree. What does
+not agree is a release binary against a local build of the same tag, because the
+NDK on the runner is not the NDK on anybody's machine, and the released one is
+identified by its published hash rather than by being re-derived.
 
 The different directory is the one that needs help. `build.sh` makes the empty
 `libpthread` stub archives that Bionic ships no library for, and the `-L` it
@@ -34,6 +47,23 @@ hands cgo has to stay **relative**: an absolute path lands in cgo's action hash,
 so the same commit built from two directories would produce two different
 binaries and break the promise above quietly. The `cd` at the top of the script
 is what makes a relative path resolve.
+
+`mapdump.jar` needed help of its own, because the binary is not the only thing
+published. `zip` records each entry's mtime, so the same `classes.dex` archived
+twice gave two different digests -- measured, and the difference is in the local
+and central headers rather than the content. Two runs of one tag would then
+publish two different tarballs, which is the property the release's `tar` flags
+exist to establish. So `deploy/mapdump/build.sh` pins the dex's mtime to zip's
+own 1980 floor and passes `-X`.
+
+`TZ=UTC` has to cover **both** of those commands, which is the part that is easy
+to get half right. A zip entry carries a DOS stamp in local time, so `zip`
+renders the mtime back through `localtime()`: pinning the mtime under the
+builder's own zone and archiving it under UTC writes that zone's offset into the
+headers. Measured, same `classes.dex` both times: touched in `America/Los_Angeles`
+the entry is dated 01-01-1980 08:00 and the archive hashes one way, touched in
+UTC it is 00:00 and hashes another. With `TZ=UTC` on both, a builder in Pacific
+and a builder in Tokyo produce the same bytes.
 
 That last one is the one to say out loud, so `install.sh` does. Reproducibility
 here means the binary cannot tell you what it was built from, and `git checkout`

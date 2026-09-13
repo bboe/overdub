@@ -34,6 +34,11 @@ export CC CGO_ENABLED=1 CGO_LDFLAGS="-L$stubs" GOOS=android GOARCH=arm GOARM=7
 
 go vet ./...
 
-go build -trimpath -buildvcs=false -ldflags="-s -w" -o build/overdub .
+ldflags="-s -w"
+if [ -n "${OVERDUB_VERSION:-}" ]; then
+  ldflags="$ldflags -X main.version=$OVERDUB_VERSION"
+fi
+
+go build -trimpath -buildvcs=false -ldflags="$ldflags" -o build/overdub .
 ls -l build/overdub
 file build/overdub 2>/dev/null || true
