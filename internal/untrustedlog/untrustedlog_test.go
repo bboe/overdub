@@ -2,6 +2,7 @@ package untrustedlog
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -75,7 +76,7 @@ func TestLoggingStopsAtItsCeilingForTheRun(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	l := &Log{Subject: "test"}
-	for i := 0; i < total+Burst*3; i++ {
+	for i := 0; i < 5060; i++ { // total + Burst*3, as a literal
 		l.mu.Lock()
 		l.windowEnd = time.Time{}
 		l.mu.Unlock()
@@ -149,7 +150,7 @@ func TestTheCeilingIsAnnouncedExactlyOnce(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	l := &Log{Subject: "test"}
-	for i := 0; i < total+Burst*3; i++ {
+	for i := 0; i < 5060; i++ { // total + Burst*3, as a literal
 		l.mu.Lock()
 		l.windowEnd = time.Time{}
 		l.mu.Unlock()
@@ -271,4 +272,27 @@ func TestWrittenIsSafeToReadWhileLinesAreBeingWritten(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestALineIsBoundedWhateverTheCallSitePassed(t *testing.T) {
+	// Cut is for peer strings the call site knows about. A peer's bytes also arrive
+	// inside values the call site does not think of as strings at all: an error from
+	// encoding/json carries the offending number literal verbatim.
+	var out strings.Builder
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	var l Log
+	l.Printf("boom: %v", errors.New(strings.Repeat("9", 4000)))
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		if len(line) > maxLine+64 {
+			t.Errorf("one line of %d bytes reached the log; a peer sets how much of /data"+
+				" it fills", len(line))
+		}
+	}
+	if !strings.Contains(out.String(), "boom:") {
+		t.Error("the line was dropped rather than cut")
+	}
 }
