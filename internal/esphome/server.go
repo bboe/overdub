@@ -127,20 +127,21 @@ type Server struct {
 
 	psk []byte
 
-	keyUptime  uint32
-	keyWifi    uint32
-	keyVolume  uint32
-	keyCPU     uint32
-	keyMemory  uint32
-	keyJack    uint32
-	keyJackOn  uint32
-	keySound   uint32
-	keySpeaker uint32
-	keyMicMute uint32
-	keyADB     uint32
-	keyAlexa   uint32
-	keyText    uint32
-	keyCommand uint32
+	keyUptime   uint32
+	keyWifi     uint32
+	keyVolume   uint32
+	keyCPU      uint32
+	keyMemory   uint32
+	keyJack     uint32
+	keyJackOn   uint32
+	keySound    uint32
+	keySpeaker  uint32
+	keyMicMute  uint32
+	keySendspin uint32
+	keyADB      uint32
+	keyAlexa    uint32
+	keyText     uint32
+	keyCommand  uint32
 
 	buttons []*physicalButton
 
@@ -185,9 +186,12 @@ type Server struct {
 	jack    func() (bool, bool)
 	sound   func() (bool, bool)
 	micMute func() (bool, bool)
-	cpu     func() (float32, bool)
-	alexa   func() (bool, bool)
-	memory  func() (float32, bool)
+
+	sendspinOn  func() bool
+	sendspinSet func(bool)
+	cpu         func() (float32, bool)
+	alexa       func() (bool, bool)
+	memory      func() (float32, bool)
 
 	volumeKeys  func(up bool, n int) error
 	play        func(url string) error
@@ -238,6 +242,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keySound:     entityKey("speaker_playing"),
 		keySpeaker:   entityKey("speaker"),
 		keyMicMute:   entityKey("microphone_muted"),
+		keySendspin:  entityKey("sendspin"),
 		keyADB:       entityKey("network_adb"),
 		keyAlexa:     entityKey("alexa_registered"),
 		keyText:      entityKey("alexa_command"),
@@ -314,6 +319,17 @@ func (s *Server) button(objectID string) *physicalButton {
 func (s *Server) UseButton(objectID string, mode func() string, setMode func(string)) {
 	if b := s.button(objectID); b != nil {
 		b.mode, b.setMode = mode, setMode
+	}
+}
+
+func (s *Server) UseSendspin(on func() bool, set func(bool)) {
+	s.sendspinOn, s.sendspinSet = on, set
+}
+
+func (s *Server) NoteSendspin() {
+	select {
+	case s.liveWake <- struct{}{}:
+	default:
 	}
 }
 
@@ -623,6 +639,11 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		if key == s.keyMicMute {
 			s.setMicLocked(conn, on)
 		}
+		if s.sendspinSet != nil && key == s.keySendspin {
+			conn.noted = fmt.Sprintf("esphome api: %s switched sendspin %s",
+				conn.sock.RemoteAddr(), onOff(on))
+			s.sendspinSet(on)
+		}
 		return nil
 
 	case msgMediaPlayerCmd:
@@ -809,6 +830,13 @@ func micWord(muted bool) string {
 		return "muted"
 	}
 	return "live"
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 func (s *Server) setMicLocked(conn *conn, want bool) {

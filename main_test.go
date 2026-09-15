@@ -2,14 +2,21 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+
 	"time"
 
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
+	"github.com/bboe/overdub/internal/mdns"
+	"github.com/bboe/overdub/internal/sendspin"
+	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
 func TestCheckName(t *testing.T) {
@@ -42,10 +49,39 @@ func TestUninstallDeletesTheRuleTheDaemonOpens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("-i %s -p tcp --dport %d -j ACCEPT", wifiIface, apiPort)
-	if !strings.Contains(string(script), want) {
+	// The script loops over the ports, so what has to line up is the rule's shape and
+	// the port values it is given, rather than one literal per port.
+	shape := fmt.Sprintf("-i %s -p tcp --dport $port -j ACCEPT", wifiIface)
+	if !strings.Contains(string(script), shape) {
 		t.Errorf("deploy/uninstall.sh deletes no rule matching %q, and the daemon adds exactly that",
-			want)
+			shape)
+	}
+	// Resolve the variables the loop actually iterates, so naming a port in an
+	// assignment the loop never reads does not count as deleting its rule.
+	assigned := map[string]string{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if name, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			assigned[name] = value
+		}
+	}
+	looped := map[string]bool{}
+	for _, line := range strings.Split(string(script), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "for port in ") {
+			continue
+		}
+		for _, field := range strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "for port in ")) {
+			name := strings.Trim(field, `"$;`)
+			if value, ok := assigned[name]; ok {
+				looped[value] = true
+			}
+			// A literal port in the loop deletes the rule just as well as a variable.
+			looped[name] = true
+		}
+	}
+	for _, port := range []int{apiPort, sendspin.Port} {
+		if !looped[strconv.Itoa(port)] {
+			t.Errorf("deploy/uninstall.sh deletes no rule for tcp/%d, which the daemon opens", port)
+		}
 	}
 }
 
@@ -392,5 +428,440 @@ func TestTheModelWeSendCarriesNoDotOfItsOwn(t *testing.T) {
 	if strings.Contains(deviceModel, ".") {
 		t.Errorf("deviceModel is %q; Home Assistant splits project_name on the dot and "+
 			"takes [1] as the model, so a dot here truncates it on the device page", deviceModel)
+	}
+}
+
+func TestUninstallClearsThePersistedSendspinFlag(t *testing.T) {
+	script, err := os.ReadFile("deploy/uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// internal/device's own test pins the prefix, so a drift there fails over there.
+	name := "persist.overdub." + sendspinFlag
+	if !strings.Contains(string(script), name) {
+		t.Errorf("deploy/uninstall.sh never names %s, so an uninstall leaves it behind and a "+
+			"reinstall starts with sendspin switched off", name)
+	}
+}
+
+func TestTheSendspinSwitchTakesTheWholeSurfaceAway(t *testing.T) {
+	// Every piece the surface is made of has to go, not just the accept loop. What
+	// is checked here is the wiring; the pieces have their own tests.
+	esphomeAdvert := mdns.Advert{
+		Service: "_esphomelib._tcp.local.", Port: apiPort, Records: []string{"mac=x"},
+	}
+	spy := &advertSpy{}
+	client := newRecordingClient()
+	ln := newNopListener()
+	hold := make(chan struct{})
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: spy,
+		base:      []mdns.Advert{esphomeAdvert},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+	}
+
+	// Nothing here has a real listener or iptables, so disable must cope with a
+	// switch that never managed to start one.
+	toggle.mu.Lock()
+	toggle.on = true
+	toggle.client = client
+	toggle.ln = ln
+	toggle.hold = hold
+	toggle.mu.Unlock()
+
+	toggle.disable()
+
+	if toggle.On() {
+		t.Error("the switch still reports on after disable")
+	}
+	if len(spy.lists) != 1 {
+		t.Fatalf("disable called Advertise %d times, want 1", len(spy.lists))
+	}
+	if len(spy.lists[0]) != 1 || spy.lists[0][0].Service != esphomeAdvert.Service {
+		t.Errorf("disable advertised %v, want only %s", spy.lists[0], esphomeAdvert.Service)
+	}
+	select {
+	case <-hold:
+	default:
+		t.Error("disable left the re-assert running, so tcp/8928 comes back after the delete")
+	}
+	select {
+	case <-ln.closed:
+	default:
+		t.Error("disable left the listener open, so the port still accepts")
+	}
+	select {
+	case <-client.closes:
+	default:
+		t.Error("disable left the sessions up, so a server already admitted keeps playing")
+	}
+}
+
+func TestSwitchingSendspinNeverBlocksTheCaller(t *testing.T) {
+	// Set runs on the API goroutine, and disable waits on the xtables lock netd
+	// holds, so a Set that blocks stops the daemon answering Home Assistant.
+	toggle := &sendspinSwitch{want: make(chan bool, 1)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			toggle.Set(i%2 == 0)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Set blocked with nothing draining the channel")
+	}
+	if got := len(toggle.want); got != 1 {
+		t.Fatalf("the channel holds %d wants, want 1", got)
+	}
+	if last := <-toggle.want; last != false {
+		t.Errorf("the channel held %v, want the newest request (false)", last)
+	}
+}
+
+type advertSpy struct {
+	lists [][]mdns.Advert
+}
+
+func (s *advertSpy) Advertise(list []mdns.Advert) error {
+	s.lists = append(s.lists, append([]mdns.Advert(nil), list...))
+	return nil
+}
+
+type nopListener struct{ closed chan struct{} }
+
+func newNopListener() nopListener { return nopListener{closed: make(chan struct{}, 1)} }
+
+func (nopListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l nopListener) Close() error {
+	select {
+	case l.closed <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (nopListener) Addr() net.Addr { return nil }
+
+type recordingClient struct{ closes chan struct{} }
+
+func newRecordingClient() *recordingClient {
+	return &recordingClient{closes: make(chan struct{}, 4)}
+}
+
+func (*recordingClient) Serve(net.Listener) error { return net.ErrClosed }
+func (c *recordingClient) Close() {
+	select {
+	case c.closes <- struct{}{}:
+	default:
+	}
+}
+
+func TestTogglingSendspinDoesNotHandOutAFreshLogBudget(t *testing.T) {
+	// The ceiling is per Log, and enable builds a new Client every time. If the Log
+	// went with it, cycling the switch would lift the run's ceiling for a peer that
+	// had already spent it.
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		peer: &untrustedlog.Log{Subject: "sendspin"},
+	}
+	first := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, toggle.peer)
+	for i := 0; i < untrustedlog.Burst; i++ {
+		first.Peer.Printf("sendspin: line %d", i)
+	}
+	spent := first.Peer.Written()
+	if spent != untrustedlog.Burst {
+		t.Fatalf("wrote %d lines, want the burst of %d", spent, untrustedlog.Burst)
+	}
+
+	next := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, toggle.peer)
+	next.Peer.Printf("sendspin: after the switch came back")
+	if got := next.Peer.Written(); got != spent {
+		t.Errorf("the switch-on wrote %d lines against a budget that had already spent %d; "+
+			"a toggle must not refill it", got, spent)
+	}
+}
+
+func TestDisableWaitsForTheReassertBeforeDeletingTheRule(t *testing.T) {
+	// A tick already delivered leaves the re-assert inside AllowTCP, and an append
+	// that lands after DenyTCP leaves an ACCEPT for a dead port that nothing will
+	// ever remove. So disable has to join the goroutine, not just signal it.
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: &advertSpy{},
+		base:      []mdns.Advert{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+	}
+	hold := make(chan struct{})
+	reasserting := make(chan struct{})
+	toggle.held.Add(1)
+	go func() {
+		defer toggle.held.Done()
+		<-hold
+		time.Sleep(150 * time.Millisecond)
+		close(reasserting)
+	}()
+
+	toggle.mu.Lock()
+	toggle.on = true
+	toggle.client = newRecordingClient()
+	toggle.ln = newNopListener()
+	toggle.hold = hold
+	toggle.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { defer close(done); toggle.disable() }()
+
+	select {
+	case <-done:
+		select {
+		case <-reasserting:
+			t.Fatal("the test's own goroutine finished first; the timing proves nothing")
+		default:
+			t.Error("disable returned while the re-assert was still running, so DenyTCP raced it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("disable never returned")
+	case <-reasserting:
+	}
+	<-done
+}
+
+type stepLog struct {
+	mu    sync.Mutex
+	steps []string
+}
+
+func (l *stepLog) note(step string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.steps = append(l.steps, step)
+}
+
+func (l *stepLog) seen() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.steps...)
+}
+
+type orderedAdvertiser struct{ log *stepLog }
+
+func (a orderedAdvertiser) Advertise([]mdns.Advert) error {
+	a.log.note("advert")
+	return nil
+}
+
+type orderedListener struct{ log *stepLog }
+
+func (orderedListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l orderedListener) Close() error {
+	l.log.note("listener")
+	return nil
+}
+func (orderedListener) Addr() net.Addr { return nil }
+
+type orderedClient struct{ log *stepLog }
+
+func (orderedClient) Serve(net.Listener) error { return net.ErrClosed }
+func (c orderedClient) Close()                 { c.log.note("sessions") }
+
+func TestDisableDeletesTheRuleLastOfAll(t *testing.T) {
+	// docs/sendspin.md carries the order as an invariant: the advert goes first, so
+	// nothing is told about a surface that is going away, and the rule is deleted
+	// last, after the re-assert goroutine has returned. A delete that runs earlier
+	// can be undone by a tick already inside AllowTCP, leaving an ACCEPT for a dead
+	// port that nothing removes. Waiting is not enough on its own -- the wait has to
+	// come before the delete -- so this pins the sequence rather than the join.
+	steps := &stepLog{}
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: orderedAdvertiser{steps},
+		base:      []mdns.Advert{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+		deny: func(int) error {
+			steps.note("deny")
+			return nil
+		},
+	}
+	hold := make(chan struct{})
+	toggle.held.Add(1)
+	go func() {
+		defer toggle.held.Done()
+		<-hold
+		time.Sleep(50 * time.Millisecond)
+		steps.note("reassert")
+	}()
+
+	toggle.mu.Lock()
+	toggle.on = true
+	toggle.client = orderedClient{steps}
+	toggle.ln = orderedListener{steps}
+	toggle.hold = hold
+	toggle.mu.Unlock()
+
+	if !toggle.disable() {
+		t.Fatal("disable refused a switch that was on")
+	}
+
+	want := []string{"advert", "reassert", "listener", "sessions", "deny"}
+	got := steps.seen()
+	if len(got) != len(want) {
+		t.Fatalf("teardown did %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("teardown did %v, want %v", got, want)
+		}
+	}
+}
+
+func TestSendspinIsAdvertisedOnlyOnceItsPortIsReachable(t *testing.T) {
+	// Measured on a Dot: the rule is added when the listener binds at about 25
+	// seconds of uptime, netd discards it while rebuilding the INPUT chain, and the
+	// responder does not announce until the interface has an address at about 50.
+	// A server that acts on that announcement -- and after it has given up retrying,
+	// a changed advert buys it exactly one attempt -- meets a port whose rule is
+	// gone, and the SYN is dropped with nothing logged at either end. So the rule is
+	// asserted immediately before the advert goes up rather than 25 seconds earlier:
+	// a wipe after that is harmless, because the connection is already established.
+	steps := &stepLog{}
+	address := make(chan struct{})
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: orderedAdvertiser{steps},
+		base:      []mdns.Advert{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+		allow: func(int) error {
+			steps.note("allow")
+			return nil
+		},
+		ready: func(<-chan struct{}) bool {
+			<-address
+			steps.note("address")
+			return true
+		},
+	}
+
+	toggle.mu.Lock()
+	toggle.on = true
+	toggle.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		toggle.advertiseOnceReachable(make(chan struct{}))
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if got := steps.seen(); len(got) != 0 {
+		t.Fatalf("did %v before the port had an address; the advert has to wait", got)
+	}
+	close(address)
+	<-done
+
+	want := []string{"address", "allow", "advert"}
+	got := steps.seen()
+	if len(got) != len(want) {
+		t.Fatalf("startup did %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("startup did %v, want %v: the rule is asserted last before the advert", got, want)
+		}
+	}
+}
+
+func TestSwitchingOffASurfaceThatIsAlreadyOffIsRefusedRatherThanRun(t *testing.T) {
+	// A Dot that booted with the flag off holds no client, no listener and a nil hold
+	// channel, so the first switch.turn_off Home Assistant sends reaches disable with
+	// nothing to tear down. Only the no-transition check in begin stands between that
+	// and closing a nil channel, which the supervisor turns into a restart loop with
+	// the button ungrabbed every five seconds.
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: &advertSpy{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+	}
+	if toggle.disable() {
+		t.Error("disable reported it tore down a surface that was already off")
+	}
+}
+
+func TestATeardownWhileWaitingForAnAddressAdvertisesNothing(t *testing.T) {
+	// The wait returns true as soon as the address exists, whatever else has
+	// happened, so a switch-off that arrives while the goroutine is parked leaves it
+	// holding a true answer and an intent nobody wants any more. Opening the rule and
+	// announcing then puts _sendspin._tcp on the segment for a listener disable is
+	// about to close, cached for ttlShared and answered until the next on/off pair.
+	steps := &stepLog{}
+	hold := make(chan struct{})
+	address := make(chan struct{})
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: orderedAdvertiser{steps},
+		base:      []mdns.Advert{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+		allow: func(int) error {
+			steps.note("allow")
+			return nil
+		},
+		ready: func(<-chan struct{}) bool {
+			<-address
+			return true
+		},
+	}
+	toggle.mu.Lock()
+	toggle.on = true
+	toggle.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		toggle.advertiseOnceReachable(hold)
+	}()
+
+	close(hold)
+	close(address)
+	<-done
+
+	if got := steps.seen(); len(got) != 0 {
+		t.Errorf("did %v after the surface was switched off, want nothing: the advert"+
+			" would outlive the listener and the rule", got)
+	}
+}
+
+func TestAnAdvertIsNeverPublishedForASurfaceAlreadySwitchedOff(t *testing.T) {
+	// disable clears `on` under the lock before it withdraws, so the publish reads
+	// that under the same lock: either it goes up before the withdrawal and the
+	// withdrawal removes it, or it never goes up at all. Checking only the hold
+	// channel would leave the gap between the check and the Advertise, which is the
+	// window disable's own withdrawal races.
+	steps := &stepLog{}
+	toggle := &sendspinSwitch{
+		name: "kitchen", mac: "00:00:00:00:00:01",
+		responder: orderedAdvertiser{steps},
+		base:      []mdns.Advert{},
+		want:      make(chan bool, 1),
+		peer:      &untrustedlog.Log{Subject: "sendspin"},
+		allow:     func(int) error { return nil },
+		ready:     func(<-chan struct{}) bool { return true },
+	}
+
+	// `on` is false, as it is once disable has taken the lock, while the hold channel
+	// is still open, as it is until disable has finished withdrawing.
+	toggle.advertiseOnceReachable(make(chan struct{}))
+
+	for _, step := range steps.seen() {
+		if step == "advert" {
+			t.Fatalf("published %v for a surface whose `on` was already false", steps.seen())
+		}
 	}
 }

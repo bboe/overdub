@@ -4,6 +4,7 @@
 package untrustedlog
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -16,11 +17,19 @@ const (
 
 	window    = time.Minute
 	maxString = 64
+	maxLine   = 512
 )
 
 func Cut(s string) string {
 	if len(s) > maxString {
 		return s[:maxString] + "..."
+	}
+	return s
+}
+
+func cutLine(s string) string {
+	if len(s) > maxLine {
+		return s[:maxLine] + "..."
 	}
 	return s
 }
@@ -38,14 +47,14 @@ type Log struct {
 func (l *Log) Printf(format string, args ...any) {
 	dropped, allow, last := l.allow()
 	if dropped > 0 {
-		log.Printf("%s%d lines suppressed", l.prefix(), dropped)
+		log.Print(cutLine(fmt.Sprintf("%s%d lines suppressed", l.prefix(), dropped)))
 	}
 	if allow {
-		log.Printf(format, args...)
+		log.Print(cutLine(fmt.Sprintf(format, args...)))
 	}
 	if last {
-		log.Printf("%s%d lines this run; nothing a peer does is logged again"+
-			" until a restart", l.prefix(), total)
+		log.Print(cutLine(fmt.Sprintf("%s%d lines this run; nothing a peer does is"+
+			" logged again until a restart", l.prefix(), total)))
 	}
 }
 

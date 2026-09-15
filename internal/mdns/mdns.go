@@ -32,9 +32,12 @@ const (
 	ttlShared = 4500
 	ttlHost   = 120
 
-	goodbyeGap = time.Second
+	goodbyeGap   = time.Second
+	goodbyeWrite = 2 * time.Second
+	addressPoll  = 30 * time.Second
 
-	addressPoll = 30 * time.Second
+	announceFirst = time.Second
+	announceRungs = 6
 
 	multicastEvery = time.Second
 
@@ -57,6 +60,7 @@ type Advert struct {
 type answer struct {
 	adverts []served
 	host    bool
+	noHost  bool
 }
 
 type served struct {
@@ -71,6 +75,7 @@ type Responder struct {
 	Services []Advert
 
 	mu         sync.Mutex
+	services   []Advert
 	conn       *net.UDPConn
 	ip         net.IP
 	subnet     *net.IPNet
@@ -80,6 +85,8 @@ type Responder struct {
 	unicasts   int
 	sendFailed error
 	gone       bool
+	ladder     chan struct{}
+	rungs      []time.Duration
 }
 
 func (m *Responder) address() net.IP {
@@ -148,8 +155,77 @@ func (m *Responder) onLink(ip net.IP) bool {
 
 func (m *Responder) instanceFor(service string) string { return m.Instance + "." + service }
 
-func (m *Responder) adverts() []Advert { return m.Services }
-func (m *Responder) hostName() string  { return m.Instance + ".local." }
+func (m *Responder) adverts() []Advert {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.services == nil {
+		m.services = append([]Advert(nil), m.Services...)
+	}
+	return m.services
+}
+
+func (m *Responder) Advertise(list []Advert) error {
+	if err := m.checkAdverts(list); err != nil {
+		return err
+	}
+	was := m.adverts()
+
+	m.mu.Lock()
+	m.services = append([]Advert(nil), list...)
+	conn, gone := m.conn, m.gone
+	m.mu.Unlock()
+
+	if conn == nil || gone {
+		return nil
+	}
+	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
+	if dropped := missingFrom(was, list); len(dropped) > 0 {
+		m.stopLadder()
+		if payload := m.withdrawal(dropped); payload != nil {
+			for i := 0; i < 2; i++ {
+				if i > 0 {
+					time.Sleep(goodbyeGap)
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(goodbyeWrite))
+				err := m.writeTo(conn, payload, group)
+				_ = conn.SetWriteDeadline(time.Time{})
+				if err != nil {
+					break
+				}
+			}
+		}
+	}
+	if len(missingFrom(list, was)) > 0 {
+		return m.announce(conn, group)
+	}
+	return nil
+}
+
+func (m *Responder) withdrawal(dropped []Advert) []byte {
+	send := answer{adverts: make([]served, 0, len(dropped)), noHost: true}
+	for _, a := range dropped {
+		send.adverts = append(send.adverts, served{Advert: a, ptr: true, resolve: true})
+	}
+	return m.recordsFor(0, send)
+}
+
+func missingFrom(from, in []Advert) []Advert {
+	var out []Advert
+	for _, a := range from {
+		found := false
+		for _, b := range in {
+			if strings.EqualFold(a.Service, b.Service) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+func (m *Responder) hostName() string { return m.Instance + ".local." }
 
 func (m *Responder) Run() {
 	if err := m.checkRecords(); err != nil {
@@ -364,22 +440,79 @@ func (m *Responder) replyTo(src, group *net.UDPAddr, packet []byte) (*net.UDPAdd
 }
 
 func (m *Responder) announce(conn *net.UDPConn, group *net.UDPAddr) error {
-	for i := 0; i < 2; i++ {
-		payload := m.records(ttlShared)
-
-		m.mu.Lock()
-		gone := m.gone
-		m.lastSent = time.Now()
-		m.mu.Unlock()
-		if gone {
-			return nil
-		}
-		if err := m.writeTo(conn, payload, group); err != nil {
-			return err
-		}
-		time.Sleep(time.Second)
+	if err := m.announceOnce(conn, group); err != nil {
+		return err
 	}
+	m.startLadder(conn, group)
 	return nil
+}
+
+func (m *Responder) announceOnce(conn *net.UDPConn, group *net.UDPAddr) error {
+	payload := m.records(ttlShared)
+
+	m.mu.Lock()
+	gone := m.gone
+	m.lastSent = time.Now()
+	m.mu.Unlock()
+	if gone {
+		return nil
+	}
+	return m.writeTo(conn, payload, group)
+}
+
+func (m *Responder) announceSchedule() []time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rungs != nil {
+		return append([]time.Duration(nil), m.rungs...)
+	}
+	out := make([]time.Duration, 0, announceRungs)
+	for d := announceFirst; len(out) < announceRungs; d *= 2 {
+		out = append(out, d)
+	}
+	return out
+}
+
+func (m *Responder) startLadder(conn *net.UDPConn, group *net.UDPAddr) {
+	schedule := m.announceSchedule()
+	stop := make(chan struct{})
+
+	m.mu.Lock()
+	if m.ladder != nil {
+		close(m.ladder)
+	}
+	m.ladder = stop
+	m.mu.Unlock()
+
+	go func() {
+		for _, d := range schedule {
+			select {
+			case <-stop:
+				return
+			case <-time.After(d):
+			}
+			m.mu.Lock()
+			moved := m.conn != conn
+			gone := m.gone
+			m.mu.Unlock()
+			if moved || gone {
+				return
+			}
+			if err := m.announceOnce(conn, group); err != nil {
+				m.noteSendFailure(err)
+				return
+			}
+		}
+	}()
+}
+
+func (m *Responder) stopLadder() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ladder != nil {
+		close(m.ladder)
+		m.ladder = nil
+	}
 }
 
 func (m *Responder) watchAddress(conn *net.UDPConn, done <-chan struct{}) {
@@ -599,7 +732,7 @@ func (m *Responder) recordsFor(ttl uint32, send answer) []byte {
 			err = serviceRecords(i, a)
 		}
 	}
-	if err == nil && !send.host {
+	if err == nil && !send.host && !send.noHost {
 		err = aRecord()
 	}
 	if err != nil {
@@ -634,11 +767,13 @@ func validName(name string) error {
 	return nil
 }
 
-func (m *Responder) checkRecords() error {
-	if len(m.Services) == 0 {
+func (m *Responder) checkRecords() error { return m.checkAdverts(m.adverts()) }
+
+func (m *Responder) checkAdverts(list []Advert) error {
+	if len(list) == 0 {
 		return fmt.Errorf("%w: none were given", errNoRecords)
 	}
-	for _, a := range m.Services {
+	for _, a := range list {
 		if a.Service == "" || len(a.Records) == 0 || a.Port == 0 {
 			return fmt.Errorf("%w: %q", errNoRecords, a.Service)
 		}
@@ -647,7 +782,7 @@ func (m *Responder) checkRecords() error {
 		return fmt.Errorf("%w: host %w", errUnbuildable, err)
 	}
 	seen := map[string]bool{}
-	for _, a := range m.Services {
+	for _, a := range list {
 		if err := validName(a.Service); err != nil {
 			return fmt.Errorf("%w: %w", errUnbuildable, err)
 		}
@@ -666,7 +801,11 @@ func (m *Responder) checkRecords() error {
 			}
 		}
 	}
-	if m.records(ttlShared) == nil {
+	dry := answer{adverts: make([]served, 0, len(list)), host: true}
+	for _, a := range list {
+		dry.adverts = append(dry.adverts, served{Advert: a, ptr: true, resolve: true})
+	}
+	if m.recordsFor(ttlShared, dry) == nil {
 		return fmt.Errorf("%w: nothing this responder carries can be packed", errUnbuildable)
 	}
 	return nil
@@ -697,7 +836,7 @@ func (m *Responder) Goodbye() {
 		if i > 0 {
 			time.Sleep(goodbyeGap)
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetWriteDeadline(time.Now().Add(goodbyeWrite))
 		if err := m.writeTo(conn, payload, group); err != nil {
 			return
 		}

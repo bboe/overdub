@@ -147,9 +147,9 @@ INPUT -n -v | grep 6053` shows a packet counter, which separates "the device
 dropped it" from "the network did".
 
 `AllowTCP` checks and then appends, which is two calls and not one. One port
-needed no lock. With the adb select there are two, reached from the sensor poll
-and from the adb worker, and two arriving together both find their rule absent
-and both append it. The `-D` that closes a port removes one copy, so the chain
+needed no lock. There are now three, reached from the sensor poll, the adb worker
+and the Sendspin switch's own worker, and two arriving together both find their
+rule absent and both append it. The `-D` that closes a port removes one copy, so the chain
 keeps an ACCEPT nothing will ever delete for a port the select truthfully
 reports as closed. The chain is not ours alone either, so nothing tidies it up
 later. One mutex over both mutations is the whole fix.
@@ -160,6 +160,16 @@ that loop is iptables' own refusal, so it is bounded at sixteen passes as well:
 an iptables that answered 0 for a delete that removed nothing would spin there
 holding the chain mutex, which stops `tcp/6053` being re-asserted and takes the
 API away at netd's next rebuild. Sixteen is far past any real duplicate.
+
+`tcp/8928` is the same case as 6053 and is opened the same way, with one ordering
+rule of its own: the rule goes in **after** the listener binds. The API's rule does
+not follow that order, because `esphome.Server.Listen` binds and serves in one
+call, and it cannot matter there: a failed bind exits the daemon, so the rule it
+left behind is not re-asserted and netd's next rebuild takes it. A rule for a port
+nothing listens on is re-asserted every thirty seconds for the rest of the boot and
+removed by nothing, so a Dot that could not read its key or could not bind would
+otherwise hold an ACCEPT open for a port that answers nobody -- the same shape as
+the duplicate-ACCEPT hazard above, arrived at from the other direction.
 
 `-w` on this iptables takes no seconds argument: it waits for the xtables lock
 for as long as it takes, and netd holds that lock constantly. Ten seconds, so a
@@ -183,13 +193,43 @@ Measured on a cold boot: the daemon logged `waiting for wlan0 to appear` and
 waited 15 seconds, then added its rule, which was gone by 49 seconds and back by
 64. Setup that depends on the network must wait or re-assert, never run once.
 
+Measured again with `tcp/8928` alongside it, because a second port is a second
+chance to get this wrong.
+The daemon waited 9 seconds for `wlan0`, another 10 for an address, and had both
+rules; at ~40 seconds the `8928` rule was **gone** and Music Assistant could not
+connect; by 67 seconds it was back with a SYN counted against it, and the session
+came up. The thirty-second re-assert is what closes that window, and it closes it
+for whichever port is handed to it.
+
+The re-assert alone does not close the gap a peer meets in between, because it
+only fires on a tick. Measured across a reboot, in uptime rather than wall clock:
+the rule was added at 25 seconds, gone by 30, still gone at 52, and back at 57 --
+and the mDNS announcement went out at 36, in the middle of it. The port was
+advertised and unreachable at the same time, and a client that acted on that
+announcement was dropped with nothing logged, because the SYN never reached
+userspace. What closes it is asserting the rule once more immediately before
+announcing, so the announcement cannot be the thing that falls in the hole;
+docs/sendspin.md carries the ordering.
+
+Nothing the responder can send fixes that for a peer that already knows the
+records, because a repeated announcement carrying the same data is a refresh
+rather than news. Recovery is the client's own retry, and how long it is willing
+to retry is the whole story: Home Assistant reconnects on a timer and never showed
+this; Music Assistant gives up permanently after about eight and a half minutes,
+measured on a Dot by counting its SYNs against this very rule. docs/sendspin.md
+carries what the advert does about that, and docs/mdns.md what the announcement
+ladder is and is not for.
+
 **A log line is an unauthenticated write to `/data`.** Every line the API logs
 is there because a peer did something, and `%q` renders a frame of `\xff` as
 four times its size on one line: measured, one `HelloRequest` wrote 131,207
 bytes. The log is truncated at boot and every twentieth restart, and a peer
 writing to it never makes the daemon exit, so neither truncation arrives. Peer
-strings are cut to 64 bytes and an ellipsis before they are quoted, and peer
-lines are limited twice over: 20 a minute, and 5,000 for the run.
+strings are cut to 64 bytes and an ellipsis before they are quoted, every line is
+truncated at 512 bytes whatever the call site passed -- peer bytes arrive inside
+errors as well as as strings, and an error formatted with `%v` was never cut by
+anything -- and peer lines are limited twice over besides: 20 a minute, and 5,000
+for the run.
 `internal/untrustedlog` holds the rule, so a second peer-facing subsystem
 cannot keep its own copy of these numbers and drift from them. It does not hold
 one budget between them: the counters live per `Log`, so a second subsystem

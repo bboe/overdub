@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1446,5 +1447,382 @@ func TestAnUnusableNameIsNamedInTheError(t *testing.T) {
 					err, c.says)
 			}
 		})
+	}
+}
+
+func TestAdvertiseRefusesAListItCannotPack(t *testing.T) {
+	// A runtime change is held to the rules a construction-time one is, and against
+	// the list being offered rather than the list in force.
+	m := &Responder{Instance: "kitchen", Services: []Advert{
+		{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"a=1"}},
+	}}
+	for _, c := range []struct {
+		name string
+		list []Advert
+	}{
+		{"empty", nil},
+		{"no records", []Advert{{Service: "_x._tcp.local.", Port: 1}}},
+		{"no port", []Advert{{Service: "_x._tcp.local.", Records: []string{"a=1"}}}},
+		{"twice", []Advert{
+			{Service: "_x._tcp.local.", Port: 1, Records: []string{"a=1"}},
+			{Service: "_x._tcp.local.", Port: 2, Records: []string{"a=1"}},
+		}},
+		{"unpackable name", []Advert{
+			{Service: strings.Repeat("x", 70) + ".local.", Port: 1, Records: []string{"a=1"}},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := m.Advertise(c.list); err == nil {
+				t.Error("accepted a list it cannot advertise")
+			}
+		})
+	}
+	// And the list in force is untouched by a refusal.
+	if got := m.adverts(); len(got) != 1 || got[0].Port != 6053 {
+		t.Errorf("a refused change altered what is advertised: %v", got)
+	}
+}
+
+func TestAdvertiseReplacesWhatIsAnswered(t *testing.T) {
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"a=1"}}
+	sendspin := Advert{Service: "_sendspin._tcp.local.", Port: 8928, Records: []string{"path=/s"}}
+	m := &Responder{Instance: "kitchen", Services: []Advert{esphome, sendspin}}
+
+	if got := len(m.adverts()); got != 2 {
+		t.Fatalf("started with %d services, want 2", got)
+	}
+	if err := m.Advertise([]Advert{esphome}); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	got := m.adverts()
+	if len(got) != 1 || got[0].Service != esphome.Service {
+		t.Fatalf("after withdrawing, services = %v", got)
+	}
+	// Nothing answers for the withdrawn service any more.
+	if bytes.Contains(m.records(ttlShared), []byte("sendspin")) {
+		t.Error("the records still name the withdrawn service")
+	}
+	if err := m.Advertise([]Advert{esphome, sendspin}); err != nil {
+		t.Fatalf("Advertise back: %v", err)
+	}
+	if !bytes.Contains(m.records(ttlShared), []byte("sendspin")) {
+		t.Error("the service did not come back")
+	}
+}
+
+func TestAdvertiseIsSafeWhileTheResponderReads(t *testing.T) {
+	// The serve loop builds records from the advertised list on every query, and the
+	// switch changes that list from whichever goroutine Home Assistant asked on.
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"a=1"}}
+	sendspin := Advert{Service: "_sendspin._tcp.local.", Port: 8928, Records: []string{"path=/s"}}
+	m := &Responder{Instance: "kitchen", Services: []Advert{esphome, sendspin}}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if m.records(ttlShared) == nil {
+				t.Error("the responder could not pack its records")
+				return
+			}
+		}
+	}()
+	for i := range 200 {
+		list := []Advert{esphome}
+		if i%2 == 0 {
+			list = append(list, sendspin)
+		}
+		if err := m.Advertise(list); err != nil {
+			t.Fatalf("Advertise: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func TestWithdrawingOneServiceLeavesTheSocketWritable(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"mac=x"}}
+	sendspin := Advert{Service: "_sendspin._tcp.local.", Port: 8928, Records: []string{"path=/sendspin"}}
+	m := &Responder{Instance: "kitchen", Iface: "lo", Services: []Advert{esphome, sendspin}}
+	m.ip = net.IPv4(192, 0, 2, 7)
+	m.conn = conn
+
+	if err := m.Advertise([]Advert{esphome}); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	// Wait past the window the goodbye set, so a deadline left behind has expired.
+	time.Sleep(goodbyeWrite + 100*time.Millisecond)
+
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: conn.LocalAddr().(*net.UDPAddr).Port}
+	if err := m.writeTo(conn, []byte{0}, dst); err != nil {
+		t.Errorf("a reply after a withdrawal failed, so the responder has gone mute: %v", err)
+	}
+}
+
+func TestWithdrawingOneServiceKeepsTheHostRecord(t *testing.T) {
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"mac=x"}}
+	sendspin := Advert{Service: "_sendspin._tcp.local.", Port: 8928, Records: []string{"path=/sendspin"}}
+	m := &Responder{Instance: "kitchen", Iface: "lo", Services: []Advert{esphome, sendspin}}
+	m.ip = net.IPv4(192, 0, 2, 7)
+
+	payload := m.withdrawal([]Advert{sendspin})
+	if payload == nil {
+		t.Fatal("no withdrawal packet was built")
+	}
+	for _, r := range walkRecords(t, payload) {
+		if r.rrType == dnsTypeA {
+			t.Errorf("the withdrawal carries %s A at ttl %d; the esphome service resolves through it",
+				r.name, r.ttl)
+		}
+	}
+}
+
+// ladderSetup gives a responder whose announcements land on a socket the test
+// reads, with a schedule short enough to watch.
+func ladderSetup(t *testing.T, rungs ...time.Duration) (*Responder, *net.UDPConn, *net.UDPAddr) {
+	t.Helper()
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sink.Close() })
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"mac=x"}}
+	sendspin := Advert{Service: "_sendspin._tcp.local.", Port: 8928, Records: []string{"path=/sendspin"}}
+	m := &Responder{Instance: "kitchen", Iface: "lo", Services: []Advert{esphome, sendspin}}
+	m.ip = net.IPv4(192, 0, 2, 7)
+	m.conn = conn
+	m.rungs = rungs
+	t.Cleanup(m.stopLadder)
+
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: sink.LocalAddr().(*net.UDPAddr).Port}
+	return m, sink, dst
+}
+
+func countPackets(t *testing.T, sink *net.UDPConn, within time.Duration) int {
+	t.Helper()
+	buffer := make([]byte, 9000)
+	seen := 0
+	deadline := time.Now().Add(within)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return seen
+		}
+		if err := sink.SetReadDeadline(time.Now().Add(left)); err != nil {
+			return seen
+		}
+		if _, _, err := sink.ReadFromUDP(buffer); err != nil {
+			return seen
+		}
+		seen++
+	}
+}
+
+func TestAnnouncementsRepeatAfterTheFirstPair(t *testing.T) {
+	// A rule this daemon adds can be discarded by netd seconds later, and the
+	// announcement goes out inside that window: measured on a cold boot, the rule
+	// was gone five seconds after the bind and back thirty seconds later, with the
+	// announcement at eleven. Two responses a second apart are all inside the hole,
+	// so a peer that acts on them is dropped and nothing tells it to try again.
+	// RFC 6762 section 8.3 allows up to eight, each gap twice the last.
+	m, sink, dst := ladderSetup(t, 20*time.Millisecond, 40*time.Millisecond, 80*time.Millisecond)
+
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := countPackets(t, sink, 500*time.Millisecond); got != 4 {
+		t.Errorf("announced %d times, want 4: one at once and one for each rung", got)
+	}
+}
+
+func TestAnnouncingDoesNotBlockItsCaller(t *testing.T) {
+	// The ladder spans a minute, and Advertise is called from the Sendspin switch
+	// while the daemon is still starting: the ESPHome API does not bind until it
+	// returns. Measured on a Dot, two sends a second apart put the API two seconds
+	// behind the Sendspin listener, so the rungs have to run on their own goroutine.
+	m, _, dst := ladderSetup(t, 5*time.Second)
+
+	start := time.Now()
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("announce held its caller for %v; the rungs belong on a goroutine", took)
+	}
+}
+
+func TestWithdrawingAServiceStopsTheLadderAnnouncingIt(t *testing.T) {
+	// A rung that fires after a withdrawal re-announces what was just retired at
+	// TTL 0, so switching Sendspin off would put its advert back up for the rest of
+	// the ladder while the port stayed closed.
+	m, sink, dst := ladderSetup(t, 50*time.Millisecond, 50*time.Millisecond)
+
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := countPackets(t, sink, 20*time.Millisecond); got != 1 {
+		t.Fatalf("the announcement itself did not arrive (%d packets)", got)
+	}
+
+	esphome := Advert{Service: "_esphomelib._tcp.local.", Port: 6053, Records: []string{"mac=x"}}
+	if err := m.Advertise([]Advert{esphome}); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	if got := countPackets(t, sink, 300*time.Millisecond); got != 0 {
+		t.Errorf("%d announcement(s) went out after the withdrawal", got)
+	}
+}
+
+func TestSayingGoodbyeStopsTheLadder(t *testing.T) {
+	// Same hazard at shutdown: Goodbye retires the whole device, and a rung behind
+	// it would announce the Dot back into every cache it had just left.
+	m, sink, dst := ladderSetup(t, 50*time.Millisecond, 50*time.Millisecond)
+
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := countPackets(t, sink, 20*time.Millisecond); got != 1 {
+		t.Fatalf("the announcement itself did not arrive (%d packets)", got)
+	}
+
+	m.Goodbye()
+	if got := countPackets(t, sink, 300*time.Millisecond); got != 0 {
+		t.Errorf("%d announcement(s) went out after the goodbye", got)
+	}
+}
+
+func TestTheLadderStopsWhenTheResponderDropsItsSocket(t *testing.T) {
+	// serve closes the socket and clears m.conn when the address changes or the
+	// responder stops. A rung behind that would write to a closed socket and record
+	// a send failure, which is what drives the restart, so the ladder follows the
+	// socket it was started on rather than outliving it.
+	m, sink, dst := ladderSetup(t, 50*time.Millisecond, 50*time.Millisecond)
+
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := countPackets(t, sink, 20*time.Millisecond); got != 1 {
+		t.Fatalf("the announcement itself did not arrive (%d packets)", got)
+	}
+
+	m.mu.Lock()
+	m.conn = nil
+	m.mu.Unlock()
+
+	if got := countPackets(t, sink, 300*time.Millisecond); got != 0 {
+		t.Errorf("%d announcement(s) went out after the socket was dropped", got)
+	}
+	m.mu.Lock()
+	failed := m.sendFailed
+	m.mu.Unlock()
+	if failed != nil {
+		t.Errorf("a rung recorded a send failure after the teardown: %v", failed)
+	}
+}
+
+func TestALadderOnASocketTheResponderDoesNotOwnStopsAtOnce(t *testing.T) {
+	// Advertise reads m.conn, and serve's teardown clears it and closes the socket
+	// afterwards, so an Advertise overlapping a teardown reaches announce holding a
+	// socket the responder has already let go of -- a full goodbyeGap later on the
+	// withdrawal path. Comparing against what m.conn was at the start would make the
+	// rungs unstoppable in exactly that case, so they compare against what it is.
+	m, sink, dst := ladderSetup(t, 50*time.Millisecond, 50*time.Millisecond)
+
+	conn := m.conn
+	m.mu.Lock()
+	m.conn = nil
+	m.mu.Unlock()
+
+	if err := m.announce(conn, dst); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if got := countPackets(t, sink, 20*time.Millisecond); got != 1 {
+		t.Fatalf("the announcement itself did not arrive (%d packets)", got)
+	}
+
+	if got := countPackets(t, sink, 300*time.Millisecond); got != 0 {
+		t.Errorf("%d rung(s) went out on a socket the responder no longer owns", got)
+	}
+	m.mu.Lock()
+	failed := m.sendFailed
+	m.mu.Unlock()
+	if failed != nil {
+		t.Errorf("a rung recorded a send failure the teardown caused: %v", failed)
+	}
+}
+
+func TestTheAnnouncementScheduleIsTheOneRFC6762Allows(t *testing.T) {
+	// Section 8.3 asks for at least two unsolicited responses a second apart and
+	// allows up to eight, each gap twice the last. None of that is visible in the
+	// constants alone, so a rung count or a multiplier changed by hand would still
+	// look deliberate.
+	schedule := (&Responder{}).announceSchedule()
+	if len(schedule) != announceRungs {
+		t.Fatalf("the schedule has %d rungs, want %d", len(schedule), announceRungs)
+	}
+	if len(schedule)+1 > 8 {
+		t.Errorf("%d responses counting the first, and section 8.3 allows eight",
+			len(schedule)+1)
+	}
+	if len(schedule)+1 < 2 {
+		t.Errorf("%d responses counting the first, and section 8.3 asks for two",
+			len(schedule)+1)
+	}
+	if schedule[0] < time.Second {
+		t.Errorf("the first gap is %v, and section 8.3 asks for a second", schedule[0])
+	}
+	for i := 1; i < len(schedule); i++ {
+		if schedule[i] != 2*schedule[i-1] {
+			t.Errorf("gap %d is %v against %v before it, want twice",
+				i, schedule[i], schedule[i-1])
+		}
+	}
+	var span time.Duration
+	for _, d := range schedule {
+		span += d
+	}
+	if span != 63*time.Second {
+		t.Errorf("the ladder spans %v, want 1m3s: the rungs are gaps rather than times,"+
+			" so they land at 1, 3, 7, 15, 31 and 63 seconds", span)
+	}
+}
+
+func TestASecondAnnouncementCancelsTheLadderTheFirstStarted(t *testing.T) {
+	// Advertise announces whenever the service list gains an entry, so two of them in
+	// a row is ordinary. A ladder left running by the second doubles every rung after
+	// it, and nothing else would say so: the packets are well formed and the rate
+	// limit does not govern announcements.
+	m, sink, dst := ladderSetup(t, 60*time.Millisecond, 60*time.Millisecond)
+
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("first announce: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := m.announce(m.conn, dst); err != nil {
+		t.Fatalf("second announce: %v", err)
+	}
+
+	if got := countPackets(t, sink, 400*time.Millisecond); got != 4 {
+		t.Errorf("%d packets went out, want 4: two announcements and the two rungs of"+
+			" the ladder that replaced the first", got)
 	}
 }

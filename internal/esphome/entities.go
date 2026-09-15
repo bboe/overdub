@@ -20,6 +20,8 @@ const (
 
 	buttonModeIcon = "mdi:gesture-tap-button"
 
+	sendspinIcon = "mdi:speaker-multiple"
+
 	adbIcon = "mdi:console-network"
 
 	commandIcon = "mdi:microphone-message"
@@ -167,6 +169,20 @@ func (s *Server) listEntities(conn *conn) error {
 	mic.boolean(7, false)
 	if err := s.send(conn, msgListSwitch, mic.b); err != nil {
 		return err
+	}
+
+	if s.sendspinOn != nil {
+		var sw pb
+		sw.str(1, "sendspin")
+		sw.fixed32(2, s.keySendspin)
+		sw.str(3, "Sendspin")
+		sw.str(5, sendspinIcon)
+		sw.boolean(6, false)
+		sw.boolean(7, false)
+		sw.u32(8, entityCategoryConfig)
+		if err := s.send(conn, msgListSwitch, sw.b); err != nil {
+			return err
+		}
 	}
 
 	for _, b := range s.buttons {

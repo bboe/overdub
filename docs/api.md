@@ -965,6 +965,37 @@ flight each, and the product has to fit a device with 512 MiB of RAM, of which
 so is the file they come from: the kernel writes `kB` and means KiB, which is
 why a reading of it is divided by 1024 rather than by 1000.
 
+**A switch that turns another surface off.** `switch.<name>_sendspin` is the one
+entity that changes something outside the API: it takes the whole Sendspin
+surface down, and docs/sendspin.md says what that means. Three things about it
+belong here.
+
+It is optional. `UseSendspin` is what creates it, so a Dot that could not read
+its Sendspin identity lists no such switch instead of listing one that cannot do
+anything. The Alexa command box is gated the same way; the network-adb select is
+not, because adb is always available and only its `Secure` option is conditional.
+
+Its setter must not block, and the reason is not politeness. Turning Sendspin off
+calls `iptables`, which waits on the xtables lock netd holds constantly, and the
+goroutine answering a `SwitchCommandRequest` is the one that reads every other
+frame from that connection. So the seam is a `func(bool)` that hands the request
+to a worker and returns, and the entity reports what the worker achieved rather
+than what it was asked for.
+
+It wakes `liveWake` when the worker is done, for the reason the microphone does.
+The reading is in `readLive`, which the poll takes on `HeavyEvery` ticks rather
+than every tick -- two and a half seconds, not the half second of `liveTick` --
+and the worker outlives that anyway, because `DenyTCP` waits on the xtables lock.
+Without the wake the switch would sit in its old state for seconds after the
+operator moved it, which reads as the control being broken.
+
+`UseSendspin` **writes** the two func fields without the server lock, the way the
+other `Use` methods do: it runs during wiring, before `Poll` and `Listen`, so no
+reader exists yet. The reads afterwards are all under the lock -- `listEntities`
+and the switch-command path hold it, and `readLive` is the one exception. What
+must not happen is taking the lock to read them from inside the command path,
+which already holds it: that deadlocks, and the suite hangs rather than failing.
+
 ## Discovery
 
 Home Assistant finds the Dot over mDNS. The responder is `internal/mdns`, which

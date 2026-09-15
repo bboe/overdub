@@ -22,10 +22,19 @@ docs/audio.md says what that costs and why the target is not optional.
 
 **A flag has to earn its place.** One flag, `-name`, the one thing that cannot
 be defaulted. Every other fact about biscuit is a `const`, in `serve.go` or
-beside the code that needs it, and the one conditional thing is read from the
-filesystem: the key at `noiseKeyPath`. A flag whose only correct value is
-already known, or that restates whether a file exists, is configuration that can
-be got wrong for no gain.
+beside the code that needs it, and the conditional things are read from the
+filesystem: the ESPHome key at `noiseKeyPath`, and the Sendspin identity at
+`sendspinKeyPath`, which the daemon creates on first run when it is not there.
+A flag whose only correct value is already known, or that restates whether a file
+exists, is configuration that can be got wrong for no gain.
+
+One thing is read from neither: `persist.overdub.sendspin`, which the Sendspin
+switch writes, because what sets it is Home Assistant rather than an install and
+it has to outlive a reboot. It is not a flag for the same reason the rest are
+not. Nobody has to get it right at install time, and a Dot whose property was
+never written starts with Sendspin on, so the default is the absence of a
+decision rather than a second place to record one. docs/device.md carries the
+mechanism.
 
 `-version` is the exception, and it earns its place from the release rather than
 from the daemon: it asks the binary what it is instead of telling it what to do.

@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestInputRule(t *testing.T) {
@@ -90,5 +92,59 @@ func TestAllowTCPAppendsOnlyWhenTheRuleIsMissing(t *testing.T) {
 	if appends != 1 {
 		t.Errorf("appended the rule %d times over 5 calls, want 1: the INPUT chain "+
 			"grows a duplicate on every re-assert", appends)
+	}
+}
+
+func TestHoldTCPOpenAddsNothingAfterItIsToldToStop(t *testing.T) {
+	was := iptablesRun
+	defer func() { iptablesRun = was }()
+
+	// One pass proves little: when done and the tick are both ready, select picks
+	// uniformly, so a re-assert that ignores done survives half the time. Repeat
+	// until surviving every pass is not luck.
+	const passes = 12
+	for pass := 0; pass < passes; pass++ {
+		var mu sync.Mutex
+		var appended int
+		done := make(chan struct{})
+		iptablesRun = func(args ...string) ([]byte, error) {
+			mu.Lock()
+			if args[0] == "-A" {
+				appended++
+			}
+			mu.Unlock()
+			// A rule that is absent, so every tick appends.
+			if args[0] == "-C" {
+				return nil, exitWith(t, 1)
+			}
+			// Stop while this call is in flight, so a tick is already buffered.
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+			time.Sleep(20 * time.Millisecond)
+			return nil, nil
+		}
+
+		stopped := make(chan struct{})
+		go func() { defer close(stopped); HoldTCPOpen(8928, time.Millisecond, done) }()
+		<-stopped
+
+		mu.Lock()
+		after := appended
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		extra := appended - after
+		mu.Unlock()
+		if extra != 0 {
+			t.Fatalf("pass %d: appended %d rules after returning: a delete taken now would be undone",
+				pass, extra)
+		}
+		if after > 1 {
+			t.Fatalf("pass %d: appended %d times, want at most 1: a buffered tick was taken after done closed",
+				pass, after)
+		}
 	}
 }

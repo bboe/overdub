@@ -6,6 +6,7 @@ package device
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -349,5 +350,41 @@ func WaitForMAC(iface string, limit time.Duration) string {
 			logged = true
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+func HasIPv4(iface string) bool {
+	nic, err := net.InterfaceByName(iface)
+	if err != nil {
+		return false
+	}
+	addrs, err := nic.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok {
+			if ip4 := ipnet.IP.To4(); ip4 != nil && !ip4.IsLoopback() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func WaitForIPv4(iface string, limit time.Duration, stop <-chan struct{}) bool {
+	deadline := time.Now().Add(limit)
+	for {
+		if HasIPv4(iface) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-stop:
+			return false
+		case <-time.After(time.Second):
+		}
 	}
 }

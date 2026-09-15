@@ -18,8 +18,10 @@ gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
 go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ \
-        ./internal/untrustedlog/                  # -race has no arm build
+        ./internal/sendspin/ ./internal/untrustedlog/   # -race has no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
+SENDSPIN_INTEROP=1 go test -run Interop ./internal/sendspin/  # vs the reference
+        server; needs uv, and CI runs it in a job of its own
 ```
 
 Tests cover what is hand-rolled and checkable in isolation: the wire formats,
@@ -41,12 +43,16 @@ internal/button    the exclusive grab, the clone, the read loop, whether the
                    action key is ours or Alexa's, and the volume keys pressed
                    on request
 internal/device    the Dot itself: its network, the firewall rule, network
-                   adb, and the microphone mute
+                   adb, the microphone mute, and a setting that survives a
+                   reboot
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
                    the advert Home Assistant finds the Dot by
 internal/evdev     evdev and uinput primitives
 internal/mdns      the mDNS responder, answering for every service the Dot
                    offers; it knows nothing about any of them
+internal/sendspin  the Sendspin client: the WebSocket a server arrives over,
+                   the identity and its key file, the Noise KKpsk2 transport,
+                   what it declares and what a server may activate
 internal/untrustedlog
                    what a peer may spend making this daemon write to /data
 ```
@@ -90,11 +96,12 @@ evening.
 | change what a key press does -- the grab, the clone, the modes, the gestures | `docs/button.md` |
 | add or change an entity, or touch the polls, the deadlines, or the key | `docs/api.md` |
 | touch the mDNS responder, or what a service advertises | `docs/mdns.md` |
-| turn on network adb, or touch the microphone mute | `docs/device.md` |
+| turn on network adb, touch the microphone mute, or persist a setting | `docs/device.md` |
 | make a sound, or play one | `docs/audio.md` |
 | change `install.sh`, `uninstall.sh`, or the boot script | `docs/deployment.md` |
 | touch the Alexa command path, the credential, or MapDump | `docs/command.md` |
 | run anything against the real device | `docs/hardware.md` |
+| touch the Sendspin client, its WebSocket, or its handshake | `docs/sendspin.md` |
 
 @docs/constraints.md
 @docs/pitfalls.md

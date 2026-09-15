@@ -164,8 +164,9 @@ a daemon that exits immediately, if it had no key for example, would otherwise
 append a failure every five seconds for the rest of the boot. Counted rather
 than measured: this toolbox has no `wc`.
 
-`deploy/uninstall.sh` reverses that, key included. The boot script goes first and
-alone,
+`deploy/uninstall.sh` reverses that, both keys included: the ESPHome key and the
+Sendspin identity, each named in the sweep that decides whether the uninstall
+succeeded as well as in the removal. The boot script goes first and alone,
 because it is the only thing that starts the daemon at boot: a reboot part way
 through then leaves a Dot with nothing running rather than a supervisor
 respawning a half-deleted install.
@@ -207,18 +208,28 @@ handler being used rather than needed. The state is read back afterwards for the
 reason install.sh reads its own back: `adb shell` exits 0 whatever happened
 remotely.
 
-The tcp/6053 rule goes last, and after the daemon is confirmed dead rather than
-before: the daemon re-asserts that rule every thirty seconds, so a deletion
-taken earlier would be undone before the next line of the script ran. It is
-deleted in a loop, because the chain is not ours alone and one pass proves
-nothing, and then read back. A rule left behind is reported rather than failed
-on: nothing listens behind it once the daemon is gone, and it does not survive a
-reboot in any case.
+The firewall rules go last, and after the daemon is confirmed dead rather than
+before. There are two, `tcp/6053` and `tcp/8928`, and the script loops over them.
+The daemon re-asserts `tcp/6053` every thirty seconds, and `tcp/8928` only while
+Sendspin is switched on, so a deletion taken earlier would be undone before the
+next line of the script ran. Each is deleted in a loop,
+because the chain is not ours alone and one pass proves nothing, and then read
+back. A rule left behind is reported rather than failed on: nothing listens behind
+it once the daemon is gone, and it does not survive a reboot in any case.
 
-The port is a `const` in `serve.go` and a literal in the script, because shell
-cannot read a Go constant. A test compares the two: left to the read-back alone,
-a port that moved would surface as a rule that would not delete, which says
-nothing about why.
+`persist.overdub.sendspin` goes with them. It is the one thing an uninstall leaves
+behind that would change what the *next* install does: a Dot switched off through
+Home Assistant would come back switched off, with nothing on disk to say why. The
+script clears the property, removes its file under `/data/property`, and reads it
+back; a value that survives is reported rather than failed on, because it decides
+nothing until something is installed again.
+
+The ports are Go constants -- `apiPort` in `serve.go` and `sendspin.Port` -- and
+shell cannot read either, so the script assigns them to variables of its own. A
+test resolves the variables the script's loop iterates and compares the result
+against both constants, rather than matching one literal rule: left to the
+read-back alone, a port that moved would surface as a rule that would not delete,
+which says nothing about why.
 
 **`/data/local/bin` is chosen, not conventional.** No such directory exists on a
 stock device, and every alternative is unavailable: Android has no `/usr`, `/` is
