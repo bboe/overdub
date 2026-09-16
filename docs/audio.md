@@ -54,21 +54,105 @@ stock here, so a native binary -- or cgo inside the daemon -- can create a track
 like any app. Measured, ours plays cleanly while device 23 stays `RUNNING`
 throughout and Alexa's stream is undisturbed.
 
-There can be one player. The OpenSL ES engine, the player and the buffer queue
-are C globals, so a second `Chime` would overwrite the first's handles, and
-closing either would then destroy the other's player and free PCM its queue
-still points into. `NewChime` refuses the second rather than documenting the
-rule, and `Close` is safe to call twice, because the caller's signal handler and
-its defer can both reach it.
+There can be one player. The OpenSL ES engine, the player, the buffer queue and
+the pool written into it are C globals, so a second `Chime` would overwrite the
+first's handles, and closing either would then destroy the other's player and
+leave its writes landing in a pool nothing is playing from. `NewChime` refuses
+the second rather than documenting the rule, and `Close` is safe to call twice,
+because the caller's signal handler and its defer can both reach it.
 
-`audio_init` unwinds what it built; `Play` does not, so a failed enqueue costs
-one chime rather than every chime after it. The whole clip is queued at once
-rather than refilled by a callback, so it has to fit the queue, and that is
-checked before the player is built rather than truncated at the enqueue -- a
-chime that outgrew the queue would otherwise play its first half for ever.
-`SLAndroidConfigurationItf` is asked for and not required: it only sets the
-stream type, so a ROM without it still chimes rather than leaving the daemon
-permanently silent.
+`audio_open` unwinds what it built; the writes do not, so a failed enqueue costs
+one chime rather than every chime after it. `SLAndroidConfigurationItf` is asked
+for and not required: it only sets the stream type, so a ROM without it still
+chimes rather than leaving the daemon permanently silent.
+
+**The player is written to rather than handed a clip.** `audio_open(rate,
+channels)` builds it empty; `audio_write` copies up to one chunk into a pool of
+its own and enqueues that; `audio_start` sets it playing; `audio_reset` stops it,
+clears the queue and drops what was queued. A sound is reset, written, started,
+which is exactly the order the old single `audio_play` did those three things in,
+so the chime behaves as it did -- a second press restarts it rather than queueing
+a second copy behind the first.
+
+The copy is the point of the pool. OpenSL's queue holds the **pointer** it was
+given until the buffer has played, so whatever is enqueued has to outlive the
+sound; the clip was therefore allocated in C and freed only at `Close`. Copying
+at the write makes the caller's bytes ordinary Go memory that nothing outlives
+the call to, which is what lets a stream arriving over the network be written
+straight through later, and it retires the use-after-free named at the end of
+this page. Eight buffers of 16 KB is 128 KB, about 1.37 seconds at 48 kHz mono,
+and a write beyond that is refused rather than overwriting a buffer that is still
+playing: `GetState` reports how many are in flight, and a full queue takes
+nothing.
+
+The ceiling on a single sound did not move -- the chime is primed whole before it
+is started, so it still has to fit -- and it is still checked once, before the
+player is built, against `audio_capacity` rather than against a number written
+down twice. That check is worth keeping where it is: without it the daemon starts
+normally and every press fails instead, which is a line per press for a clip that
+was always too big. Measured by growing the chime to two seconds: the startup
+warning reads `the chime is 192000 bytes against a 131072 byte queue`, presses
+are silent as they were before, and nothing is logged per press.
+
+The feeder behind it is Go rather than cgo, so it is tested off the device. It
+refuses a player that takes nothing, and one that claims more bytes than it was
+offered, which would otherwise slice past the end of the clip. It is the
+**chime's** feeder: a full queue is a failure to it, because the chime is written
+in one go and has just cleared the queue itself, so there is nothing to wait for.
+A stream is the other case entirely -- a full queue is the ordinary state to wait
+out -- and it wants a loop paced by the clock rather than this one. Measured, with
+the probe above holding the queue full: feeding the chime into it fails with
+`the player took 0 bytes of the 38400 it was offered`, which is the feeder
+refusing to wait, correctly, in the one situation a stream is in constantly.
+
+A partial trailing frame is refused rather than padded or held: `audio_write`
+rounds down to whole frames and answers -1 when nothing whole is left. For the
+chime that is unreachable, and for a stream it says that splitting a frame across
+two writes is the caller's mistake rather than something the player will paper
+over.
+
+### What the queue does, measured rather than read
+
+The three things a stream will depend on had never run: the chime writes 38,400
+bytes into a 131,072-byte queue and resets before every sound, so it never fills
+the queue, never underruns, and never starts an already-playing player. A
+throwaway probe in the daemon exercised all three on a Dot, writing silence so
+that none of it made a sound.
+
+- **The refusal is exact.** The queue took 131,072 bytes and then refused, which
+  is `CHUNK * NUM_BUFFERS` to the byte, so `GetState`'s count means what the
+  arithmetic assumes.
+- **Buffers come back at the sample rate.** With the queue full, the wait for one
+  slot was 152-200 ms over four runs against the 170.7 ms a 16 KB buffer is worth
+  at 48 kHz mono. That is also the only rate feedback a writer gets.
+- **An underrun is not a stall.** After four seconds of silence the queue had
+  drained completely -- it refilled with the whole 131,072 bytes -- and a slot
+  freed up again 152 ms later with **no reset and no second start**. So a writer
+  that falls behind resumes by writing, which is what lets a stream be paced by
+  the clock rather than by restarts. Calling `audio_start` on a playing player
+  answers 0 and changes nothing.
+
+ALSA cannot confirm any of that, which is worth knowing before trying. Everything
+under `/proc/asound/card0/pcm23p/sub0/status` describes the HAL's own stream, not
+ours: after four idle seconds it still read `RUNNING` with `delay` at 2,752
+frames, and `hw_ptr` advanced at 48 kHz across the write either way, because
+AudioFlinger mixes our track into a stream that runs whether we feed it or not.
+The buffer queue is the only place our samples are visible.
+
+**One number in there is a warning for synchronised playback.** A 16 KB buffer is
+170 ms of audio, and the queue is the smallest unit anything here can observe or
+schedule against, so the write path as it stands cannot place a sound inside a
+window finer than one buffer. The plan's target is ±1 ms. Nothing needs to change
+while the chime is the only caller -- it is started, not scheduled -- but a
+stream that must start on a timestamp wants buffers of about ten milliseconds
+rather than a hundred and seventy, and that is a decision for the slice that
+schedules, made with this number in hand.
+
+`audio_reset` sets the pool back to its first slot, which is safe only because
+`Clear` on a stopped player releases the buffer the mixer was reading before it
+returns. That was not a property the old code needed: what it enqueued was the
+one immutable clip, so a pointer surviving `Clear` would still have read valid
+PCM. Now the next write copies over that buffer, so the ordering is load-bearing.
 
 "The chime" below says what the daemon does with that, and why the build
 target is `GOOS=android`.
@@ -145,7 +229,33 @@ identical.
 
 **Wait for the substream between trials.** Device 23 stays `RUNNING` for about
 ten and a half seconds after a sound, so a trial started inside that window
-measures nothing.
+measures nothing. Timed again here: `RUNNING` at 1, 3, 5, 7 and 9 seconds after a
+chime, `XRUN` by 11.
+
+**The Dot hums for that whole window, and it is not ours.** The amp stays powered
+while the substream is up, so a sound is followed by about ten seconds of audible
+noise floor. It is tempting to read that as something the daemon is doing --
+a track left playing with an empty queue, say -- and it is not: the stock volume
+up and down sounds do exactly the same thing, with no daemon involved. AudioFlinger's
+standby decides the window. Two things follow. Nothing here can shorten it, and
+`dmesg` is what separates it from the fault above, which sounds similar and is
+ours: ordinary playback leaves about one `mtk_pcm_I2S0dl1_pointer underflow` line
+per sound, at the moment it ends, rather than the flood that fills the ring
+buffer.
+
+**An injected press cannot be timed against the table above.** `sendevent` is one
+event per process, so the four that make a press and its release cost 235-322 ms
+of forks, measured -- an order of magnitude more than the sound is waiting for,
+and the key-down lands somewhere inside that window with nothing to say where.
+What the injection **can** do is compare two builds, since the overhead is the
+same for both: `/proc/timer_list`'s `now at` and the substream's `trigger_time`
+are both CLOCK_MONOTONIC, so the interval between them is one subtraction. Doing
+that across the change from a clip player to a written one, five trials each:
+93.8-122.2 ms before and 92.2-114.1 ms after, means 110.6 and 100.0. The spread
+inside either set is wider than the gap between them, so the reading is that
+writing the clip in chunks costs nothing measurable, and it is not a claim about
+what press-to-sound is -- that is the resident cgo row above, measured another
+way.
 
 ## The chime
 
@@ -211,7 +321,10 @@ like a bell.
 
 Generating it once costs 12.7ms on the Dot and 39.4KB held for the run.
 Generating it per press would spend that 12.7ms inside the 33ms budget, which is
-most of what the change bought, and the buffer queue holds a *pointer* into the
-PCM rather than a copy -- so a clip regenerated under a second press is a
-use-after-free rather than a slow chime. The 39.4KB is 0.008% of what this device
-has.
+most of what the change bought. The 39.4KB is 0.008% of what this device has, and
+it is held as Go memory now that the player copies what it is written rather than
+keeping a pointer to it. The copy is not free, though: the pool it copies into is
+a 128KB static array, four times the clip and paged in as it is written, so the
+resident cost of making a sound is about 166KB rather than 39.4KB. Still 0.03% of
+the device, and it is what buys a clip that can be regenerated, or arrive over a
+network, without the queue holding a pointer into it.

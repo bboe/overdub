@@ -1,7 +1,9 @@
 package audio
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -60,4 +62,52 @@ func abs16(v int16) int {
 		return -int(v)
 	}
 	return int(v)
+}
+
+func TestFeedWritesEveryByteOnceAndInOrder(t *testing.T) {
+	clip := chimePCM()
+	var got []byte
+	err := feed(clip, func(pcm []byte) (int, error) {
+		n := min(4096, len(pcm))
+		got = append(got, pcm[:n]...)
+		return n, nil
+	})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if !bytes.Equal(got, clip) {
+		t.Errorf("the player was handed %d bytes of a %d byte clip, or handed them"+
+			" out of order", len(got), len(clip))
+	}
+}
+
+func TestFeedStopsWhenThePlayerTakesNothing(t *testing.T) {
+	calls := 0
+	err := feed(chimePCM(), func([]byte) (int, error) {
+		calls++
+		return 0, nil
+	})
+	if err == nil {
+		t.Fatal("a player taking nothing is a full queue the chime cannot wait out")
+	}
+	if calls != 1 {
+		t.Errorf("feed called the player %d times against a queue that took nothing,"+
+			" so it spins rather than reporting", calls)
+	}
+}
+
+func TestFeedRefusesAPlayerClaimingMoreThanItWasOffered(t *testing.T) {
+	err := feed(chimePCM(), func(pcm []byte) (int, error) {
+		return len(pcm) + 1, nil
+	})
+	if err == nil {
+		t.Error("a count past the end of the clip was believed, which slices out of range")
+	}
+}
+
+func TestFeedReportsWhatThePlayerReported(t *testing.T) {
+	want := errors.New("the player would not take the samples")
+	if err := feed(chimePCM(), func([]byte) (int, error) { return 0, want }); !errors.Is(err, want) {
+		t.Errorf("feed returned %v, want the player's own error", err)
+	}
 }

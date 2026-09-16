@@ -4,11 +4,14 @@
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
 
+#include <string.h>
+
 #define CHUNK 16384
 #define NUM_BUFFERS 8
 
-static const unsigned char *clip;
-static size_t clip_len;
+static unsigned char pool[NUM_BUFFERS][CHUNK];
+static int slot;
+static int frame_bytes;
 
 static SLObjectItf engine_obj, mix_obj, player_obj;
 static SLPlayItf player_play;
@@ -40,18 +43,14 @@ static SLuint32 milli_hz(int rate) {
 	}
 }
 
-int audio_init(const unsigned char *pcm, size_t len, int rate, int channels) {
+int audio_capacity(void) { return CHUNK * NUM_BUFFERS; }
+
+int audio_open(int rate, int channels) {
 	SLuint32 sl_rate = milli_hz(rate);
 	if (sl_rate == 0 || channels < 1 || channels > 2) return -1;
 
-	int frame_bytes = channels * 2;
-	size_t usable = len - (len % (size_t)frame_bytes);
-	if (usable == 0) return -1;
-
-	if (usable > (size_t)CHUNK * NUM_BUFFERS) return -1;
-
-	clip = pcm;
-	clip_len = usable;
+	frame_bytes = channels * 2;
+	slot = 0;
 
 	TRY_INIT(slCreateEngine(&engine_obj, 0, NULL, 0, NULL, NULL));
 	TRY_INIT((*engine_obj)->Realize(engine_obj, SL_BOOLEAN_FALSE));
@@ -90,15 +89,33 @@ int audio_init(const unsigned char *pcm, size_t len, int rate, int channels) {
 	return 0;
 }
 
-int audio_play(void) {
-	if (player_play == NULL) return -1;
+int audio_reset(void) {
+	if (player_play == NULL || player_queue == NULL) return -1;
 	TRY((*player_play)->SetPlayState(player_play, SL_PLAYSTATE_STOPPED));
 	TRY((*player_queue)->Clear(player_queue));
-	for (size_t off = 0; off < clip_len; off += CHUNK) {
-		size_t n = clip_len - off;
-		if (n > CHUNK) n = CHUNK;
-		TRY((*player_queue)->Enqueue(player_queue, clip + off, n));
-	}
+	slot = 0;
+	return 0;
+}
+
+int audio_write(const unsigned char *pcm, size_t len) {
+	if (player_queue == NULL) return -1;
+
+	SLAndroidSimpleBufferQueueState state;
+	TRY((*player_queue)->GetState(player_queue, &state));
+	if (state.count >= NUM_BUFFERS) return 0;
+
+	size_t n = len > CHUNK ? CHUNK : len;
+	n -= n % (size_t)frame_bytes;
+	if (n == 0) return -1;
+
+	memcpy(pool[slot], pcm, n);
+	TRY((*player_queue)->Enqueue(player_queue, pool[slot], n));
+	slot = (slot + 1) % NUM_BUFFERS;
+	return (int)n;
+}
+
+int audio_start(void) {
+	if (player_play == NULL) return -1;
 	TRY((*player_play)->SetPlayState(player_play, SL_PLAYSTATE_PLAYING));
 	return 0;
 }
@@ -121,6 +138,5 @@ void audio_close(void) {
 		(*engine_obj)->Destroy(engine_obj);
 		engine_obj = NULL;
 	}
-	clip = NULL;
-	clip_len = 0;
+	slot = 0;
 }
