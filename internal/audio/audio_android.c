@@ -6,7 +6,7 @@
 
 #include <string.h>
 
-#define CHUNK 16384
+#define CHUNK 960
 #define NUM_BUFFERS 8
 
 static unsigned char pool[NUM_BUFFERS][CHUNK];
@@ -42,8 +42,6 @@ static SLuint32 milli_hz(int rate) {
 	default: return 0;
 	}
 }
-
-int audio_capacity(void) { return CHUNK * NUM_BUFFERS; }
 
 int audio_open(int rate, int channels) {
 	SLuint32 sl_rate = milli_hz(rate);
@@ -86,14 +84,6 @@ int audio_open(int rate, int channels) {
 	TRY_INIT((*player_obj)->Realize(player_obj, SL_BOOLEAN_FALSE));
 	TRY_INIT((*player_obj)->GetInterface(player_obj, SL_IID_PLAY, &player_play));
 	TRY_INIT((*player_obj)->GetInterface(player_obj, SL_IID_BUFFERQUEUE, &player_queue));
-	return 0;
-}
-
-int audio_reset(void) {
-	if (player_play == NULL || player_queue == NULL) return -1;
-	TRY((*player_play)->SetPlayState(player_play, SL_PLAYSTATE_STOPPED));
-	TRY((*player_queue)->Clear(player_queue));
-	slot = 0;
 	return 0;
 }
 

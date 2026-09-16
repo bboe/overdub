@@ -1,9 +1,6 @@
 package audio
 
-import (
-	"fmt"
-	"math"
-)
+import "math"
 
 const (
 	ChimeRate     = 48000
@@ -57,19 +54,4 @@ func chimePCM() []byte {
 		buf[i*2+1] = byte(s >> 8)
 	}
 	return buf
-}
-
-func feed(pcm []byte, write func([]byte) (int, error)) error {
-	for len(pcm) > 0 {
-		n, err := write(pcm)
-		if err != nil {
-			return err
-		}
-		if n <= 0 || n > len(pcm) {
-			return fmt.Errorf("audio: the player took %d bytes of the %d it was offered",
-				n, len(pcm))
-		}
-		pcm = pcm[n:]
-	}
-	return nil
 }

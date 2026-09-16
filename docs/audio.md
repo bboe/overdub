@@ -66,50 +66,98 @@ one chime rather than every chime after it. `SLAndroidConfigurationItf` is asked
 for and not required: it only sets the stream type, so a ROM without it still
 chimes rather than leaving the daemon permanently silent.
 
-**The player is written to rather than handed a clip.** `audio_open(rate,
-channels)` builds it empty; `audio_write` copies up to one chunk into a pool of
-its own and enqueues that; `audio_start` sets it playing; `audio_reset` stops it,
-clears the queue and drops what was queued. A sound is reset, written, started,
-which is exactly the order the old single `audio_play` did those three things in,
-so the chime behaves as it did -- a second press restarts it rather than queueing
-a second copy behind the first.
+**The player is written to, and one writer owns it.** `audio_open(rate, channels)`
+builds it empty and it is started once, at open. A goroutine then mixes a block at
+a time and writes it: `audio_write` copies the block into a pool of its own and
+enqueues it. Sounds are added to the mixer rather than played -- the chime is a
+clip that gets rewound and re-added -- so a second press restarts it rather than
+stacking a second copy.
+
+There is no stop-and-clear any more. The player is started once and left playing,
+so a `reset` that set `SL_PLAYSTATE_STOPPED` would be a one-way door: nothing sets
+it playing again, every later `audio_write` still reports success, and the Dot is
+silent for the rest of the boot. That is a worse thing to leave lying in a header
+than to write again, so the slice that needs `stream/clear` adds a clear that ends
+playing, and measures it.
 
 The copy is the point of the pool. OpenSL's queue holds the **pointer** it was
 given until the buffer has played, so whatever is enqueued has to outlive the
-sound; the clip was therefore allocated in C and freed only at `Close`. Copying
-at the write makes the caller's bytes ordinary Go memory that nothing outlives
-the call to, which is what lets a stream arriving over the network be written
-straight through later, and it retires the use-after-free named at the end of
-this page. Eight buffers of 16 KB is 128 KB, about 1.37 seconds at 48 kHz mono,
-and a write beyond that is refused rather than overwriting a buffer that is still
-playing: `GetState` reports how many are in flight, and a full queue takes
-nothing.
+sound; the clip was therefore allocated in C and freed only at `Close`. Copying at
+the write makes the caller's bytes ordinary Go memory that nothing on the C side
+outlives the call to, which is what lets audio arriving over the network be
+written straight through. A write beyond what the queue holds is refused rather
+than overwriting a buffer that is still playing: `GetState` reports how many are
+in flight, and a full queue takes nothing.
 
-The ceiling on a single sound did not move -- the chime is primed whole before it
-is started, so it still has to fit -- and it is still checked once, before the
-player is built, against `audio_capacity` rather than against a number written
-down twice. That check is worth keeping where it is: without it the daemon starts
-normally and every press fails instead, which is a line per press for a clip that
-was always too big. Measured by growing the chime to two seconds: the startup
-warning reads `the chime is 192000 bytes against a 131072 byte queue`, presses
-are silent as they were before, and nothing is logged per press.
+**A block is ten milliseconds, and that is the number to think about.** 480
+frames, 960 bytes, one block to a buffer and eight buffers in the queue, so the
+player holds 80 ms and the writer has that long to come back with the next block.
+The queue is the smallest unit anything here can schedule against, so a stream
+that must start on a timestamp can place it no more finely than one buffer: at the
+16 KB this page used to describe, that quantum was 170 ms against a target of one
+millisecond. Ten costs nothing the driver notices, measured below, and the pool
+came down from 128 KB to 7.7 KB with it.
 
-The feeder behind it is Go rather than cgo, so it is tested off the device. It
-refuses a player that takes nothing, and one that claims more bytes than it was
-offered, which would otherwise slice past the end of the clip. It is the
-**chime's** feeder: a full queue is a failure to it, because the chime is written
-in one go and has just cleared the queue itself, so there is nothing to wait for.
-A stream is the other case entirely -- a full queue is the ordinary state to wait
-out -- and it wants a loop paced by the clock rather than this one. Measured, with
-the probe above holding the queue full: feeding the chime into it fails with
-`the player took 0 bytes of the 38400 it was offered`, which is the feeder
-refusing to wait, correctly, in the one situation a stream is in constantly.
+A full queue is the ordinary state rather than a failure, so the writer waits it
+out: a refused write is retried two milliseconds later, a fifth of a block and
+well inside the 80 ms the queue holds. **It waits for a second and then gives up**,
+which is the difference between a queue that is full and one that has stopped
+draining. The second happens -- a wedged track, an AudioFlinger restart, the
+driver state at the top of this page -- and it is the one failure with no signal
+of its own: an outright error gets the line below, but a refusal that never ends
+looks exactly like the ordinary case it is supposed to be. A second is twelve
+times the queue's own depth, so nothing healthy reaches it. A **short** write is the other thing it has
+to survive, and looping over what is left is what keeps the block size and the C
+chunk size from having to agree. They are both 960 bytes today, in two languages,
+with nothing tying them together: a block of 20 ms against a chunk of 10 would
+otherwise be written once, half-accepted, and read as a failure on the very first
+write of the run -- with the daemon starting cleanly and the Dot silent for the
+whole boot.
+
+That failure is worth a word on its own, because the writer is one goroutine and
+nothing restarts it. If a write is refused outright the writer stops, and it says
+so **once**, with the reason and the time, rather than leaving the next press to
+report it. Measured by making every write fail: one line reading `the writer
+stopped: audio_write would not take the block; the Dot is silent until the daemon
+restarts`, and three presses afterwards logged nothing at all. The alternative --
+a line per press for the rest of the boot, naming neither cause nor time -- is the
+shape this page argues against everywhere else.
+
+`Close` waits for the writer to stop before destroying the player, which is not
+the same as waiting for the sound to end: the writer goes idle as soon as the
+mixer is spent, while up to 80 ms is still queued behind it, and the player is
+then destroyed under those buffers. A sound in its last 80 ms when the daemon
+stops is cut off. That was true before there was a writer to wait for, and the
+wait is there so that nothing writes into a destroyed player rather than to drain
+one.
+
+**The writer stops when there is nothing to play.** An idle mixer reports no
+block, the goroutine waits on it, the queue drains, and the device reaches standby
+on its own schedule. Writing silence to keep the player fed would hold the amp
+awake for the life of the daemon, which is exactly what the hum further down makes
+expensive. Starting again needs nothing: a write after the queue has emptied
+resumes on its own, which is one of the measurements below.
+
+Nothing caps the length of a sound. A source is read a block at a time, so how
+long it runs is the mixer's business and never the queue's -- which is worth
+saying because the queue does cap what can be *outstanding*, and the two are easy
+to conflate.
+
+The mixing is Go rather than cgo, so it is tested off the device: summing,
+saturation at both ends of int16, a source that ends mid-block, a spent source
+being dropped so the writer can go idle, and a restart rewinding a sound rather
+than doubling it.
+
+The block a caller hands `next` sizes the work, rather than a constant it is
+assumed to match: the scratch buffer grows to it. A block is `BlockFrames` today
+because one writer asks for that, and the first caller to size a block from
+something else -- a server's idea of a chunk, say -- gets audio rather than the
+first ten milliseconds of it followed by silence.
 
 A partial trailing frame is refused rather than padded or held: `audio_write`
-rounds down to whole frames and answers -1 when nothing whole is left. For the
-chime that is unreachable, and for a stream it says that splitting a frame across
-two writes is the caller's mistake rather than something the player will paper
-over.
+rounds down to whole frames and answers -1 when nothing whole is left. Blocks are
+whole frames by construction, so this says that splitting a frame across two
+writes is the caller's mistake rather than something the player will paper over.
 
 ### What the queue does, measured rather than read
 
@@ -121,7 +169,8 @@ that none of it made a sound.
 
 - **The refusal is exact.** The queue took 131,072 bytes and then refused, which
   is `CHUNK * NUM_BUFFERS` to the byte, so `GetState`'s count means what the
-  arithmetic assumes.
+  arithmetic assumes. Measured against the 16 KB buffers of the time; the
+  arithmetic is the same at 960 bytes.
 - **Buffers come back at the sample rate.** With the queue full, the wait for one
   slot was 152-200 ms over four runs against the 170.7 ms a 16 KB buffer is worth
   at 48 kHz mono. That is also the only rate feedback a writer gets.
@@ -139,20 +188,36 @@ frames, and `hw_ptr` advanced at 48 kHz across the write either way, because
 AudioFlinger mixes our track into a stream that runs whether we feed it or not.
 The buffer queue is the only place our samples are visible.
 
-**One number in there is a warning for synchronised playback.** A 16 KB buffer is
-170 ms of audio, and the queue is the smallest unit anything here can observe or
-schedule against, so the write path as it stands cannot place a sound inside a
-window finer than one buffer. The plan's target is ±1 ms. Nothing needs to change
-while the chime is the only caller -- it is started, not scheduled -- but a
-stream that must start on a timestamp wants buffers of about ten milliseconds
-rather than a hundred and seventy, and that is a decision for the slice that
-schedules, made with this number in hand.
+**One number in there is why a buffer is now ten milliseconds.** A 16 KB buffer is
+170 ms of audio, and since the queue is the smallest unit anything can schedule
+against, that was the finest window a sound could be placed in, against a target
+of one millisecond. Shrinking it costs nothing the driver notices: five chimes at
+16 KB and five at 960 bytes produced 11 and 10 `underflow` lines in `dmesg`, which
+is one pair per chime either way, at the moment each ends. That is the ordinary
+end-of-playback line rather than a starved writer -- a goroutine feeding 10 ms
+blocks keeps up on this device, with 80 ms of queue behind it. Confirmed by ear as
+well as by counting, over many presses in a row: no stutter, no clipping where two
+chimes meet, and no late start.
 
-`audio_reset` sets the pool back to its first slot, which is safe only because
-`Clear` on a stopped player releases the buffer the mixer was reading before it
-returns. That was not a property the old code needed: what it enqueued was the
-one immutable clip, so a pointer surviving `Clear` would still have read valid
-PCM. Now the next write copies over that buffer, so the ordering is load-bearing.
+**Half a minute is the real test, though, and the chime is 400 ms of it.** A
+throwaway probe played a 30-second exponential sweep, 120 Hz to 6 kHz, as a mixer
+source: 3,000 blocks, **not one `underflow` line in `dmesg`**, and smooth by ear.
+A sweep rather than a tone for the reason two sections down, and the audible check
+matters as much as the count -- a 10 ms gap is far easier to hear than to find in
+a log.
+
+The number that says *why* it held is the write count: 12,897 attempts for 3,000
+blocks, so about three quarters of them were refused. The writer ran ahead, filled
+the queue, and spent the run waiting on a full one. Starving looks like the
+opposite -- every write accepted at once, because the queue always has room --
+with underflow pairs scattered through the run rather than absent. So the useful
+health check on this path is not "did anything fail" but "is the writer being
+refused", and a run where it never waits is a run to look at.
+
+Nothing resets the pool, so `slot` simply wraps: the safety is the refusal above
+and nothing else. A slot is reused only after `GetState` has reported fewer
+buffers in flight than the queue holds, and buffers complete in the order they
+were enqueued, so the slot coming up is always one the mixer has finished with.
 
 "The chime" below says what the daemon does with that, and why the build
 target is `GOOS=android`.
@@ -270,6 +335,15 @@ corrupts the codec stream and leaves the driver logging
 `mtk_pcm_I2S0dl1_pointer underflow` fast enough to empty the kernel ring buffer,
 until a reboot. Every sound on the device pops in that state.
 
+**The chime is a mixer source rather than the thing being played.** The daemon
+holds one player and one writer; a press rewinds the chime's clip and hands it to
+the mixer, which sums whatever is active into 10 ms blocks. With one source that
+is a copy, and the reason it is built that way is the second source: a stream has
+to be able to play through a press rather than be interrupted by it. A press no
+longer clears the queue, because the queue will not belong to the chime alone, so
+a second press inside the first chime hears up to 80 ms of it before the restart
+-- measured as the queue depth rather than heard.
+
 Handing a URL to Alexa's `SpeechSynthesizer` via `am startservice` was the route
 before this, and it worked. What it cost was 691ms from press to sound against
 33ms now, measured five trials each at the moment the codec substream goes
@@ -323,8 +397,7 @@ Generating it once costs 12.7ms on the Dot and 39.4KB held for the run.
 Generating it per press would spend that 12.7ms inside the 33ms budget, which is
 most of what the change bought. The 39.4KB is 0.008% of what this device has, and
 it is held as Go memory now that the player copies what it is written rather than
-keeping a pointer to it. The copy is not free, though: the pool it copies into is
-a 128KB static array, four times the clip and paged in as it is written, so the
-resident cost of making a sound is about 166KB rather than 39.4KB. Still 0.03% of
-the device, and it is what buys a clip that can be regenerated, or arrive over a
-network, without the queue holding a pointer into it.
+keeping a pointer to it. The pool it copies into is 8 x 960 bytes, so the resident
+cost of making a sound is about 47KB. What that buys is a clip that can be
+regenerated, or arrive over a network, without the queue holding a pointer into
+it.

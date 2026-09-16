@@ -8,9 +8,10 @@ import "C"
 
 import (
 	"errors"
-	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -18,7 +19,10 @@ var open atomic.Bool
 
 type Chime struct {
 	mu     sync.Mutex
-	clip   []byte
+	mix    *mixer
+	clip   *clip
+	stop   chan struct{}
+	done   chan struct{}
 	closed bool
 }
 
@@ -26,17 +30,23 @@ func NewChime() (*Chime, error) {
 	if !open.CompareAndSwap(false, true) {
 		return nil, errors.New("audio: a chime is already open, and the player is process-wide")
 	}
-	clip := chimePCM()
-	if capacity := int(C.audio_capacity()); len(clip) > capacity {
-		open.Store(false)
-		return nil, fmt.Errorf("audio: the chime is %d bytes against a %d byte queue,"+
-			" and it is played in one go", len(clip), capacity)
-	}
 	if C.audio_open(ChimeRate, ChimeChannels) != 0 {
 		open.Store(false)
 		return nil, errors.New("audio_open: OpenSL ES would not start")
 	}
-	return &Chime{clip: clip}, nil
+	if C.audio_start() != 0 {
+		C.audio_close()
+		open.Store(false)
+		return nil, errors.New("audio_start: the player would not start")
+	}
+	c := &Chime{
+		mix:  newMixer(),
+		clip: &clip{pcm: decode(chimePCM())},
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
+	go c.write()
+	return c, nil
 }
 
 func (c *Chime) Play() error {
@@ -45,33 +55,70 @@ func (c *Chime) Play() error {
 	if c.closed {
 		return errors.New("audio: play after close")
 	}
-	if C.audio_reset() != 0 {
-		return errors.New("audio_reset: the queue would not clear")
-	}
-	if err := feed(c.clip, writePCM); err != nil {
-		return err
-	}
-	if C.audio_start() != 0 {
-		return errors.New("audio_start: the player would not start")
-	}
+	c.mix.start(c.clip)
 	return nil
 }
 
-func writePCM(pcm []byte) (int, error) {
-	n := C.audio_write((*C.uchar)(unsafe.Pointer(&pcm[0])), C.size_t(len(pcm)))
-	if n < 0 {
-		return 0, errors.New("audio_write: the player would not take the samples")
+func (c *Chime) write() {
+	defer close(c.done)
+	block := make([]int16, BlockFrames)
+	buf := make([]byte, BlockBytes)
+	for {
+		if !c.mix.next(block) {
+			select {
+			case <-c.stop:
+				return
+			case <-c.mix.woke:
+				continue
+			}
+		}
+		encode(block, buf)
+		if !c.push(buf) {
+			return
+		}
 	}
-	return int(n), nil
+}
+
+func (c *Chime) push(buf []byte) bool {
+	err := writeAll(buf, writeChunk, c.waiting)
+	if err == nil {
+		return true
+	}
+	if !errors.Is(err, errStopping) {
+		log.Printf("audio: the writer stopped: %v; the Dot is silent until the daemon"+
+			" restarts", err)
+	}
+	return false
+}
+
+func writeChunk(buf []byte) (int, error) {
+	n := int(C.audio_write((*C.uchar)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+	if n < 0 {
+		return 0, errors.New("audio_write would not take the block")
+	}
+	return n, nil
+}
+
+func (c *Chime) waiting() bool {
+	select {
+	case <-c.stop:
+		return false
+	case <-time.After(writeWait):
+		return true
+	}
 }
 
 func (c *Chime) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	c.closed = true
+	close(c.stop)
+	c.mu.Unlock()
+
+	<-c.done
 	C.audio_close()
 	open.Store(false)
 }
