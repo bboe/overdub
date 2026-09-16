@@ -683,12 +683,164 @@ none of it is reachable; with two, the Dot will stay with whichever arrived firs
 rather than preferring the one that is playing. That is a real difference from the
 spec and it is a deliberate floor, not an oversight.
 
+## Keeping the clock
+
+Audio arrives stamped in the server's own monotonic clock, so the Dot has to
+hold a mapping between that clock and its own. `client/time` carries one number,
+the Dot's clock now; `server/time` answers with three -- that number echoed, when
+the server received it, and when it sent the answer. With the fourth taken
+locally on arrival, the four give one NTP-style measurement: an offset of
+`((T2-T1)+(T3-T4))/2` and an uncertainty of `((T4-T1)-(T3-T2))/2`, which is half
+the round trip and the most the offset can be wrong by. Everything is
+microseconds, and nothing here is epoch time: both ends are monotonic and only
+their difference means anything.
+
+The filter over those measurements is a **port of the reference one**, constants
+included -- a two-dimensional Kalman filter over offset and drift, with adaptive
+forgetting to recover from a disruption. It is not a choice: the spec makes the
+algorithm normative, because the server plans playback assuming the client's
+error behaves the way that filter's does. The C++ reference and `aiosendspin`'s
+`time_sync.py` agree line for line, and this is the third copy rather than a
+fourth design. Converged means what it means there: two measurements, and a
+covariance that is no longer infinite.
+
+The Dot's own clock is Go's monotonic reading, taken from a package-level start.
+`aiosendspin` prefers `CLOCK_MONOTONIC_RAW` and says why: NTP slewing poisons the
+filter, and Go's runtime clock is `CLOCK_MONOTONIC`, which is slewed. What that
+costs is bounded -- the kernel caps the correction at about 500 ppm and stops
+when it is done -- and it arrives as a rate error, which is the one shape this
+filter is built to track and to forget. A step never arrives at all: nothing that
+sets the wall clock moves a monotonic reading. So the exposure is a slow rate
+error during a correction, unmeasured on a Dot so far, and a raw clock is one
+syscall away if audio ever drifts audibly while one is running.
+
+### Asking, and how often
+
+The spec points at the time-filter library's burst baseline: eight exchanges
+back to back every ten seconds, keeping the one with the smallest uncertainty.
+It points rather than requires -- the words are "known-good baseline" -- which is
+why this is not a row in the skew table at the end of this page. `aiosendspin`
+does not do that. It sends one exchange at a time on an adaptive
+interval -- 200 ms until the filter converges, then 3 s, 1 s, 500 ms or 200 ms
+as the reported spread crosses 1, 2 and 5 ms -- and that is what this client
+does, for the reason the whole package follows the library: it is what Music
+Assistant actually runs against real players. Picking the best of a burst is a
+second filter in front of the filter, and the one behind it already weights each
+measurement by the uncertainty that would have done the picking.
+
+**One question is outstanding at a time.** The loop asks, waits for the answer or
+five seconds, then rests the interval and asks again. The transport is ordered,
+so a delayed exchange delays the next one anyway, and asking again before the
+answer arrives would only throw away the sample that is about to land.
+
+The answer is signalled over a one-deep channel, and asking **drains it first**.
+An answer landing after the five seconds are up -- late, but still matching the
+stamp -- leaves a token behind that nothing consumed. Without the drain the next
+question reads that token as its own answer, returns from the wait immediately
+and asks again, and the reply that was on its way then fails the echo check and
+is discarded. The exchange recovers a round trip later, having thrown away a
+measurement and having run two questions at once, which is exactly what the
+invariant above says it does not do.
+
+### What a server cannot talk this clock into
+
+Every one of these is a peer-supplied number reaching a filter that the audio
+path will later trust, so each is refused rather than absorbed, and each has a
+test that fails without it.
+
+- **An answer must echo the question.** A `server/time` whose `client_transmitted`
+  is not the stamp just sent is not a measurement. Without that check a server
+  that never answered anything can hand the Dot whatever offset it likes, at
+  whatever rate it likes.
+- **The same answer twice is one measurement.** The outstanding question is
+  cleared when it is answered, so a repeat lands on nothing. Otherwise one
+  exchange reaches the filter's two-measurement bar, and "converged" stops
+  meaning two independent round trips.
+- **The server's two stamps have to be on a clock.** Both are peer-supplied
+  int64s and every term of the two formulas is int64 arithmetic, where the
+  reference is Python and its integers do not wrap. `server_received` at
+  `MinInt64` with `server_transmitted` at `MaxInt64` makes their difference wrap
+  to **-1**, which turns the delay into a confident +1000 us and the offset into
+  nonsense -- the exact input the next bullet refuses, absorbed instead as the
+  best measurement of the session. Both stamps are therefore required to sit in
+  `[0, 2^50]`, which is about 35 years of microseconds, far past any monotonic
+  clock that will ever answer and far short of where any of these sums can
+  overflow.
+- **A reply cannot have been sent before the question arrived.** `server_transmitted`
+  below `server_received` is the mirror of the bullet after next, and it slips
+  past every check there: the difference the delay subtracts goes *negative*, so
+  the delay grows and the sample arrives looking more certain than it is while
+  the offset is wrong by however far apart the two stamps were. It is not a
+  hypothetical shape, either -- the reference server builds its payload with
+  `server_transmitted=0` and rewrites it at send time, so a zero is what a
+  missed rewrite would put on the wire. The first two measurements are the ones
+  that matter here: the filter takes them unweighted, assigning the offset and
+  the drift outright, so two of these set the clock to whatever they say and it
+  then reports itself converged.
+- **An exchange that spent no time on the wire is not a measurement either.** A
+  delay of exactly zero is a *zero-uncertainty* sample, and the filter has no
+  floor under its own covariance: the measurement variance is zero, which drives
+  the state covariance to zero, and with the process variance zero as well the
+  Kalman gain is then zero for every later update. Measured: two such samples,
+  then twenty honest ones 500 ms out, move the estimate by less than a
+  microsecond, and the clock reports itself converged `to within 0 us` for the
+  rest of the connection. A server reaches that state by claiming the whole
+  round trip as its own processing time -- which it can compute from the
+  exchanges before it -- so the sample is refused rather than the filter being
+  taught to distrust it afterwards.
+- **A negative delay is not a small uncertainty.** A server claiming it spent
+  longer on the exchange than the whole round trip took gives
+  `((T4-T1)-(T3-T2))/2 < 0`, and the filter squares that into a *positive*
+  variance -- a confident measurement built out of nonsense. It is dropped, and
+  it is dropped as its own outcome rather than as an answer to nothing: the
+  question *was* asked and *was* answered, so the log says which of the two
+  happened, and the loop stops waiting and moves on to the next exchange instead
+  of spending its whole five-second window on a reply that already arrived.
+- **A measurement whose timestamp did not move forward is dropped by the filter
+  itself**, as in the reference, because the prediction step divides by the
+  interval since the last one.
+
+**A connection that has given every role up keeps asking.** The reference client
+has a pause, and it is easy to read as a role thing and copy; it is not. It sits
+in the pairing flow, where the wire is reserved for the exchange and every other
+send is suppressed, and on the role path the reference *resumes* unconditionally
+-- an activation naming no roles leaves its clock running. This client offers no
+pairing method at all, so the case the pause exists for cannot arise here. What
+is left is a bounded amount of traffic on a connection that holds nothing: the
+roleless allowance is 30 seconds in total, so a converged clock asks ten to
+thirty times over it and one that never converged asks at most 150, and then the
+connection goes. Stopping and restarting the goroutine to save that is a second
+lifecycle on the thing whose first one already carried two of the bugs this page
+describes.
+
+Each refusal names itself in the log, rather than the four sharing one line. A
+Dot whose clock never converges says which of them is happening, and the causes
+are not distinguishable from the outside: a server whose stamps sit past the
+ceiling and one that claims the whole round trip both look like a player that
+never reports itself available.
+
+Nothing reads the converged mapping yet. What it produces is one log line per
+connection, the offset's standard deviation at the moment it converges, which is
+the number to look at on a Dot before any audio depends on it. Measured against
+the real Music Assistant over wifi: the clock converged about 205 ms after the
+player role was activated on each of four installs, and the line read
+`to within 1784 us`, then `596`, `2437` and `1817` -- which is the spread of two
+round trips over wifi, and the reason the number is logged rather than assumed. The session then held for six minutes with nothing else logged: no
+unanswered question, no answer refused, and no reconnect.
+
+The rate the exchanges ran at is not readable from the device. The obvious place
+to look is the `tcp/8928` ACCEPT rule's packet counter, and it counts **0** over a
+minute of a live session -- the stock chain accepts established traffic in a rule
+ahead of ours, so only the SYN ever reaches it. That counter answers "did the
+handshake get in", which is what `docs/pitfalls.md` uses it for, and it cannot
+answer anything about a connection already up.
+
 ## Reporting itself unavailable, on purpose
 
 Once a server activates `player@v1`, the Dot sends `client/state` with
-**`available: false`**. That is the honest answer until two things exist: a
-converged time filter, which the spec makes a precondition for a player
-reporting itself available, and an audio path to play into. `supported_commands`
+**`available: false`**. The spec's precondition for a player reporting otherwise
+is a converged time filter, which now exists; what does not is an audio path to
+play into, so the answer stays false and stays honest. `supported_commands`
 is present and empty, because the field advertises settability rather than
 reportability, and a player that accepts no commands still has to say so.
 
@@ -914,6 +1066,13 @@ would read as another flag. And the suite shares one standard logger, so a
 `Client` left running past the end of its own test lands its lines in whichever
 later test is counting them -- measured as a 1-in-40 failure before the helpers
 took to stopping it.
+
+It asserts what the client made of the answers, not only that the server parsed
+the questions. The reference server counts the `client/time` messages it handles
+and fails under three, and the Go side fails unless the daemon logged that its
+clock agreed -- because the first check alone cannot fail for the failure it
+exists to catch. Measured by making the client refuse every answer it gets: the
+exchange count still reads 3 and the convergence check is what fails.
 
 The literal fixtures elsewhere in this package exist because this test is not
 always available. They pin what is known to matter -- `client/init`,

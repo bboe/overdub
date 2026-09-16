@@ -2,8 +2,10 @@ package sendspin
 
 import (
 	"context"
+	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +22,11 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 	if _, err := exec.LookPath("uv"); err != nil {
 		t.Fatalf("%s is set but uv is not installed: %v", interopEnv, err)
 	}
+
+	var said lockedLog
+	was := log.Writer()
+	log.SetOutput(&said)
+	defer log.SetOutput(was)
 
 	ln := listenLocal(t)
 	keys := testKeys(t)
@@ -50,5 +57,10 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 	t.Logf("reference server said:\n%s", out)
 	if err != nil {
 		t.Fatalf("interop against aiosendspin failed: %v", err)
+	}
+	if !strings.Contains(said.String(), "clock agreed with") {
+		t.Errorf("the reference server answered every question and no answer was a"+
+			" measurement, so the clock never converged. The daemon said:\n%s",
+			said.String())
 	}
 }

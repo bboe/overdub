@@ -105,6 +105,8 @@ type Client struct {
 	rolelessAfter    time.Duration
 	pingEvery        time.Duration
 	goodbyeAfter     time.Duration
+	timeEvery        time.Duration
+	answerAfter      time.Duration
 
 	Peer *untrustedlog.Log
 
@@ -309,6 +311,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 		return err
 	}
 	stated := false
+	synced := false
 	var roleless *time.Timer
 	var rolelessSince time.Time
 	var rolelessSpent time.Duration
@@ -384,6 +387,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				if err := c.state(session); err != nil {
 					return err
 				}
+				go c.keepTime(session, stop)
 				stated = true
 			}
 			once("sendspin: %q activated %s", name, strings.Join(roles, ","))
@@ -394,7 +398,22 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			}
 			once("sendspin: group %q is %q", untrustedlog.Cut(g.GroupName),
 				untrustedlog.Cut(g.PlaybackState))
-		case typeStreamStart, typeStreamClear, typeStreamEnd, typeServerState, typeServerComm, typeServerTime:
+		case typeServerTime:
+			got, err := session.clock.observe(payload, nowMicros())
+			if err != nil {
+				return err
+			}
+			if got != measured {
+				once("sendspin: %q answered the time with %s", name, got)
+				continue
+			}
+			if !synced {
+				if converged, spread := session.clock.filter.state(); converged {
+					synced = true
+					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
+				}
+			}
+		case typeStreamStart, typeStreamClear, typeStreamEnd, typeServerState, typeServerComm:
 			once("sendspin: %q is not handled yet", untrustedlog.Cut(kind))
 		default:
 			once("sendspin: ignoring %q", untrustedlog.Cut(kind))

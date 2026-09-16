@@ -11,12 +11,29 @@ import asyncio
 import logging
 import sys
 
+from aiosendspin.models.core import ClientTimeMessage
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
 
 SETTLE_TIMEOUT_S = 15.0
 POLL_S = 0.1
+WANTED_EXCHANGES = 3
+
+
+def count_time_exchanges() -> list[int]:
+    """Count the client/time messages the reference server parses and answers."""
+    seen = [0]
+    handle = SendspinConnection._handle_message
+
+    async def counting(self, message, timestamp_us):  # noqa: ANN001, ANN202
+        if isinstance(message, ClientTimeMessage):
+            seen[0] += 1
+        return await handle(self, message, timestamp_us)
+
+    SendspinConnection._handle_message = counting
+    return seen
 
 
 class _Complaints(logging.Handler):
@@ -32,6 +49,7 @@ class _Complaints(logging.Handler):
 
 async def run(url: str, client_id: str) -> int:
     loop = asyncio.get_running_loop()
+    exchanges = count_time_exchanges()
     complaints = _Complaints()
     logging.getLogger("aiosendspin").addHandler(complaints)
     logging.getLogger("aiosendspin").setLevel(logging.WARNING)
@@ -52,7 +70,11 @@ async def run(url: str, client_id: str) -> int:
         client = server.get_or_create_client(client_id)
         deadline = loop.time() + SETTLE_TIMEOUT_S
         while loop.time() < deadline:
-            if client.is_connected and client.info_or_none is not None:
+            if (
+                client.is_connected
+                and client.info_or_none is not None
+                and exchanges[0] >= WANTED_EXCHANGES
+            ):
                 break
             await asyncio.sleep(POLL_S)
 
@@ -64,6 +86,7 @@ async def run(url: str, client_id: str) -> int:
         print(f"negotiated roles    = {sorted(client.negotiated_role_ids)}")
         print(f"active roles        = {sorted(client.active_role_ids)}")
         print(f"available           = {client.available}")
+        print(f"time exchanges      = {exchanges[0]}")
         info = client.info_or_none
         print(f"device info         = {info}")
 
@@ -74,6 +97,11 @@ async def run(url: str, client_id: str) -> int:
         if "player@v1" not in set(client.negotiated_role_ids):
             failures.append(
                 f"player@v1 missing from negotiated roles {sorted(client.negotiated_role_ids)}"
+            )
+        if exchanges[0] < WANTED_EXCHANGES:
+            failures.append(
+                f"the client asked the time {exchanges[0]} times in {SETTLE_TIMEOUT_S}s,"
+                f" want {WANTED_EXCHANGES}"
             )
         if client.available:
             failures.append("the client reported available while it has no clock or audio")

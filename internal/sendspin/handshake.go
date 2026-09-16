@@ -124,6 +124,8 @@ type Session struct {
 	offered  map[string]pairMethod
 	unpaired bool
 	roles    []string
+
+	clock *clock
 }
 
 func (s *Session) Matched() category { return s.matched }
@@ -223,6 +225,7 @@ func Handshake(ws *Conn, keys Keys, psks PSKSet) (*Session, error) {
 		recv:     cs1,
 		matched:  matched,
 		serverID: serverID,
+		clock:    newClock(),
 	}, nil
 }
 

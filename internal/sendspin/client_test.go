@@ -57,6 +57,16 @@ func dialLocal(t *testing.T, ln net.Listener) *wsPeer {
 
 func nextJSON(t *testing.T, peer *wsPeer, server *serverSide) (string, json.RawMessage) {
 	t.Helper()
+	for {
+		kind, payload := readJSON(t, peer, server)
+		if kind != typeClientTime {
+			return kind, payload
+		}
+	}
+}
+
+func readJSON(t *testing.T, peer *wsPeer, server *serverSide) (string, json.RawMessage) {
+	t.Helper()
 	_, sealed := peer.read()
 	kind, body := server.open(t, sealed)
 	if kind != msgJSON {
@@ -95,6 +105,9 @@ func bringUp(t *testing.T, c *Client, ln net.Listener) (*wsPeer, *serverSide, cl
 	if err := json.Unmarshal(payload, &cs); err != nil {
 		t.Fatalf("decoding client/state: %v", err)
 	}
+	if kind, _ := readJSON(t, peer, server); kind != typeClientTime {
+		t.Fatalf("wanted %s once the player role is active, got %s", typeClientTime, kind)
+	}
 	return peer, server, cs
 }
 
@@ -106,6 +119,7 @@ func testClient(t *testing.T) *Client {
 		Keys:        keys,
 		PSKs:        PSKSet{Pairing: keys.PairingPSK},
 		MinBufferMS: 500,
+		timeEvery:   10 * time.Second,
 	}
 }
 

@@ -52,7 +52,8 @@ internal/mdns      the mDNS responder, answering for every service the Dot
                    offers; it knows nothing about any of them
 internal/sendspin  the Sendspin client: the WebSocket a server arrives over,
                    the identity and its key file, the Noise KKpsk2 transport,
-                   what it declares and what a server may activate
+                   what it declares, what a server may activate, and the clock
+                   it keeps against a server's
 internal/untrustedlog
                    what a peer may spend making this daemon write to /data
 ```
