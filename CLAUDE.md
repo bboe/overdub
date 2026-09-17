@@ -17,8 +17,9 @@ deploy/uninstall.sh              # remove it again, and give the button back
 gofmt -l .                       # expected to be silent
 GOOS=linux GOARCH=arm GOARM=7 go vet ./...        # the target, not the runner
 GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...   # needs qemu-user-static
-go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ \
-        ./internal/sendspin/ ./internal/untrustedlog/   # -race has no arm build
+go test -race ./internal/audio/ ./internal/esphome/ ./internal/device/ \
+        ./internal/mdns/ ./internal/sendspin/ ./internal/untrustedlog/
+        # -race has no arm build
 shellcheck -S style build.sh deploy/*.sh          # CI runs it too
 SENDSPIN_INTEROP=1 go test -run Interop ./internal/sendspin/  # vs the reference
         server; needs uv, and CI runs it in a job of its own
@@ -38,7 +39,8 @@ internal/alexa     her synthesizer: the intent that hands it a clip, and the
                    log tail that says whether the clip played; and her cloud:
                    the credential MapDump recovers, and the text command it buys
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
-                   player that sounds them
+                   player that sounds them; and the stream, which places a
+                   server's audio on the frame the player says it belongs on
 internal/button    the exclusive grab, the clone, the read loop, whether the
                    action key is ours or Alexa's, and the volume keys pressed
                    on request

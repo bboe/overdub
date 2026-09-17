@@ -41,9 +41,9 @@ jobs:
       - run: GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...
 
       # The race detector does not support GOARCH=arm, so the run above cannot
-      # use it. These five packages carry the concurrency and are the ones that
+      # use it. These six packages carry the concurrency and are the ones that
       # build for the runner, so they get a second run natively.
-      - run: go test -race ./internal/esphome/ ./internal/device/ ./internal/mdns/ ./internal/sendspin/ ./internal/untrustedlog/
+      - run: go test -race ./internal/audio/ ./internal/esphome/ ./internal/device/ ./internal/mdns/ ./internal/sendspin/ ./internal/untrustedlog/
 
       # build.sh is the only supported build, and it is cgo against OpenSL ES, so
       # CI needs the NDK to build what ships rather than something adjacent to

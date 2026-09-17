@@ -55,8 +55,14 @@ func newMixer() *mixer {
 func (m *mixer) start(c *clip) {
 	m.mu.Lock()
 	c.at = 0
-	if !slices.Contains(m.srcs, source(c)) {
-		m.srcs = append(m.srcs, c)
+	m.mu.Unlock()
+	m.add(c)
+}
+
+func (m *mixer) add(s source) {
+	m.mu.Lock()
+	if !slices.Contains(m.srcs, s) {
+		m.srcs = append(m.srcs, s)
 	}
 	m.mu.Unlock()
 	select {

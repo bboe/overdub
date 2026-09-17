@@ -63,18 +63,30 @@ func readStatus(path string) (pcmStatus, error) {
 	return parseStatus(bufio.NewScanner(f))
 }
 
+const aheadCeiling = ChimeRate
+
 type Point struct {
-	Frames int64
-	At     time.Time
+	Ahead int64
+	At    time.Time
 }
 
-func point(ms int64, st pcmStatus, at time.Time) (Point, error) {
-	if ms < 0 {
-		return Point{}, errors.New("audio: the player would not report its position")
+func point(pending int64, st pcmStatus, at time.Time) (Point, error) {
+	if pending < 0 {
+		return Point{}, errors.New("audio: the player would not say how much of what it" +
+			" was written it still holds")
 	}
 	if !st.running() {
 		return Point{}, fmt.Errorf("audio: the output is %s rather than running, so what"+
 			" it still holds is not a delay", st.State)
 	}
-	return Point{Frames: ms*ChimeRate/1000 - st.Delay, At: at}, nil
+	if st.Delay < 0 {
+		return Point{}, fmt.Errorf("audio: the output says it is %d frames behind what has"+
+			" been written to it, and a delay below zero is not a measurement", st.Delay)
+	}
+	if ahead := pending + st.Delay; ahead >= 0 && ahead <= aheadCeiling {
+		return Point{Ahead: ahead, At: at}, nil
+	}
+	return Point{}, fmt.Errorf("audio: the player and the output claim to hold %d frames"+
+		" between them, and a pipeline outside 0 to %d is not a measurement",
+		pending+st.Delay, aheadCeiling)
 }

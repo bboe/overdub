@@ -21,6 +21,7 @@ type Chime struct {
 	mu     sync.Mutex
 	mix    *mixer
 	clip   *clip
+	stream atomic.Pointer[Stream]
 	stop   chan struct{}
 	done   chan struct{}
 	closed bool
@@ -59,12 +60,59 @@ func (c *Chime) Play() error {
 	return nil
 }
 
+func (c *Chime) OpenStream(say func(string, ...any)) (*Stream, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("audio: a stream after close")
+	}
+	if held := c.stream.Load(); held != nil {
+		if !held.Spent() {
+			return nil, errors.New("audio: a stream is already open, and this player" +
+				" holds one")
+		}
+		held.Close()
+		c.stream.CompareAndSwap(held, nil)
+	}
+	s := &Stream{say: say}
+	s.closer = func() { c.stream.CompareAndSwap(s, nil) }
+	if !c.stream.CompareAndSwap(nil, s) {
+		return nil, errors.New("audio: a stream is already open, and this player holds one")
+	}
+	c.mix.add(s)
+	return s, nil
+}
+
+func (c *Chime) live() *Stream { return c.stream.Load() }
+
+func (c *Chime) look() {
+	s := c.live()
+	if s == nil {
+		return
+	}
+	if s.Spent() {
+		s.Close()
+		return
+	}
+	if !s.wants() {
+		return
+	}
+	p, err := c.ahead()
+	if err != nil {
+		s.blind(err)
+		return
+	}
+	s.observe(p)
+}
+
 func (c *Chime) write() {
 	defer close(c.done)
 	block := make([]int16, BlockFrames)
 	buf := make([]byte, BlockBytes)
 	for {
+		c.look()
 		if !c.mix.next(block) {
+			c.look()
 			select {
 			case <-c.stop:
 				return
@@ -108,11 +156,11 @@ func (c *Chime) waiting() bool {
 	}
 }
 
-func (c *Chime) Played() (Point, error) {
+func (c *Chime) ahead() (Point, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return Point{}, errors.New("audio: played after close")
+		return Point{}, errors.New("audio: asked after close")
 	}
 	if !c.mix.sounding() {
 		return Point{}, errors.New("audio: nothing of ours is playing, so the queue the" +
@@ -123,7 +171,7 @@ func (c *Chime) Played() (Point, error) {
 		return Point{}, err
 	}
 	at := time.Now()
-	return point(int64(C.audio_position()), st, at)
+	return point(int64(C.audio_pending()), st, at)
 }
 
 func (c *Chime) Close() {
@@ -137,6 +185,9 @@ func (c *Chime) Close() {
 	c.mu.Unlock()
 
 	<-c.done
+	if s := c.stream.Load(); s != nil {
+		s.Close()
+	}
 	C.audio_close()
 	open.Store(false)
 }

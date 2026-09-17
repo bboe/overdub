@@ -10,6 +10,7 @@
 #define NUM_BUFFERS 8
 
 static unsigned char pool[NUM_BUFFERS][CHUNK];
+static int held[NUM_BUFFERS];
 static int slot;
 static int frame_bytes;
 
@@ -49,6 +50,7 @@ int audio_open(int rate, int channels) {
 
 	frame_bytes = channels * 2;
 	slot = 0;
+	memset(held, 0, sizeof(held));
 
 	TRY_INIT(slCreateEngine(&engine_obj, 0, NULL, 0, NULL, NULL));
 	TRY_INIT((*engine_obj)->Realize(engine_obj, SL_BOOLEAN_FALSE));
@@ -100,22 +102,29 @@ int audio_write(const unsigned char *pcm, size_t len) {
 
 	memcpy(pool[slot], pcm, n);
 	TRY((*player_queue)->Enqueue(player_queue, pool[slot], n));
+	held[slot] = (int)(n / (size_t)frame_bytes);
 	slot = (slot + 1) % NUM_BUFFERS;
 	return (int)n;
+}
+
+long long audio_pending(void) {
+	if (player_queue == NULL) return -1;
+
+	SLAndroidSimpleBufferQueueState state;
+	TRY((*player_queue)->GetState(player_queue, &state));
+	if (state.count > NUM_BUFFERS) return -1;
+
+	long long frames = 0;
+	for (SLuint32 i = 1; i <= state.count; i++) {
+		frames += held[(slot + NUM_BUFFERS - (int)i) % NUM_BUFFERS];
+	}
+	return frames;
 }
 
 int audio_start(void) {
 	if (player_play == NULL) return -1;
 	TRY((*player_play)->SetPlayState(player_play, SL_PLAYSTATE_PLAYING));
 	return 0;
-}
-
-long long audio_position(void) {
-	if (player_play == NULL) return -1;
-	SLmillisecond ms = 0;
-	if ((*player_play)->GetPosition(player_play, &ms) != SL_RESULT_SUCCESS) return -1;
-	if (ms == SL_TIME_UNKNOWN) return -1;
-	return (long long)ms;
 }
 
 void audio_close(void) {
@@ -137,4 +146,5 @@ void audio_close(void) {
 		engine_obj = NULL;
 	}
 	slot = 0;
+	memset(held, 0, sizeof(held));
 }

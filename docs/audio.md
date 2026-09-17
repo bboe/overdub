@@ -58,8 +58,13 @@ There can be one player. The OpenSL ES engine, the player, the buffer queue and
 the pool written into it are C globals, so a second `Chime` would overwrite the
 first's handles, and closing either would then destroy the other's player and
 leave its writes landing in a pool nothing is playing from. `NewChime` refuses
-the second rather than documenting the rule, and `Close` is safe to call twice,
-because the caller's signal handler and its defer can both reach it.
+the second rather than documenting the rule, and `Close` returns early the second
+time. Nothing in the tree calls it twice today -- the one call site is a `defer`,
+and the signal handler beside it exits the process rather than unwinding -- so
+that early return is load-bearing for something else: it is what makes `closed`
+mean "the player is going", which `Play`, `OpenStream` and `ahead` all read, and
+it is what stops a second `close(c.stop)` from panicking a daemon whose
+supervisor cannot tell that exit from any other.
 
 `audio_open` unwinds what it built; the writes do not, so a failed enqueue costs
 one chime rather than every chime after it. `SLAndroidConfigurationItf` is asked
@@ -76,9 +81,9 @@ stacking a second copy.
 There is no stop-and-clear any more. The player is started once and left playing,
 so a `reset` that set `SL_PLAYSTATE_STOPPED` would be a one-way door: nothing sets
 it playing again, every later `audio_write` still reports success, and the Dot is
-silent for the rest of the boot. That is a worse thing to leave lying in a header
-than to write again, so the slice that needs `stream/clear` adds a clear that ends
-playing, and measures it.
+silent for the rest of the boot. `stream/clear` arrived and did not bring one back:
+it empties the jitter buffer instead, and the section on playing audio at a time
+somebody else chose says what the 80 ms still in the queue costs.
 
 The copy is the point of the pool. OpenSL's queue holds the **pointer** it was
 given until the buffer has played, so whatever is enqueued has to outlive the
@@ -302,9 +307,19 @@ Which is the useful shape, because the bridge is a constant and mostly cancels.
 Two of these Dots running one build should share it, and what multi-room playback
 needs is that they agree with each other rather than that either knows its own
 latency in absolute terms: a shared 95 ms is inaudible, while 6 ms between them is
-not. So the open question is not whether sub-millisecond is reachable but whether
-this offset is the same on every start and on every unit -- and 6.6 ms across
-starts is, as measured here, indistinguishable from the instrument's own noise.
+not. That was the open question -- whether the offset is the same on every start
+and on every unit -- and **three Dots playing one stream together have now
+answered it.** Each reported its own pipeline depth as it placed its stream:
+
+| name | ahead of the speaker |
+|---|---|
+| bryce | 144 ms |
+| caroline | 142 ms |
+| daniel | 141 ms |
+
+Three milliseconds apart, measured on three units at once rather than one at a
+time, and they sounded like one speaker. That is the agreement the cancellation
+argument needs, and it is the number the table further down could not produce.
 
 **The experiment that settles it is two players and one server**, because a
 difference between two speakers cancels the absolute error this page cannot
@@ -323,7 +338,8 @@ left alone and the three were measured identically. The means differ by 9.6 ms
 and every unit's own runs differ by 10 to 20, so **the units are indistinguishable
 from each other by this instrument**. That is not the same as being identical: it
 says the question needs a sharper method, and the sharper method is two of them
-playing together.
+playing together -- which is what the table above is, and it separates them to
+3 ms rather than 9.6.
 
 **And the number moves with how it is measured, which is the finding that matters
 most.** The same Dot read about 95 ms from inside the daemon and about 75 ms from
@@ -346,10 +362,11 @@ keeping the stream fed across a gap costs the standby the hum section describes.
 
 This 95 ms is **not** what Sendspin's `static_delay_ms` carries, which is the
 first thing anybody will assume: that field is for delay past the device's audio
-port, and a Dot's speaker is on the near side of it. The 95 ms is the client's
-own to subtract from a timestamp before scheduling, which docs/sendspin.md
-explains at more length and with the trap that makes declaring it look like it
-works. The eight-block queue does not add to it either -- the first frame is at
+port, and a Dot's speaker is on the near side of it. The delay inside the Dot is
+the client's own to compensate for before scheduling, and the section below on
+playing audio at a time somebody else chose says why it is read off the player
+each time rather than subtracted as this constant; docs/sendspin.md carries the
+trap that makes declaring it look like it works. The eight-block queue does not add to it either -- the first frame is at
 the head of the queue rather than behind it -- and what the queue bounds is how
 far *ahead* the writer may run.
 
@@ -367,29 +384,97 @@ needs a second independent source -- measured over the same span as the first,
 since comparing 295 seconds of one against 12 seconds of the other produced a
 confident wrong verdict on the way to this one.
 
-### Asking the player where it is
+### Asking the player how much it still holds
 
-`Chime.Played` holds the player's own lock and refuses after a close, because the
+**`GetPosition` is not a cumulative playback head on this player, and reading it
+as one is the most expensive mistake this page records.** It counts from zero each
+time our track resumes: measured on a Dot, it read **0 ms for six full seconds
+after a 400 ms chime had finished playing**, and then counted 240, 496, 752 ms
+from zero once the next audio started. So `position - delay` says something true
+only *inside* one continuous run of writes, and it says nothing that can be
+compared against a counter of everything the writer has ever handed over.
+
+That is the same fact as the `-3,056` below, which was measured before it was
+understood: every first reading of a press came back at exactly that because
+position was 0 and the HAL held 3,056 frames. Three presses in a row all starting
+from zero is a cumulative counter saying it is not one.
+
+What it cost is worth writing down, because nothing failed. A daemon that had
+played one chime half an hour earlier read its pipeline as **2.802 s** deep, and
+the next stream read **6.462 s** -- exactly 3.66 s more, which is exactly the
+silence the first stream had written. It placed each stream that far out, dropped
+every chunk of real audio as late, played nothing, and reported **zero**
+re-placements, because the error was perfectly consistent: the reading and the
+timeline drifted together, so the slip check had nothing to see. Music Assistant
+showed a player that was connected, available, and silent.
+
+So the depth is measured from the near end instead, where there is no origin to
+share. `audio_pending` sums the frames still in the buffer queue -- C records how
+many each slot was enqueued with, and `GetState` says how many are still in
+flight, which are the most recent that many slots -- and the HAL's `delay` is
+added to it. `Chime.ahead` is that pair behind one call, with the moment of the
+reading beside it: `Ahead` frames sit between the next frame the writer hands over
+and the speaker, so that frame is audible at `At + Ahead/48000`.
+
+It is unexported, and that is the whole of its thread safety. `audio_pending` sums
+C state the writer mutates on every `audio_write` with no lock of its own, so the
+one goroutine that writes is the only one that may read: a reading taken from
+anywhere else would sum the wrong slots and answer a wrong-but-plausible pipeline
+under the ceiling, which is once more the consistent error the slip check cannot
+see. Exported, it would be one diagnostic call away.
+
+The per-slot count is not the same as `count * 480`, and the difference is the kind
+this page argues about elsewhere: the block size and the C chunk size are both 960
+bytes in two languages with nothing tying them together, so the queue reports what
+it was actually given rather than what a constant says it should have been.
+
+It measures the same quantity the old arithmetic did, which is why the first
+numbers taken this way agreed with it. `written - (position - delay)` is
+`(written - position) + delay`, and `written - position` is the frames still in
+our queue -- so the two formulas differ only in that one needs an origin and the
+other does not.
+
+Measured across five runs in the shape that broke -- a chime, six seconds of idle,
+then a stream -- the player reported **131 to 144 ms**, and the streams placed
+every frame. Before the change the same shape read 569 ms and dropped all of it.
+
+**A reading outside nothing-to-a-second is refused, at both ends, and a negative
+`delay` is refused on its own.** The queue is eight blocks and the HAL held 58 to
+64 ms, so a second of pipeline is not a measurement -- and neither is a negative
+one. Guarding the *sum* is not enough for that second half, which is the mistake
+this paragraph used to describe as the fix: our own queue holds up to 3,840
+frames, so any `delay` from -1 down to -3,840 still sums to something positive,
+shallow and entirely plausible. A full queue over a delay of -3,000 reads as 840
+frames rather than the 6,840 the two would hold between them, and the stream then
+anchors 62.5 ms short and places every frame that far late -- consistently, which
+is exactly the failure below.
+So the sign is checked before the sum, and the test that covers it passes a full
+queue rather than an empty one, because an empty queue is where the sum guard
+happens to agree.
+
+The check on the sum stays even so, and it is not the redundancy it looks like.
+Both its terms are now known to be positive, so the sum cannot be negative by
+addition -- but `delay` is parsed as any `int64`, and a driver reporting one near
+the top of that range makes the sum **wrap**, which lands under the ceiling
+rather than over it and reads as a pipeline behind the speaker. That is what the
+lower bound on the sum catches, and there is a test that feeds the largest
+`int64` to say so. All of it is refused for the same reason the failure above
+gives: the mapping that comes out of a bad reading is wrong
+*consistently*, which is the one shape the slip check cannot catch, and the sign
+decides only whether the stream ends up early or late. Refused, it never places
+the stream at all, and the stream says so when it closes. Whether this driver ever
+reports a negative delay while `RUNNING` is not known; the guard is there because
+the ceiling on the other side of the same sum is.
+
+`Chime.ahead` holds the player's own lock and refuses after a close, because the
 alternative is not a wrong answer but a crash: `audio_close` clears its pointer and
 then destroys the object, so a reader that passed the null check a moment earlier
 dereferences a freed vtable. The supervisor turns that into a five-second restart
 with the button ungrabbed, so an ordinary shutdown would become an outage.
 
-`Chime.Played` is that pair of instruments behind one call: `GetPosition` on
-`SLPlayItf` for the frames AudioFlinger has taken from our track, minus the ALSA
-`delay` for what the HAL still holds, with the moment of the reading beside it. A
-caller wanting the origin computes `At - Frames/48000`; a caller wanting to
-schedule frame N plays it at `origin + N/48000`.
-
-`Frames` is signed on purpose, and it really does go negative: measured on a Dot,
-the first reading after a sound starts reported **-2,704** frames. That is not an
-error. It says our audio is queued and none of it has reached the DAC yet, and how
-much is still to come is exactly what a scheduler wants to know. Discarding the
-sign would turn "56 ms early" into "here now".
-
 The two halves of a reading are taken around the stamp rather than before it. The
-`/proc` read is the slow one, so it goes first, then `At`, then `GetPosition`,
-which is a function call. Taking both after the stamp would make `delay` stale by
+`/proc` read is the slow one, so it goes first, then `At`, then the queue, which
+is a function call. Taking both after the stamp would make `delay` stale by
 the length of the file read -- and stale one way: the HAL drains while the file is
 being read, so the delay would be understated and every origin would come out
 early by that much. Measured on a Dot over twelve readings, the `/proc` read costs
@@ -397,12 +482,10 @@ early by that much. Measured on a Dot over twelve readings, the `/proc` read cos
 as the tightest agreement this instrument has produced. A systematic error the
 size of your best case is not noise that averages away.
 
-A position of `SL_TIME_UNKNOWN` is refused rather than returned. `GetPosition` can
-answer `SL_RESULT_SUCCESS` and still hand back `(SLmillisecond)-1`, which Android
-does when the underlying `AudioTrack` is not there yet. Unsigned, that is
-4,294,967,295 ms: positive, so a sign check passes it, and about 49.7 days of
-audio. The C side answers -1 instead, because a position nobody knows should look
-like a failure rather than like a confident number.
+A queue count `GetState` will not give, or one past the buffers the queue holds,
+answers -1 rather than a number, because a queue nobody can read should look like
+a failure rather than like an empty one -- an empty queue is a legitimate reading,
+and it means the writer is about to fall behind.
 
 The path to the status file is a constant here -- card, PCM and subdevice alike --
 while `internal/device` globs for it, and the two are asking different questions: that one wants to know whether
@@ -472,7 +555,278 @@ case only once the stream is steady.
 The `delay` itself held between 2,768 and 3,072 frames across all three presses,
 which is 58 to 64 ms of HAL buffer.
 
+### Playing audio at a time somebody else chose
+
+`Stream` is what a network stream plays through: a mixer source like the chime,
+but one whose samples carry the moment they are due rather than starting when
+they arrive. `Chime.OpenStream` attaches one, `Write(at, pcm)` schedules audio at
+a client-clock instant, `Clear` throws away what is buffered, `Finish` plays out
+what is already due and then retires the source, and `Close` stops it where it
+stands so the writer can go idle and the amp can reach standby. One at a time, for
+the same reason there is one player: the second would be scheduled against the
+first's timeline.
+
+The player's slot for it is an `atomic.Pointer` rather than a field under the
+player's lock, and that is a race rather than a preference. A stream that has
+played itself out is retired by the writer, which runs the check at the top of
+its loop -- and the writer then **blocks**, because a mixer with no source has no
+block to ask for. So the slot stayed full for as long as nothing else made a
+sound, and the next `stream/start` was refused with a stream already open: one
+silent track, from a window about a block wide. Measured on hardware, Music
+Assistant starts the next stream 60 ms after one ends, which is inside it.
+
+Making the slot atomic is not sufficient on its own, and the second half of that
+bug is worth the paragraph because the first fix looked complete. `Close` is
+idempotent by early return, and the goroutine that *wins* the close goes on to
+write a log line before it clears the slot. So a second caller finding the stream
+spent calls `Close`, gets an immediate return because the flag is already set, and
+then finds the slot still full -- refused again, with the window now as wide as a
+write to `/data` rather than as wide as a block, and an error message naming a
+stream that is not open but being retired. So `OpenStream` clears the slot itself
+after closing a spent stream, rather than trusting the closer to have done it.
+Both paths then converge: whoever gets there first retires it, the loser's `Close`
+and the closer's own clear are both no-ops, and neither costs anything.
+
+Retiring a stream and taking one up again are one locked step for the same class
+of reason. `Resume` reports whether it took, because a check for spent followed by
+a separate resume is two acquisitions with a hole in the middle: the writer can
+retire the stream in between, and the caller is then left holding a handle the
+mixer has already dropped, refusing every write for a whole track.
+
+The writer's blocking is why it looks once more before it parks. The same shape as
+the slot above, one step further on: a stream that retires itself is dropped by
+the mixer during the block the writer just asked for, so the check at the top of
+the loop already ran while the stream was live, and the writer then waits on a
+mixer with nothing in it. `Close` is therefore never reached, and `Close` is the
+only place the stream says what it did with the audio -- so a last track that
+dropped every chunk reported nothing at all until something else made a sound.
+Looking again on the way into the wait costs one call per idle period and closes
+it.
+
+What that report says when the stream was never placed is its own small
+correction. It used to name what it dropped, and nothing can be dropped before
+the mapping exists: dropping is counted while filling a block, and blocks are
+only filled once the stream is placed. So the line read `dropped 0s` however much
+audio the stream was holding when it went. It names what it threw away instead,
+which is the number that is not zero.
+
+`Chime.Close` retires the stream it still holds, after the writer has stopped and
+before the player is destroyed. Otherwise the one path that actually reaches
+`Close` -- the button's read loop failing, the daemon on its way out -- tears the
+player down with a stream still attached, and the close report is the only place
+the stream says what it did with the audio. A shutdown that happened to drop
+every chunk said nothing at all. The handle stayed live as well, taking writes that
+returned no error into a mixer whose writer had exited -- the end state the
+paragraph below prevents for a race. That half is the smaller one, and saying so
+is the point: `Close` is reached only as the daemon goes, so the window is the
+milliseconds before the process exits rather than anything that outlives it. The
+report is what was actually lost.
+
+`OpenStream` does its check and its attach under one hold of the player's lock,
+where it used to read `closed` and release it first. The window is a shutdown
+only, which is why it is last here: a `Close` arriving in it leaves a stream
+attached to a mixer whose writer has exited and whose OpenSL objects are gone, and
+writes to it then succeed and play nothing. `Play` and `ahead` were already
+check-and-act under that lock, so this is the one that was not. The lock order is
+the player's lock then the mixer's, everywhere, and `Close` releases the player's
+before it waits for the writer, so holding it across the attach adds no cycle.
+
+**The mapping between a frame and a moment is measured rather than assumed, and
+that is the whole of why the ~95 ms above is not subtracted anywhere.**
+`Chime.ahead` says how many frames sit between the next one the writer hands over
+and the speaker, so the stream is placed by asking rather than by declaring, and
+what a fixed 95 ms would have to get right -- a cold start, a full queue, a
+starve -- is read off the player each time instead.
+
+The number that comes back is **not** the 95 ms, and the difference is the queue.
+Measured over five probe runs on a Dot, the player reported itself **131 to
+144 ms** ahead of the speaker: the eight-block queue the writer fills at once
+(80 ms) plus the HAL's own 58 to 64 ms. The 95 ms is the interval from the first
+write to the first audible frame, when the queue is still empty; 144 ms is what
+the pipeline holds once the writer has run ahead, which is the steady state and
+the one a scheduler has to place against.
+
+**A stream plays silence until it has that mapping, and audio that arrives first
+waits rather than being spent.** The alternative is placing a server's first
+chunk against nothing, which is a quarter of a second of error nothing reports.
+
+**The first reading of a sound is worthless and the next few are noisy, so the
+mapping is the middle of five.** docs above measure the first sample of a chime
+6.3 ms early on one press and 8.9 ms late on another, with the honest samples
+agreeing to 90 us. A median of five outvotes two outliers wherever they fall,
+which a mean does not and "wait, then take one" does not either.
+
+Five readings is not enough on its own, because they can all be taken inside the
+window that is wrong. The writer fills the whole queue in the first few
+milliseconds, so ten blocks is 20 ms of real time rather than 100, and the HAL
+buffer is still filling through all of it -- which is the cold-start bias above,
+27 ms of it, arriving as a confident number. So the first reading waits
+`anchorSettle`, **100 ms**, and the five then follow a block apart. Measured
+across nine runs, a stream was placed 134 to 164 ms after it opened.
+
+**What that costs is the lead a server has to give.** Audio cannot be placed
+before the mapping exists, and once it does the earliest frame is the pipeline
+depth away, so the first chunk of a stream is playable only if it is due later
+than those two together: 164 + 144 ms in the worst run, about **308 ms**.
+Measured with a probe writing 200 chunks of 1,200 frames, stamped like a server's,
+each run preceded by a chime and six seconds of idle so the player was in the
+state a daemon's really is:
+
+| lead | placed | dropped late | re-placed |
+|---|---|---|---|
+| 500 ms | 5 s, all of it | 0 | 0 |
+| 500 ms | 5 s, all of it | 0 | 0 |
+| 500 ms | 5 s, all of it | 0 | 0 |
+| 300 ms | 5 s, all of it | 0 | 0 |
+| 200 ms | 4.88 s | 121.0 ms | 0 |
+
+The 200 ms run is the arithmetic above coming true rather than a surprise: it was
+about 100 ms short of what the stream needed, and the first 121 ms of the track
+-- the chunks whose moment had passed before there was a mapping to place them
+against -- were dropped. Everything after them played. The 300 ms run is the
+margin: it cleared 308 ms by nothing much and lost nothing.
+docs/sendspin.md carries what gets declared on the wire because of this.
+
+The four clean runs are the result that matters, and it is the one that could
+not be argued: **every frame placed, none late, and the mapping never moved.**
+A 1,200-frame chunk and a 480-frame block never share a boundary, so continuity
+across them was the thing most likely to be wrong, and five seconds of audio at
+25 ms a chunk is 200 boundaries with no hole and no repeat at any of them. `dmesg`
+carried one `underflow` pair per run, at the moment each ended, which is the
+ordinary end-of-playback line rather than a starved writer.
+
+**The mapping is re-measured but only rarely acted on.** A reading arrives every
+tenth block once the stream is placed, and it moves the mapping only past
+`anchorSlip`. Following every reading would chase the instrument's own
+noise, and each correction is a skip forward or back in the audio; ignoring them
+all would leave a stream that starved permanently behind the group.
+
+**How big the threshold has to be is the part Music Assistant settled, and the
+first answer was wrong.** At 20 ms the correction fired on nothing but the
+instrument: the reading swings about **22 ms** out and back again, and it did so
+three times over one session -- `+22, -22` at 18:56:33.96 and 18:56:34.22, then
+the same pair at 18:57:49 and 18:58:01, each landing within a few milliseconds of
+the same sub-second offset. That is about two blocks' worth of queue, which is the
+size of the quantisation the reading is built out of: the queue count moves a
+whole block at a time and the HAL's `delay` a period at a time. So the mapping was
+dragged out and straight back, twice per episode, and each of those is an audible
+skip that achieved nothing -- and a 22 ms error held for the 258 ms in between,
+which is the one thing this is all supposed to prevent.
+
+Requiring the slip to **persist** was the first fix and it was not enough. A run
+of three readings suppressed the 258 ms episodes and then the next session showed
+the same swing holding for **657 ms** -- `+21` at 19:03:45.96 and `-24` at
+19:03:46.61 -- which is long enough to satisfy any persistence rule worth having.
+The swing is not a blip to be filtered out; it is what this instrument does.
+
+So the threshold is **50 ms**, about twice the largest swing measured, and the
+persistence requirement stays at three readings alongside it. What justifies
+sitting that far out is what the re-reading is actually for. The anchor is durable
+by construction: the queue paces the output at exactly the DAC rate, so the frame
+index and the clock cannot drift apart except through the 3.9 ppm rate error
+above, which is 0.7 ms over a three-minute track. The only thing that can
+invalidate it is a starve -- and a starve the instrument can actually distinguish
+from its own noise is a big one. A threshold below that catches nothing real and
+skips the audio to chase quantisation.
+
+**This mechanism has never once been observed correcting a real slip.** Every
+firing so far has been the instrument, and at 50 ms it has not fired at all: zero
+corrections across three Dots playing one stream together for about ten minutes,
+and none on any single-Dot run since the threshold moved. So the group test did
+not condemn it -- it produced no evidence either way, which is what a guard
+against a rare failure should produce. It stays because what it guards against is
+silent and its own line is cheap.
+
+**The queue is ordered by when audio is due, not by when it arrived.** Only the
+head is ever examined, so one chunk stamped far ahead of the rest would sit there
+and hold everything behind it: no audio placed, nothing counted late, nothing
+logged, and silence for as long as that one chunk's lead. Ordering on insert costs
+an append in the ordinary case, because a server's stamps arrive in order. A chunk
+the mixer is partway through keeps its place regardless, since moving audio in
+front of it would restart a sound mid-way.
+
+Three bounds on what a peer's audio can cost, all refused rather than absorbed: a
+stream holds at most `streamHold`, four seconds of frames, which is past the
+2.4 seconds Music Assistant was measured filling to; a chunk due more than
+`streamAhead`, thirty seconds, either way is refused, because a stamp near the
+ceiling `onAClock` allows turns into a frame count that overflows on the way to a
+frame index; and the queue holds at most `streamChunks` entries.
+
+**That third one is the frame ceiling's blind spot, and the ordering above is what
+makes it cost anything.** `streamHold` bounds frames, and a server chooses how
+many frames a chunk carries, so one-frame chunks reach 192,000 entries under a
+ceiling that is never tripped -- and an insert whose stamp is the earliest walks
+the whole queue, under the same mutex the mixer takes for every 10 ms block.
+Measured on a development machine, one frame per chunk with each stamp a
+microsecond earlier than the last: 10,000 chunks cost 0.26 s, 50,000 cost 7.3 s,
+and 200,000 filled the queue to 113,443 entries in 40 seconds of unbroken CPU. On
+the Dot's ARM, a few megabytes on the wire buys minutes of a starved speaker, and
+nothing exits, so the supervisor never restarts it. The ceiling is
+`streamHold / BlockFrames`, four hundred: enough for any chunking down to one
+mixer block with the buffer full, and small enough that the walk is free.
+
+**A gap wider than a 32-bit frame count is clamped, not cast.** Walking to a
+chunk that is not due yet advances by the gap, and `int` is 32 bits here, so a
+gap past 2^31 frames -- 12.4 hours of audio -- truncates negative, `pos` goes
+backwards, the loop's own condition stays true, and `fill` spins forever holding
+the stream's mutex inside the mixer's. That is not a panic the supervisor
+recovers from: the writer never returns, the chime blocks behind it, and the Dot
+is silent with nothing logged until it reboots. Reproduced under
+`linux/arm/v7`, which is the only place it exists: 25 of 31 step sizes sampled
+between 11 and 26 hours wedged the reader permanently, and the same sweep out to
+forty days is clean on amd64. So the gap is clamped to what is left of the block,
+which needs no bound on the numbers going in.
+
+Which is the correction to what this section used to claim -- that the thirty
+seconds keeps every later conversion bounded, because the gap is a difference of
+two numbers that each track the clock. It does not. `streamAhead` bounds a chunk
+against **now**; the gap is measured against the mapping's origin, and nothing
+bounds the distance between those two.
+
+**Queued audio keeps the monotonic reading it arrived with.** A `time.Time` from
+the Sendspin client carries both readings, and stripping the monotonic one --
+`Round(0)`, which an earlier draft of `Write` did -- makes the subtraction in
+`frameAt` fall back to the wall clock on both sides. Those two wall readings are
+not comparable: the stream's origin is read live, and the client's reference was
+frozen at daemon start, before wifi and before anything set the clock. So a
+single wall-clock step, which is how Android sets the time and this Dot has no
+RTC to avoid, moves every frame the stream places while the slip check reads
+zero -- that check compares two monotonic readings and sees a perfect mapping.
+Forward, the audio is dropped as late; far enough forward, it is the wedge above.
+The guard is that the two sides of every subtraction carry the same clock, and the
+test asserts the queue holds the exact `time.Time` that arrived rather than a copy
+of it.
+
+**A stream with no `stream/end` is never retired, and that is deliberate.** A
+server can leave one open and simply stop sending: the source stays in the mixer,
+the writer feeds it silence, and the amp never reaches standby, which is the cost
+the section above says `Close` exists to avoid. An idle timeout looks like the
+answer and is worse than the problem. Music Assistant keeps one stream open across
+a track change, measured, so a pause that keeps the stream open is ordinary rather
+than hostile -- and retiring the stream under it would make the audio that arrives
+on resume land in a stream nothing is reading, which is a silent track for a
+paused listener. What the peer gains is a warm amp and a hundred idle writes a
+second; what an idle timeout would cost is audio. The trade only changes if a
+server is seen doing it for long enough to matter.
+
+**A `stream/clear` throws away the jitter buffer and nothing else.** Up to 80 ms
+is already inside the player's queue and plays out. Clearing that as well means
+`SLAndroidSimpleBufferQueueItf::Clear`, which flushes the `AudioTrack` under it,
+and the player here is never stopped -- the one-way door the section above
+describes. Eighty milliseconds at the far end of a seek is not worth that, so the
+`reset` that used to exist stays gone.
+
 ## Testing audio here
+
+**`chime_android.go` is the one file here no test covers, and it is where the
+player's lifecycle lives.** It needs `GOOS=android` and an NDK, so CI cannot build
+it at all, which puts the atomic slot, the look before the writer parks, and
+`OpenStream`'s single hold of the lock outside the suite by construction -- every
+one of them a race found by reading or on hardware rather than by a test. `Stream`
+is deliberately the other side of that line: it is plain Go, it holds all of the
+scheduling, and everything in it is tested. What the untestable half gets instead
+is a run on a Dot with the log read afterwards, and the close report is the thing
+to read, because it is the one line that says what the stream did with the audio.
 
 **Never test with a sustained pure tone.** A 20-second 440 Hz sine pulses
 audibly through every route -- ours at 48 kHz and at 44.1 kHz, and Alexa's own

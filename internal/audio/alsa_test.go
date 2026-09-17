@@ -2,6 +2,7 @@ package audio
 
 import (
 	"bufio"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -88,44 +89,43 @@ func TestAMissingStatusFileIsReported(t *testing.T) {
 
 func running(delay int64) pcmStatus { return pcmStatus{State: "RUNNING", Delay: delay} }
 
-func TestFramesAtTheDACAreWhatThePlayerTookLessWhatTheHALHolds(t *testing.T) {
+func TestWhatIsAheadIsOurQueueAndTheHALTogether(t *testing.T) {
 	at := time.Now()
-	pt, err := point(1000, running(2000), at)
+	pt, err := point(3840, running(3056), at)
 	if err != nil {
 		t.Fatalf("point: %v", err)
 	}
-	if pt.Frames != 46000 {
-		t.Errorf("a second of audio with 2000 frames still held came back as %d, want"+
-			" 48000 - 2000", pt.Frames)
+	if pt.Ahead != 6896 {
+		t.Errorf("a full queue over a 3,056-frame HAL buffer came back as %d, want the"+
+			" 6,896 the two hold between them", pt.Ahead)
 	}
 	if !pt.At.Equal(at) {
 		t.Error("the reading came back stamped at a different moment than it was taken")
 	}
 }
 
-func TestAudioQueuedButNotYetHeardReadsNegative(t *testing.T) {
-	pt, err := point(10, running(3000), time.Now())
-	if err != nil {
-		t.Fatalf("point: %v", err)
-	}
-	if pt.Frames >= 0 {
-		t.Errorf("frames came back as %d; audio that is queued and has not reached the"+
-			" DAC is how far ahead the writer is, and clamping it reads as here now",
-			pt.Frames)
-	}
-}
-
-func TestAPlayerThatWillNotSayWhereItIsIsRefused(t *testing.T) {
+func TestAPlayerThatWillNotSayWhatItHoldsIsRefused(t *testing.T) {
 	if _, err := point(-1, running(0), time.Now()); err == nil {
-		t.Error("a player that reported no position was believed, and the frames it" +
-			" implies are counted backwards from zero")
+		t.Error("a player that would not report its queue was believed, and a stream is" +
+			" then placed against a pipeline of nothing but the HAL")
 	}
 }
 
-func TestAPositionIsRefusedWhenTheOutputIsNotRunning(t *testing.T) {
-	if _, err := point(1000, pcmStatus{State: "XRUN"}, time.Now()); err == nil {
+func TestAReadingIsRefusedWhenTheOutputIsNotRunning(t *testing.T) {
+	if _, err := point(3840, pcmStatus{State: "XRUN"}, time.Now()); err == nil {
 		t.Error("a delay of zero from a stopped output was taken for a drained queue," +
-			" which places our frames about 57 ms later than they are")
+			" which places our frames about 57 ms early")
+	}
+}
+
+func TestAPipelineDeeperThanTheQueueAndAnyBufferIsRefused(t *testing.T) {
+	if _, err := point(3840, running(aheadCeiling), time.Now()); err == nil {
+		t.Errorf("a pipeline past %d frames was believed. Nothing here can hold that"+
+			" much: the queue is eight blocks and the HAL buffer measured 58 to 64 ms,"+
+			" so a bigger number is a broken instrument -- and believing one places"+
+			" every frame that far out, consistently enough that the slip check never"+
+			" fires and the whole stream is dropped as late with nothing to say why",
+			aheadCeiling)
 	}
 }
 
@@ -137,5 +137,30 @@ func TestAStatusNamingNoDelayIsRefused(t *testing.T) {
 	if _, err := parseStatus(bufio.NewScanner(strings.NewReader(without))); err == nil {
 		t.Error("a status with no delay line read as a drained queue, which overstates" +
 			" the position by the whole HAL buffer of 58 to 64 ms")
+	}
+}
+
+func TestANegativeDelayIsRefusedWithNothingInOurQueueToHideIt(t *testing.T) {
+	if _, err := point(0, running(-3000), time.Now()); err == nil {
+		t.Error("a negative delay was believed with an empty queue, which places the" +
+			" stream that far late -- consistently, which is the one shape the slip" +
+			" check cannot see")
+	}
+}
+
+func TestANegativeDelayIsRefusedEvenWhenOurOwnQueueCoversItUp(t *testing.T) {
+	if _, err := point(3840, running(-3000), time.Now()); err == nil {
+		t.Error("a full queue over a delay of -3,000 was believed, and it reads as a" +
+			" shallow pipeline rather than as a refusal: the stream then anchors 62.5 ms" +
+			" short and places every frame that far late, consistently, which is the one" +
+			" shape the slip check cannot see")
+	}
+}
+
+func TestADelaySoLargeThatTheSumWrapsIsRefused(t *testing.T) {
+	if _, err := point(3840, running(math.MaxInt64), time.Now()); err == nil {
+		t.Error("a delay of the largest int64 was believed: the sum wraps negative, which" +
+			" is under the ceiling rather than over it, and the stream is then placed" +
+			" against a pipeline it reads as being behind the speaker")
 	}
 }
