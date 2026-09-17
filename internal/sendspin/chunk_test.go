@@ -109,7 +109,7 @@ func TestOnlyTheFirstOfThePlayersBinaryTypesCarriesAudio(t *testing.T) {
 }
 
 func TestASessionWithNoClockYetReportsNoLead(t *testing.T) {
-	if _, ok := (&Session{}).Lead(1); ok {
+	if _, _, _, ok := (&Session{}).Lead(1); ok {
 		t.Error("a lead was reported from a session with no clock, which reads a nil" +
 			" filter and panics the daemon into the supervisor's restart loop")
 	}
@@ -117,7 +117,7 @@ func TestASessionWithNoClockYetReportsNoLead(t *testing.T) {
 
 func TestAnUnconvergedClockReportsNoLead(t *testing.T) {
 	s := &Session{clock: newClock()}
-	if _, ok := s.Lead(1); ok {
+	if _, _, _, ok := s.Lead(1); ok {
 		t.Error("a lead was reported from a clock that has not converged, so the number" +
 			" logged is the offset of an unset filter rather than a measurement")
 	}
@@ -278,5 +278,118 @@ func TestClearingKeepsTheStreamItAlreadyAnnounced(t *testing.T) {
 	if !run.announced {
 		t.Error("a clear left the stream open but forgot it had announced it, so the next" +
 			" chunk of the same stream is logged as another stream starting")
+	}
+}
+
+func TestASummaryCarriesTheClockThatTimedIt(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	peer := &untrustedlog.Log{}
+	s := held()
+	s.clock = newClock()
+	for i := range 4 {
+		s.clock.filter.Update(1000, 50, int64(i)*1000)
+	}
+	p := ours()
+	startWith(t, s, &p)
+
+	run := chunkRun{every: reportEvery}
+	feedChunks(t, &run, peer, s, 2)
+	run.report(peer, "server")
+
+	if !strings.Contains(out.String(), "against a clock good to") {
+		t.Error("the summary says what the leads were and not what clock measured them," +
+			" so a lead that moved cannot be told from a clock that did")
+	}
+}
+
+func TestASummaryReportsHowFarTheClockMovedUnderIt(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	peer := &untrustedlog.Log{}
+	s := held()
+	s.clock = newClock()
+	for i := range 4 {
+		s.clock.filter.Update(1000, 50, int64(i)*1000)
+	}
+	p := ours()
+	startWith(t, s, &p)
+
+	run := chunkRun{every: reportEvery}
+	feedChunks(t, &run, peer, s, 1)
+	for i := range 6 {
+		s.clock.filter.Update(900_000, 50, 10_000+int64(i)*1000)
+	}
+	feedChunks(t, &run, peer, s, 1)
+	run.report(peer, "server")
+
+	if strings.Contains(out.String(), "that moved 0s") {
+		t.Error("the clock's offset moved under the stream and the summary reported no" +
+			" movement, so a lead anomaly reads as the server's fault either way")
+	}
+}
+
+func TestTheNextWindowMeasuresTheClockFromWhereTheLastOneLeftIt(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	peer := &untrustedlog.Log{}
+	s := held()
+	s.clock = newClock()
+	for i := range 6 {
+		s.clock.filter.Update(900_000, 50, int64(i)*1000)
+	}
+	p := ours()
+	startWith(t, s, &p)
+
+	run := chunkRun{every: reportEvery}
+	feedChunks(t, &run, peer, s, 1)
+	run.report(peer, "server")
+
+	out.Reset()
+	feedChunks(t, &run, peer, s, 1)
+	run.report(peer, "server")
+
+	if !strings.Contains(out.String(), "that moved 0s") {
+		t.Errorf("a window over a clock that never moved reported movement: %q; the"+
+			" baseline restarted at zero, so every window blames the clock", out.String())
+	}
+}
+
+func TestEachWindowMeasuresItsOwnLeadBounds(t *testing.T) {
+	peer := &untrustedlog.Log{}
+	s := held()
+	s.clock = newClock()
+	for i := range 6 {
+		s.clock.filter.Update(1000, 50, int64(i)*1000)
+	}
+	p := ours()
+	startWith(t, s, &p)
+
+	run := chunkRun{every: reportEvery}
+	feedChunks(t, &run, peer, s, 2)
+	first := run.leastLead
+	run.report(peer, "server")
+
+	feedChunks(t, &run, peer, s, 2)
+	if run.leastLead == 0 || run.mostLead == 0 {
+		t.Errorf("the second window reported bounds of %d and %d; one of them is the"+
+			" zero value rather than a lead, because the window never seeded itself",
+			run.leastLead, run.mostLead)
+	}
+	if run.leastLead > run.mostLead {
+		t.Errorf("the second window's bounds are inverted: %d to %d",
+			run.leastLead, run.mostLead)
+	}
+	if first == 0 {
+		t.Fatal("the first window measured nothing, so the comparison proves nothing")
 	}
 }

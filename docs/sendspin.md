@@ -555,6 +555,50 @@ The lead is the number worth watching, because it is the server's `send_ahead` a
 this client actually sees it, and a stream whose lead shrinks toward zero is one
 that will starve.
 
+**A lead is two numbers pretending to be one.** It is
+`ClientTime(stamp) - now`, so it moves when the server sends late *and* when this
+end's estimate of the server's clock moves, and the log cannot tell those apart
+from the lead alone. Measured on a Dot: one stream opened at 182 ms against a
+declared floor of 500, and one thirty-second window reported a chunk due 835 ms in
+the past. Neither could be attributed, because convergence was logged once per
+connection and nothing said whether the filter had moved underneath.
+
+**Measured, and the answer was the server.** A stream opened at 218 ms against the
+declared floor of 500, and the window that carried it reported a clock good to
+313 us whose offset moved 1.09 ms over the thirty seconds. A 1 ms clock cannot
+account for a 282 ms shortfall, so Music Assistant really does open a stream with
+far less lead than `max(min_buffer, required_lead) + static` predicts, and fills
+toward the ceiling afterwards -- 1.97 seconds by the end of that same window. Three
+first streams have now opened at 182, 218 and 490 ms.
+
+What that costs the next slice is a design constraint rather than a curiosity: a
+jitter buffer **cannot assume the declared floor exists at stream start**. One that
+waited for 500 ms of audio before playing would stall through the first third of a
+second of every track. It has to open on what it is given and grow.
+
+So each summary carries the clock that timed it: the spread the filter reports,
+and how far its offset moved since the previous summary. A lead that fell while
+the offset held still is the server; a lead that fell as far as the offset moved
+is this end. Both numbers come off the filter the summary already consults, so the
+line costs nothing extra. The baseline carries across windows rather than
+restarting, since a window that measured from zero would report the whole offset
+as movement every time. The spread does not carry: it is rewritten by the same
+chunk that makes it printable, so carrying it would only suggest a stale one could
+reach the log.
+
+The lead bounds do not carry either, and for the opposite reason to the baseline.
+A window that inherited them would never seed its own, and whichever end the real
+leads did not reach would be reported as the zero value -- which reads as a chunk
+due exactly now, or as a late arrival that never happened. One flag cannot do both
+jobs, so there are two.
+
+The filter keeps `ServerTime`, `ClientTime` and `Converged` although the daemon
+now reaches it through `sample` alone. `ServerTime` and `ClientTime` are an
+inverse pair, and the test asserting they undo each other is what checks the drift
+arithmetic that nothing else reaches; `Converged` is the readable form of `state`
+that ten tests are written against. That is surface kept for the tests that check
+the contract, rather than surface waiting for a caller.
+
 Measured on hardware across five streams, the first chunk is due 481 to 493 ms
 ahead and the lead grows to about 2.4 seconds. Both numbers are this client's own:
 the floor is the `min_buffer_ms` of 500 that `serve.go` declares, and the ceiling

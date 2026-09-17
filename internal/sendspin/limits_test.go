@@ -30,6 +30,12 @@ func (l *lockedLog) Write(p []byte) (int, error) {
 	return l.buf.Write(p)
 }
 
+func (l *lockedLog) Reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.Reset()
+}
+
 func (l *lockedLog) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()

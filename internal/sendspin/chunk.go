@@ -53,11 +53,15 @@ func (s *Session) AudioChunk(body []byte) (*audioChunk, error) {
 	return parseChunk(body)
 }
 
-func (s *Session) Lead(serverTime int64) (int64, bool) {
-	if s.clock == nil || !s.clock.filter.Converged() {
-		return 0, false
+func (s *Session) Lead(serverTime int64) (lead, spread, offset int64, ok bool) {
+	if s.clock == nil {
+		return 0, 0, 0, false
 	}
-	return s.clock.filter.ClientTime(serverTime) - nowMicros(), true
+	client, spread, offset, ok := s.clock.filter.sample(serverTime)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return client - nowMicros(), spread, offset, true
 }
 
 const reportEvery = 30 * time.Second
@@ -71,20 +75,29 @@ type chunkRun struct {
 	frames int
 	bytes  int
 
-	leadKnown bool
 	leastLead int64
 	mostLead  int64
 
 	every time.Duration
 	due   time.Time
+
+	clockKnown bool
+	leadKnown  bool
+	spread     int64
+	firstOff   int64
+	lastOff    int64
 }
 
 func (r *chunkRun) took(peer *untrustedlog.Log, name string, s *Session, c *audioChunk) {
 	r.chunks++
 	r.frames += c.Frames()
 	r.bytes += len(c.PCM)
-	lead, known := s.Lead(c.ServerTime)
+	lead, spread, offset, known := s.Lead(c.ServerTime)
 	if known {
+		if !r.clockKnown {
+			r.clockKnown, r.firstOff = true, offset
+		}
+		r.spread, r.lastOff = spread, offset
 		if !r.leadKnown || lead < r.leastLead {
 			r.leastLead = lead
 		}
@@ -121,13 +134,15 @@ func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 	}
 	if r.leadKnown {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, due between"+
-			" %s and %s ahead", name, r.chunks, r.frames, r.bytes,
-			micros(r.leastLead), micros(r.mostLead))
+			" %s and %s ahead, against a clock good to %s that moved %s", name,
+			r.chunks, r.frames, r.bytes, micros(r.leastLead), micros(r.mostLead),
+			micros(r.spread), micros(r.lastOff-r.firstOff))
 	} else {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, with no clock"+
 			" to say when they were due", name, r.chunks, r.frames, r.bytes)
 	}
-	*r = chunkRun{announced: r.announced, every: r.every, due: time.Now().Add(r.every)}
+	*r = chunkRun{announced: r.announced, every: r.every, due: time.Now().Add(r.every),
+		clockKnown: r.clockKnown, firstOff: r.lastOff, lastOff: r.lastOff}
 }
 
 func (r *chunkRun) done(peer *untrustedlog.Log, name string) {

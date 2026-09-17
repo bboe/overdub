@@ -124,14 +124,27 @@ func (f *timeFilter) ServerTime(clientTime int64) int64 {
 	return clientTime + int64(math.Round(e.offset+drift*float64(clientTime-e.lastUpdate)))
 }
 
-func (f *timeFilter) ClientTime(serverTime int64) int64 {
-	e := f.element()
+func clientFrom(e timeElement, serverTime int64) int64 {
 	drift := 0.0
 	if e.useDrift {
 		drift = e.drift
 	}
 	return int64(math.Round((float64(serverTime) - e.offset + drift*float64(e.lastUpdate)) /
 		(1.0 + drift)))
+}
+
+func (f *timeFilter) ClientTime(serverTime int64) int64 {
+	return clientFrom(f.element(), serverTime)
+}
+
+func (f *timeFilter) sample(serverTime int64) (client, spread, offset int64, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	converged, spread := f.stateLocked()
+	if !converged {
+		return 0, 0, 0, false
+	}
+	return clientFrom(f.current, serverTime), spread, int64(math.Round(f.current.offset)), true
 }
 
 func (f *timeFilter) Converged() bool {
@@ -142,6 +155,10 @@ func (f *timeFilter) Converged() bool {
 func (f *timeFilter) state() (bool, int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.stateLocked()
+}
+
+func (f *timeFilter) stateLocked() (bool, int64) {
 	if f.count < 2 || math.IsInf(f.offsetCovariance, 1) {
 		return false, math.MaxInt64
 	}
