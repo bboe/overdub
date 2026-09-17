@@ -39,6 +39,7 @@ const (
 	sendspinKeyPath = "/data/local/bin/.overdub-sendspin-key"
 
 	sendspinBuffer = 500
+	sendspinLead   = 350
 
 	nodeWait    = 60 * time.Second
 	addressWait = 5 * time.Minute
@@ -107,7 +108,12 @@ func serve(flags config) error {
 		defer volume.Close()
 	}
 
-	go serveAPI(flags.Name, psk, i, volume)
+	var player sendspin.Player
+	if chime != nil {
+		player = chimePlayer{chime: chime}
+	}
+
+	go serveAPI(flags.Name, psk, i, volume, player)
 
 	var held []string
 	for code, b := range buttons {
@@ -200,7 +206,8 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 	return "", false
 }
 
-func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.VolumeKeys) {
+func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.VolumeKeys,
+	player sendspin.Player) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		log.Printf("%s has no address yet; the button works, and the api starts if it appears", wifiIface)
@@ -280,7 +287,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 	up := false
 	if haveKeys {
 		toggle := &sendspinSwitch{
-			name: name, mac: mac, keys: keys,
+			name: name, mac: mac, keys: keys, player: player,
 			responder: responder, base: base,
 			wake: server.NoteSendspin,
 			peer: &untrustedlog.Log{Subject: "sendspin"},
@@ -405,9 +412,20 @@ type sendspinServer interface {
 	Close()
 }
 
+type chimePlayer struct{ chime *audio.Chime }
+
+func (p chimePlayer) OpenStream(say func(string, ...any)) (sendspin.Stream, error) {
+	stream, err := p.chime.OpenStream(say)
+	if err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
 type sendspinSwitch struct {
 	name, mac string
 	keys      sendspin.Keys
+	player    sendspin.Player
 	responder advertiser
 	base      []mdns.Advert
 	wake      func()
@@ -497,7 +515,7 @@ func (s *sendspinSwitch) enable() bool {
 	}
 	defer s.end()
 
-	client := sendspinClient(s.name, s.mac, s.keys, s.peer)
+	client := sendspinClient(s.name, s.mac, s.keys, s.player, s.peer)
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", sendspin.Port))
 	if err != nil {
 		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
@@ -622,7 +640,8 @@ func sendspinKeys() (sendspin.Keys, bool) {
 	return keys, true
 }
 
-func sendspinClient(name, mac string, keys sendspin.Keys, peer *untrustedlog.Log) *sendspin.Client {
+func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
+	peer *untrustedlog.Log) *sendspin.Client {
 	return &sendspin.Client{
 		Config: sendspin.Config{
 			Name:           name,
@@ -632,9 +651,11 @@ func sendspinClient(name, mac string, keys sendspin.Keys, peer *untrustedlog.Log
 			UnpairedAccess: true,
 			BufferCapacity: sendspin.BufferCapacity,
 		},
-		Keys:        keys,
-		PSKs:        sendspin.PSKSet{Pairing: keys.PairingPSK},
-		MinBufferMS: sendspinBuffer,
-		Peer:        peer,
+		Keys:           keys,
+		PSKs:           sendspin.PSKSet{Pairing: keys.PairingPSK},
+		MinBufferMS:    sendspinBuffer,
+		RequiredLeadMS: sendspinLead,
+		Player:         player,
+		Peer:           peer,
 	}
 }

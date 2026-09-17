@@ -377,7 +377,11 @@ not. The spec is explicit: the delay it carries is the one *past* the device's
 audio port -- an external amplifier, a powered speaker -- and "processing delays
 before the port (DAC latency, audio buffers)" are the client's own to compensate.
 A Dot's speaker is on the near side of that port, so the honest declaration is
-zero and the 95 ms comes off the timestamp before the audio is scheduled.
+zero and the delay inside the Dot is compensated here rather than announced. Not
+by subtracting a constant, either: the player is asked how far ahead of the
+speaker it is and the audio is placed against the answer, which is 131 to 144 ms
+rather than the 95 ms a constant would have carried. docs/audio.md says why those
+two numbers differ and which one a scheduler needs.
 
 Declaring it anyway would appear to work, which is what makes it a trap. Both ends
 subtract it -- `aiosendspin` sends a chunk early by exactly this much
@@ -394,15 +398,82 @@ late with nothing in any log to say why. The spec's own accuracy target is state
 after removing this field, which says plainly that it is not part of what the
 client is supposed to get right.
 
-`required_lead_time_ms` is still **0**, and that one is honest for the old reason:
-it says how far ahead of playback a server must deliver, which is a property of a
-jitter buffer that does not exist yet.
+`required_lead_time_ms` is **350**, and it is the one number here derived from
+hardware rather than from the format. It says how far ahead of playback a server
+must deliver, and the jitter buffer that now exists needs two things before it can
+place a server's first chunk: the mapping between a frame and a moment, which
+takes 134 to 164 ms of silence to settle, and the pipeline the player and the HAL
+already hold, which measured 131 to 144 ms. A first chunk due sooner than those
+together is dropped, measured: at a 200 ms lead the first 118.7 ms of a track went
+and everything after it played. docs/audio.md carries the runs.
+
+It changes nothing on the wire today, which is the point of declaring it anyway.
+A server sends each chunk `max(min_buffer_ms, required_lead_time_ms) +
+static_delay_ms` ahead for a **buffered** stream, so the 500 ms above still
+governs and still covers this. For a **live** stream `aiosendspin` floors at
+`min_buffer_ms + static_delay_ms` and ignores the lead entirely, on the grounds
+that a realtime queue cannot grow once playback starts and extra lead would only
+add latency -- so a live source is covered by the 500 ms alone, which is still
+past what this player needs. `DEFAULT_INITIAL_DELAY_US`, 250 ms, is neither of
+those: it is the fallback for a stream with no audio roles at all.
+What the field buys is that the two are no longer the same claim: a `min_buffer_ms`
+derived downward later cannot silently take the start of every track with it.
 
 ## The three messages that bracket a stream
 
-`stream/start` opens one, `stream/end` closes it, `stream/clear` throws away what
-was buffered and leaves it open. The Dot reads all three now and carries the
-state; what it does not yet do is play the audio between them.
+`stream/start` opens one, `stream/end` ends it, `stream/clear` throws away what
+was buffered and leaves it open. Each one now reaches the player as well as the
+session: a playable `stream/start` opens an `audio.Stream` on it or takes up the
+one already there, `stream/clear` empties its jitter buffer without closing it,
+and `stream/end` lets it **play out what it still holds** and then go.
+
+**`stream/end` is not a discard, and reading it as one clips the end of every
+track.** The first version of this closed the stream, and Music Assistant showed
+what that costs within a minute: 2,171 chunks arrived, 54.275 s of audio, and
+52.438 s of it was placed. The missing **1.836 s** was neither played nor dropped
+-- it was buffered, still ahead of its own due time, and thrown away when the
+stream closed. The final summary of that stream reported chunks still arriving
+1.92 to 1.97 s ahead, so the server had not waited for the audio to finish before
+saying the stream had ended; it does not, and it is not supposed to.
+
+`aiosendspin` settles it rather than the spec. Its server's `PushStream.stop`
+says to "call `clear()` first if buffered client audio should be discarded before
+the successor PushStream takes over" -- so discarding is the server's own extra
+step, through the message that means discard, and `stream/end` on its own is not
+it. The reference client agrees from the other side: `_handle_stream_end` clears
+`_stream_active`, the current player and the current format, and touches no audio
+at all.
+
+So a finished stream keeps its place in the mixer, refuses new audio, plays what
+is already due, and retires itself once it holds nothing -- bounded at
+`drainWait`, five seconds, because audio a server stamped far enough ahead would
+otherwise hold the source, the writer and the amp awake for as long as the
+timestamp says.
+
+Giving the player role up, a format this client cannot take, and the connection
+going away **do** stop it outright -- and the first of those is gated on the
+player role being gone rather than on every role being gone, which is a
+distinction no test here can reach. `supportedRoles()` has one entry, so a role
+set is either `["player@v1"]` or empty and the two predicates cannot be told
+apart today. They come apart the moment a second role is added: a server dropping
+the player role while keeping the other one would leave the stream attached for
+the life of the connection, four seconds of queued audio playing out for a role
+that was withdrawn. `Session.Activate` already uses the narrower predicate, and
+this now agrees with it. What stays keyed to holding **no** role is the
+connection-level allowance below, which is a different question from whether
+there is any audio to stop. The last of the three is a `defer` rather than
+a case of its own -- a stream left attached is a writer feeding silence to a
+player for the life of the daemon, which holds the amp awake and never reaches
+standby. The difference is the whole point: those three are the stream being taken
+away, and `stream/end` is the stream finishing.
+
+A **repeated** `stream/start`, or one arriving while the last is still playing
+out, takes up the stream that is there rather than opening another. The timestamps
+are absolute, so the next track's audio places itself in the same timeline the
+last one was using, and a fresh stream would spend another 134 to 164 ms learning
+a mapping that had not changed -- silence at the start of every track after the
+first. Measured on hardware, Music Assistant ends one stream and starts the next
+**60 ms** later, so that transition is the common case rather than a corner.
 
 The format check is the substance of `stream/start`. Its player object names a
 codec, a sample rate, a channel count and a bit depth, and anything but the
@@ -436,7 +507,7 @@ A `stream/clear` is this client's only when it holds the player role and a strea
 is open. Nothing is buffered otherwise, so a clear arriving before a
 `stream/start`, or after the format of one was refused, has nothing of ours to
 throw away -- and reporting one would spend a peer-driven log line on nothing
-today and flush a buffer for a role the server never activated once 9D lands.
+today and flush the player's buffer for a role the server never activated.
 `stream/end` already reads this way, since it reports whether a stream was open.
 
 A `stream/start` is refused when this client holds no player role, for the same
@@ -555,6 +626,43 @@ The lead is the number worth watching, because it is the server's `send_ahead` a
 this client actually sees it, and a stream whose lead shrinks toward zero is one
 that will starve.
 
+**Each summary also says what the player did with the window: how much audio it
+placed, and how much silence it played instead.** Those two come off the stream
+itself and are reported as the window's own totals rather than the stream's, for
+the same reason every other number on the line is: a cumulative figure beside a
+windowed one reads as a player that is permanently short.
+
+It answers a question the rest of the line cannot, and it answered it on the first
+run. A stream that closed having placed 103.875 s of audio against 3.3 s of
+silence had lost nothing -- audio received came to exactly audio placed plus audio
+dropped, to the microsecond -- so the silence was time when nothing was due rather
+than audio that went missing. What the close report could not say is *where* it
+fell, and a gap at a track boundary and a player starving steadily look identical
+in one total.
+
+The window's own totals are counted from the stream they belong to, which is
+fiddlier than it sounds: a stream that is replaced starts its counters again at
+zero, so a baseline carried over from the stream before it undercounts the first
+window by that whole stream. Subtracting and watching for a negative answer is not
+enough, because the difference only goes negative while the new stream is still
+behind the old one's total -- a short stream followed by a long one reports a
+plausible, wrong number for ever. So the baseline is keyed on the stream itself and
+reset when that changes.
+
+Per window they do not. Measured across three Dots and about twenty windows of
+continuous playback, the silence in a window is **1.0 to 1.9 ms** -- a frame or
+two, which is the rounding where one chunk's frame index meets the next. So the
+3.3 s was not a trickle: it fell in a few large pieces, which is what the gap
+between two tracks looks like, and nothing about the player was short of audio.
+
+**Music Assistant keeps one stream open across a track change**, which is what
+makes that distinction worth having. Measured on a Dot: a track changed mid-stream
+with no `stream/end`, no `stream/start` and no gap in the thirty-second summaries
+-- the next track is simply more audio with later timestamps, and the mapping
+carries across it for nothing, because the timeline is absolute. So the silence
+between two tracks arrives as a hole in that timeline rather than as a stream
+ending, and it is counted as silence because that is what is due.
+
 **A lead is two numbers pretending to be one.** It is
 `ClientTime(stamp) - now`, so it moves when the server sends late *and* when this
 end's estimate of the server's clock moves, and the log cannot tell those apart
@@ -571,10 +679,13 @@ far less lead than `max(min_buffer, required_lead) + static` predicts, and fills
 toward the ceiling afterwards -- 1.97 seconds by the end of that same window. Three
 first streams have now opened at 182, 218 and 490 ms.
 
-What that costs the next slice is a design constraint rather than a curiosity: a
-jitter buffer **cannot assume the declared floor exists at stream start**. One that
-waited for 500 ms of audio before playing would stall through the first third of a
-second of every track. It has to open on what it is given and grow.
+That was a design constraint on the buffer rather than a curiosity, and the buffer
+answers it: it **does not wait for a quantity of audio at all**. A stream is placed
+against the player's own reading and then plays whatever is due, silence where
+nothing is, so it opens on what it is given and grows without ever holding audio
+back for a floor that may not arrive. What it does need is *lead* rather than
+depth, which is what `required_lead_time_ms` now declares, and a chunk that is
+already past when the mapping settles is dropped rather than played late.
 
 So each summary carries the clock that timed it: the spread the filter reports,
 and how far its offset moved since the previous summary. A lead that fell while
@@ -759,6 +870,16 @@ re-append the rule after the delete had run, leaving an ACCEPT for a port nothin
 listens on and nothing left to remove it. So `disable` waits for the goroutine to
 return before it calls `DenyTCP`, and `HoldTCPOpen` checks the channel again
 after the tick rather than only before it.
+
+Switching off and straight back on inside the goodbye budget has one cost worth
+knowing. `Client.Close` returns once the goodbyes are said, but each session's run
+loop retires its audio stream on the way out, which happens when the socket read
+fails rather than when `Close` returns. So a toggle inside that window leaves the
+old stream attached to the player, and the new session's first `stream/start` is
+told a stream is already open, says so once, and that first track is silent.
+Recovery is the next `stream/start`. Two seconds of operator impatience is not
+worth machinery to close, and it is the one way `available: true` with no working
+stream arises from ordinary use.
 
 Closing the listener is not enough by itself, which is what `Client.Close` is
 for. `Serve` returns when its listener closes, and that alone does nothing to a
@@ -1066,6 +1187,24 @@ test that fails without it.
   that matter here: the filter takes them unweighted, assigning the offset and
   the drift outright, so two of these set the clock to whatever they say and it
   then reports itself converged.
+- **A mapping is not a clock at every rate.** The filter's drift is a rate error,
+  and the inverse that turns a server stamp into one of ours divides by
+  `1 + drift`. A server can drive that to exactly zero: answer the first
+  `client/time` with some offset and each later one with that offset less the
+  interval since it, which is a clock running backwards at 1:1. Measured against
+  this filter, the drift reaches **-1** on the second measurement, the filter
+  reports itself converged to within 150 us, and the division answers infinity --
+  `MaxInt64` once rounded, which the audio path then refuses as a moment decades
+  away. Every chunk dropped, one line to say so, and a Dot that stays available in
+  the group while sounding nothing. So a rate below `slowestRate` is refused, and
+  so is a mapped moment past the stamp ceiling, which catches the finite-but-absurd
+  case the rate check does not.
+
+  **This is a deviation from the reference, not a port of it.** `aiosendspin`'s
+  `compute_client_time` performs the same division with no guard, so the same
+  server would raise `ZeroDivisionError` there rather than return a number. Both
+  are wrong; refusing the measurement is what a client can do about it, and
+  nothing in the spec says the mapping has to answer.
 - **An exchange that spent no time on the wire is not a measurement either.** A
   delay of exactly zero is a *zero-uncertainty* sample, and the filter has no
   floor under its own covariance: the measurement variance is zero, which drives
@@ -1108,7 +1247,14 @@ are not distinguishable from the outside: a server whose stamps sit past the
 ceiling and one that claims the whole round trip both look like a player that
 never reports itself available.
 
-Nothing reads the converged mapping yet. What it produces is one log line per
+The audio path reads the converged mapping, one call per chunk: `Session.When`
+turns a chunk's server-clock stamp into an instant on this Dot's own monotonic
+clock, and the player is handed that rather than the stamp. A chunk arriving
+before the filter converges has no moment to be played at and is dropped, said
+once per connection -- at forty chunks a second, a line each would spend the whole
+run's log budget in about two minutes.
+
+The filter also produces one log line per
 connection, the offset's standard deviation at the moment it converges, which is
 the number to look at on a Dot before any audio depends on it. Measured against
 the real Music Assistant over wifi: the clock converged about 205 ms after the
@@ -1127,18 +1273,101 @@ answer anything about a connection already up.
 ## Reporting itself unavailable, on purpose
 
 Once a server activates `player@v1`, the Dot sends `client/state` with
-**`available: false`**. The spec's precondition for a player reporting otherwise
-is a converged time filter, which now exists; what does not is an audio path to
-play into, so the answer stays false and stays honest. `supported_commands`
-is present and empty, because the field advertises settability rather than
-reportability, and a player that accepts no commands still has to say so.
+**`available: false`**, and a **second** `client/state` with `available: true` at
+the moment its clock converges. Both halves are the spec's own precondition: a
+player may report itself available once its time filter has converged, and until
+then it cannot say when a timestamp falls on its own clock. Measured on hardware
+that is about 205 ms after activation, so the false is short-lived and honest
+rather than a formality.
+
+A Dot with no player stays false for the life of the connection. That is the case
+where `audio.NewChime` failed at startup -- a ROM without OpenSL ES, a player
+another process holds -- and the daemon already logs a warning there and keeps the
+button working. Reporting available would put the Dot in the group and make the
+group wait for a speaker that cannot sound, which is the one outcome worse than
+not joining.
+
+**What is never withdrawn is an `available: true` already sent, and that is a
+decision rather than an omission.** A Dot that has said it is available and then
+cannot open a stream, or whose clock has been driven somewhere its own guards
+refuse, stays available for the rest of the connection: it drops every chunk, logs
+one line, and holds its slot in the group. Withdrawing it looks like the obvious
+fix and is worse, because of what can actually make `OpenStream` fail. Every
+reachable failure is transient -- a stream already open, a slot lost to a
+concurrent open, or a player already closed because the daemon is going away -- and
+each of those clears on the next `stream/start`. So withdrawing availability would
+trade one silent track for the rest of the session outside the group, which is the
+same trade the idle timeout in docs/audio.md is refused for. A permanently broken
+player is a different case and is already covered: it is a `NewChime` that failed,
+and that Dot never sends the true at all.
+
+`supported_commands` is present and empty, because the field advertises
+settability rather than reportability, and a player that accepts no commands still
+has to say so.
 
 ## What finishing the player means
 
-`available: true` is not the finish line, because a player that is in the group
-and a quarter of a second behind it is worse than one that never joined. The test
-is **two players and one server**: put the Dot in a group with a second Sendspin
-player and listen for the two to be one sound rather than two.
+`available: true` is sent now, and it is still not the finish line, because a
+player that is in the group and a quarter of a second behind it is worse than one
+that never joined. What is settled is everything one Dot can check by itself:
+measured on hardware, a stream is placed 134 to 164 ms after it opens against a
+pipeline the player reports as 131 to 144 ms deep, and four runs of five seconds
+of 25 ms chunks placed every frame with none dropped late and the mapping never
+moving. docs/audio.md carries those runs.
+
+What that cannot check is whether the mapping is *right*. The test is **two
+players and one server**: put the Dot in a group with a second Sendspin player and
+listen for the two to be one sound rather than two.
+
+**That test has now been run, with three Dots on one stream, and they were one
+sound.** What the logs say about it, over about ten minutes of group playback:
+each reported its pipeline within 3 ms of the others -- 144, 142 and 141 ms --
+every clock held under a millisecond, and between the three of them there was not
+one dropped chunk, re-placement, refused write or missed reading. docs/audio.md
+carries the depths, which are the cross-unit agreement the cancellation argument
+needs.
+
+What that settles is that three units on one build agree with each other. What it
+cannot settle is whether all three are wrong together, because they share the
+build that would make them so. A Dot against a Sendspin player that is **not** a
+Dot is the test for that.
+
+That has been tried once, against Music Assistant's own web player in Firefox on a
+Mac, and it was reported as not perfectly aligned but not annoying either --
+which by the ear resolution above puts it somewhere past a few milliseconds and
+short of an echo. **It is not evidence against this client, and it is important not
+to record it as such**, because the browser is the weaker end of that comparison
+in three separate ways.
+
+The number this client compensates by is arithmetic rather than an estimate: eight
+blocks of queue at 10 ms each, plus the 58 to 64 ms of HAL buffer the driver
+reports, is 138 to 144 ms, and 141 to 144 is what the three Dots measured. What is
+left unaccounted on this side is only what happens after the frames the HAL counts
+-- the I2S transfer, the codec's own digital filter group delay, the amplifier --
+and those are microseconds to a fraction of a millisecond.
+
+A browser's is none of those things. Web Audio to CoreAudio to the speakers is
+typically tens of milliseconds on a Mac, it moves with the output device and the
+buffer size, and the player has to declare it -- through
+`AudioContext.outputLatency` or equivalent -- for the server to take it off the
+timestamp. A web player that does not is late by exactly that, which is the
+direction and roughly the size of what was heard. The two outputs are not even the
+same pipeline: the browser was sent FLAC 48 kHz 16-bit **stereo** and the Dots raw
+PCM 48 kHz 16-bit **mono**, so only one of the two has a decoder to account for.
+
+So the comparison is real but unresolved, and resolving it needs an instrument
+rather than an ear. Two ways, in increasing cost. Music Assistant's per-player
+`CONF_SENDSPIN_STATIC_DELAY` can be nudged until the two align, and the value that
+aligns them is the size of the disagreement -- ten or twenty milliseconds would sit
+inside what this end's own instrument can see, and a hundred would mean something
+here is wrong. That measures the gap without saying which end owns it, and it is
+the operator's dial for a room rather than a number to bake into this client,
+which would then be carrying a browser's error on every other player. An absolute
+answer needs one microphone recording both speakers: the same content arrives
+twice in one recording, so the offset is the secondary peak of its
+autocorrelation, with a metre of path difference worth 2.9 ms and to be measured
+and subtracted. Two Dots recorded the same way are the control, since they are
+known to agree to 3 ms.
 
 That test is worth more than any instrument on the device, and the reason is in
 docs/audio.md. The Dot can read the DAC's own clock to well under a millisecond,

@@ -144,8 +144,8 @@ func TestServeTakesAConnectionThroughToClientState(t *testing.T) {
 	if state.Player.StaticDelayMS != 0 {
 		t.Errorf("static_delay_ms = %d, want 0: it is the delay *past* this device's audio"+
 			" port, which a Dot with one speaker does not have, and the server sends"+
-			" that much earlier for it. The ~95 ms inside the Dot is ours to take off"+
-			" the timestamp before scheduling, not to declare here",
+			" that much earlier for it. The delay inside the Dot is ours to compensate"+
+			" for by asking the player where its audio has reached, not to declare here",
 			state.Player.StaticDelayMS)
 	}
 }

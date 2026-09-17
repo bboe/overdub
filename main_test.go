@@ -553,7 +553,7 @@ func TestTogglingSendspinDoesNotHandOutAFreshLogBudget(t *testing.T) {
 		name: "kitchen", mac: "00:00:00:00:00:01",
 		peer: &untrustedlog.Log{Subject: "sendspin"},
 	}
-	first := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, toggle.peer)
+	first := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, toggle.peer)
 	for i := 0; i < untrustedlog.Burst; i++ {
 		first.Peer.Printf("sendspin: line %d", i)
 	}
@@ -562,7 +562,7 @@ func TestTogglingSendspinDoesNotHandOutAFreshLogBudget(t *testing.T) {
 		t.Fatalf("wrote %d lines, want the burst of %d", spent, untrustedlog.Burst)
 	}
 
-	next := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, toggle.peer)
+	next := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, toggle.peer)
 	next.Peer.Printf("sendspin: after the switch came back")
 	if got := next.Peer.Written(); got != spent {
 		t.Errorf("the switch-on wrote %d lines against a budget that had already spent %d; "+
@@ -814,5 +814,23 @@ func TestAnAdvertIsNeverPublishedForASurfaceAlreadySwitchedOff(t *testing.T) {
 		if step == "advert" {
 			t.Fatalf("published %v for a surface whose `on` was already false", steps.seen())
 		}
+	}
+}
+
+func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
+	client := sendspinClient("kitchen", "00:00:00:00:00:01", sendspin.Keys{}, nil, nil)
+	if client.RequiredLeadMS != sendspinLead {
+		t.Fatalf("the client declares a %d ms lead where this dot needs %d, so a server may"+
+			" send a first chunk sooner than the mapping can be placed",
+			client.RequiredLeadMS, sendspinLead)
+	}
+	page, err := os.ReadFile("docs/sendspin.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), fmt.Sprintf("`required_lead_time_ms` is **%d**",
+		sendspinLead)) {
+		t.Errorf("docs/sendspin.md does not say the lead is %d, so the page and the wire"+
+			" disagree about the one number measured on hardware", sendspinLead)
 	}
 }

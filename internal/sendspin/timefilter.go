@@ -13,6 +13,7 @@ const (
 	adaptiveAfter        = 100
 	maxErrorScale        = 0.5
 	driftSignificance    = 2.0 * 2.0
+	slowestRate          = 0.5
 )
 
 type timeElement struct {
@@ -124,16 +125,23 @@ func (f *timeFilter) ServerTime(clientTime int64) int64 {
 	return clientTime + int64(math.Round(e.offset+drift*float64(clientTime-e.lastUpdate)))
 }
 
-func clientFrom(e timeElement, serverTime int64) int64 {
+func clientFrom(e timeElement, serverTime int64) (int64, bool) {
 	drift := 0.0
 	if e.useDrift {
 		drift = e.drift
 	}
-	return int64(math.Round((float64(serverTime) - e.offset + drift*float64(e.lastUpdate)) /
-		(1.0 + drift)))
+	rate := 1.0 + drift
+	if !(rate >= slowestRate) {
+		return 0, false
+	}
+	client := math.Round((float64(serverTime) - e.offset + drift*float64(e.lastUpdate)) / rate)
+	if !(math.Abs(client) <= stampCeiling) {
+		return 0, false
+	}
+	return int64(client), true
 }
 
-func (f *timeFilter) ClientTime(serverTime int64) int64 {
+func (f *timeFilter) ClientTime(serverTime int64) (int64, bool) {
 	return clientFrom(f.element(), serverTime)
 }
 
@@ -144,7 +152,11 @@ func (f *timeFilter) sample(serverTime int64) (client, spread, offset int64, ok 
 	if !converged {
 		return 0, 0, 0, false
 	}
-	return clientFrom(f.current, serverTime), spread, int64(math.Round(f.current.offset)), true
+	client, ok = clientFrom(f.current, serverTime)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return client, spread, int64(math.Round(f.current.offset)), true
 }
 
 func (f *timeFilter) Converged() bool {

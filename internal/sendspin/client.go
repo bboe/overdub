@@ -98,7 +98,10 @@ type Client struct {
 	Keys   Keys
 	PSKs   PSKSet
 
-	MinBufferMS int
+	MinBufferMS    int
+	RequiredLeadMS int
+
+	Player Player
 
 	handshakeAfter   time.Duration
 	provisionalAfter time.Duration
@@ -329,7 +332,9 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	defer close(stop)
 
 	var noted noteSet
-	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery)}
+	play := playback{player: c.Player, say: c.Play.Printf, name: name}
+	defer play.stop()
+	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery), play: &play}
 	defer func() { heard.done(c.Play, name) }()
 	once := func(format string, args ...any) {
 		if noted.first(format + "\x00" + fmt.Sprint(args...)) {
@@ -352,6 +357,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 					once("sendspin: %q sent audio this player cannot read: %v", name, err)
 				case chunk != nil:
 					heard.took(c.Play, name, session, chunk)
+					play.take(session, chunk)
 				}
 			case playerBinary(msg):
 				once("sendspin: %q sent %#x, which the player reserves and does not carry"+
@@ -371,8 +377,11 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if err != nil {
 				return err
 			}
-			if len(roles) == 0 {
+			if !holdsPlayer(roles) {
 				heard.done(c.Play, name)
+				play.stop()
+			}
+			if len(roles) == 0 {
 				c.release(session)
 				allowance := waitOr(c.rolelessAfter, provisionalWait)
 				if rolelessSince.IsZero() {
@@ -407,7 +416,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if !stated {
 				ws.setIdle(idleWait)
 				go keepalive(ws, stop, waitOr(c.pingEvery, pingAfter))
-				if err := c.state(session); err != nil {
+				if err := c.state(session, false); err != nil {
 					return err
 				}
 				go c.keepTime(session, stop)
@@ -434,6 +443,9 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				if converged, spread := session.clock.filter.state(); converged {
 					synced = true
 					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
+					if err := c.state(session, c.Player != nil); err != nil {
+						return err
+					}
 				}
 			}
 		case typeStreamStart:
@@ -449,11 +461,13 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				c.Play.Printf("sendspin: %q started a stream carrying nothing for a player",
 					name)
 			case session.Streaming():
+				play.open()
 				c.Play.Printf("sendspin: %q started a %s stream", name, offered)
 			case !holdsPlayer(session.roles):
 				c.Play.Printf("sendspin: %q started a stream for a role this client does"+
 					" not hold", name)
 			default:
+				play.stop()
 				c.Play.Printf("sendspin: %q offered a %s stream, and this player takes %s"+
 					" %d Hz %d ch %d bit", name, offered, codecPCM, StreamRate,
 					StreamChannels, StreamBitDepth)
@@ -465,6 +479,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			}
 			if ours {
 				heard.done(c.Play, name)
+				play.finish()
 				c.Play.Printf("sendspin: %q ended its stream", name)
 			}
 		case typeStreamClear:
@@ -474,6 +489,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			}
 			if ours {
 				heard.report(c.Play, name)
+				play.clear()
 				c.Play.Printf("sendspin: %q cleared what it had sent", name)
 			}
 		case typeServerState, typeServerComm:
@@ -499,12 +515,13 @@ func keepalive(ws *Conn, stop <-chan struct{}, every time.Duration) {
 	}
 }
 
-func (c *Client) state(session *Session) error {
+func (c *Client) state(session *Session, available bool) error {
 	return session.WriteJSON(typeClientState, clientState{
-		Available: false,
+		Available: available,
 		Player: &playerState{
-			MinBufferMS:       c.MinBufferMS,
-			SupportedCommands: []string{},
+			RequiredLeadTimeMS: c.RequiredLeadMS,
+			MinBufferMS:        c.MinBufferMS,
+			SupportedCommands:  []string{},
 		},
 	})
 }

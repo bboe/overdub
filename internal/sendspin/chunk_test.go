@@ -393,3 +393,58 @@ func TestEachWindowMeasuresItsOwnLeadBounds(t *testing.T) {
 		t.Fatal("the first window measured nothing, so the comparison proves nothing")
 	}
 }
+
+func TestASummarySaysHowMuchOfTheWindowWasSilence(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	peer := &untrustedlog.Log{}
+	s := held()
+	p := ours()
+	startWith(t, s, &p)
+
+	stream := &fakeStream{}
+	run := chunkRun{every: reportEvery, play: &playback{stream: stream}}
+	feedChunks(t, &run, peer, s, 2)
+
+	stream.heard(StreamRate, StreamRate/2)
+	run.report(peer, "server")
+	if got := out.String(); !strings.Contains(got, "placed 1s of audio against 500ms of silence") {
+		t.Errorf("the summary does not say what the player did with the window, so a gap"+
+			" cannot be told from audio that arrived and played:\n%s", got)
+	}
+
+	out.Reset()
+	feedChunks(t, &run, peer, s, 2)
+	stream.heard(2*StreamRate, StreamRate/2)
+	run.report(peer, "server")
+	if got := out.String(); !strings.Contains(got, "placed 1s of audio against 0s of silence") {
+		t.Errorf("the second window reports the whole stream rather than the window, so a"+
+			" gap at one track boundary reads as a player that is always short:\n%s", got)
+	}
+}
+
+func TestASummaryAfterAFreshStreamCountsFromItsOwnZero(t *testing.T) {
+	first := &fakeStream{}
+	play := playback{stream: first}
+	run := chunkRun{every: reportEvery, play: &play}
+
+	first.heard(5*StreamRate, StreamRate/2)
+	run.placedSince()
+
+	second := &fakeStream{}
+	play.stream = second
+	second.heard(30*StreamRate, StreamRate)
+
+	audio, silence := run.placedSince()
+	if audio != 30*StreamRate || silence != StreamRate {
+		t.Errorf("the first window of a replaced stream reported %d and %d, want its"+
+			" own %d and %d. A fresh stream counts from zero, so a baseline carried"+
+			" over from the one before it undercounts the window by that whole"+
+			" stream -- and it does so silently, because the difference only looks"+
+			" wrong once the new stream has outrun the old one",
+			audio, silence, 30*StreamRate, StreamRate)
+	}
+}

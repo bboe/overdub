@@ -235,6 +235,9 @@ func TestAnsweredExchangesConvergeTheHeldSession(t *testing.T) {
 
 	for range 3 {
 		kind, payload := readJSON(t, peer, server)
+		if kind == typeClientState {
+			kind, payload = readJSON(t, peer, server)
+		}
 		if kind != typeClientTime {
 			t.Fatalf("wanted %s, got %s", typeClientTime, kind)
 		}

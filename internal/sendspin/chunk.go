@@ -68,6 +68,8 @@ const reportEvery = 30 * time.Second
 
 func micros(us int64) time.Duration { return time.Duration(us) * time.Microsecond }
 
+func frames(n int64) time.Duration { return time.Duration(n) * time.Second / StreamRate }
+
 type chunkRun struct {
 	announced bool
 
@@ -86,6 +88,24 @@ type chunkRun struct {
 	spread     int64
 	firstOff   int64
 	lastOff    int64
+
+	play        *playback
+	lastStream  Stream
+	lastPlaced  int64
+	lastSilence int64
+}
+
+func (r *chunkRun) placedSince() (audio, silence int64) {
+	if r.play == nil {
+		return 0, 0
+	}
+	if r.play.stream != r.lastStream {
+		r.lastStream, r.lastPlaced, r.lastSilence = r.play.stream, 0, 0
+	}
+	placed, quiet := r.play.counts()
+	audio, silence = placed-r.lastPlaced, quiet-r.lastSilence
+	r.lastPlaced, r.lastSilence = placed, quiet
+	return audio, silence
 }
 
 func (r *chunkRun) took(peer *untrustedlog.Log, name string, s *Session, c *audioChunk) {
@@ -132,20 +152,26 @@ func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 	if r.chunks == 0 {
 		return
 	}
+	audio, silence := r.placedSince()
 	if r.leadKnown {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, due between"+
-			" %s and %s ahead, against a clock good to %s that moved %s", name,
+			" %s and %s ahead, against a clock good to %s that moved %s; the player"+
+			" placed %s of audio against %s of silence", name,
 			r.chunks, r.frames, r.bytes, micros(r.leastLead), micros(r.mostLead),
-			micros(r.spread), micros(r.lastOff-r.firstOff))
+			micros(r.spread), micros(r.lastOff-r.firstOff), frames(audio), frames(silence))
 	} else {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, with no clock"+
-			" to say when they were due", name, r.chunks, r.frames, r.bytes)
+			" to say when they were due; the player placed %s of audio against %s of"+
+			" silence", name, r.chunks, r.frames, r.bytes, frames(audio), frames(silence))
 	}
 	*r = chunkRun{announced: r.announced, every: r.every, due: time.Now().Add(r.every),
-		clockKnown: r.clockKnown, firstOff: r.lastOff, lastOff: r.lastOff}
+		clockKnown: r.clockKnown, firstOff: r.lastOff, lastOff: r.lastOff,
+		play: r.play, lastStream: r.lastStream,
+		lastPlaced: r.lastPlaced, lastSilence: r.lastSilence}
 }
 
 func (r *chunkRun) done(peer *untrustedlog.Log, name string) {
 	r.report(peer, name)
-	*r = chunkRun{every: r.every}
+	*r = chunkRun{every: r.every, play: r.play, lastStream: r.lastStream,
+		lastPlaced: r.lastPlaced, lastSilence: r.lastSilence}
 }

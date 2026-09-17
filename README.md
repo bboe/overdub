@@ -25,16 +25,23 @@ interface Amazon offers, so driving it may sit outside Amazon's terms. Read
 [Alexa commands](#alexa-commands) before building MapDump. Without the jar the
 daemon never offers them.
 
-**The Dot also announces itself to Music Assistant, and cannot play anything
-yet.** It advertises `_sendspin._tcp.local.` on tcp/8928 and speaks Sendspin as
-far as an activated session, reporting `available: false` -- which is the honest
-answer until there is a synchronised clock and an audio path. Music Assistant
-will find it and show it as unavailable. Anything that can reach the Dot on
-`wlan0` can take that session, because the pairing flow is not implemented and
-the fallback key is a published constant; nothing behind it plays audio or reads
-anything off the device, but see [SECURITY.md](SECURITY.md) for what it does
+**The Dot also announces itself to Music Assistant, and plays.** It advertises
+`_sendspin._tcp.local.` on tcp/8928, joins a group as a `player@v1`, keeps its
+clock against the server's and plays the audio it is sent on the frame that
+audio's own timestamp names. It reports `available: false` until that clock has
+converged, which takes about a fifth of a second, and stays false on a Dot whose
+speaker could not be opened at all. Anything that can reach the Dot on `wlan0`
+can take that session, because the pairing flow is not implemented and the
+fallback key is a published constant; what is behind it is playback and nothing
+that reads off the device, but see [SECURITY.md](SECURITY.md) for what it does
 hold. `switch.<name>_sendspin` turns the whole thing off -- the advert, the port
 and any session -- and the setting survives a reboot.
+
+What has not been settled is whether the Dot is in step with a *second* speaker
+to better than a few milliseconds. One Dot can measure everything but that, so
+grouping it with another Sendspin player and listening is the check that is left;
+`docs/sendspin.md` says why and Music Assistant's own per-player delay is the dial
+for whatever is left over.
 
 Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
