@@ -106,9 +106,11 @@ type Client struct {
 	pingEvery        time.Duration
 	goodbyeAfter     time.Duration
 	timeEvery        time.Duration
+	reportEvery      time.Duration
 	answerAfter      time.Duration
 
 	Peer *untrustedlog.Log
+	Play *untrustedlog.Log
 
 	mu     sync.Mutex
 	held   *Session
@@ -158,6 +160,9 @@ func (c *Client) Serve(ln net.Listener) error {
 	c.mu.Lock()
 	if c.Peer == nil {
 		c.Peer = &untrustedlog.Log{Subject: "sendspin"}
+	}
+	if c.Play == nil {
+		c.Play = &untrustedlog.Log{Subject: "sendspin playback"}
 	}
 	c.mu.Unlock()
 	c.Peer.Printf("sendspin listening on %s (client %q)", ln.Addr(), c.Config.Name)
@@ -324,6 +329,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	defer close(stop)
 
 	var noted noteSet
+	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery)}
+	defer func() { heard.done(c.Play, name) }()
 	once := func(format string, args ...any) {
 		if noted.first(format + "\x00" + fmt.Sprint(args...)) {
 			c.Peer.Printf(format, args...)
@@ -335,8 +342,23 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 		if err != nil {
 			return err
 		}
+		heard.tick(c.Play, name)
 		if msg != msgJSON {
-			once("sendspin: %q sent a %#x message, which is not handled yet", name, msg)
+			switch {
+			case msg == binaryAudioChunk:
+				chunk, err := session.AudioChunk(body)
+				switch {
+				case err != nil:
+					once("sendspin: %q sent audio this player cannot read: %v", name, err)
+				case chunk != nil:
+					heard.took(c.Play, name, session, chunk)
+				}
+			case playerBinary(msg):
+				once("sendspin: %q sent %#x, which the player reserves and does not carry"+
+					" audio", name, msg)
+			default:
+				once("sendspin: %q sent a %#x message, which is not handled yet", name, msg)
+			}
 			continue
 		}
 		kind, payload, err := decodeEnvelope(body)
@@ -350,6 +372,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				return err
 			}
 			if len(roles) == 0 {
+				heard.done(c.Play, name)
 				c.release(session)
 				allowance := waitOr(c.rolelessAfter, provisionalWait)
 				if rolelessSince.IsZero() {
@@ -418,18 +441,22 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if err != nil {
 				return err
 			}
+			if offered != nil {
+				heard.done(c.Play, name)
+			}
 			switch {
 			case offered == nil:
-				once("sendspin: %q started a stream carrying nothing for a player", name)
-			case session.Streaming():
-				once("sendspin: %q started a %s stream", name, offered)
-			case !holdsPlayer(session.roles):
-				once("sendspin: %q started a stream for a role this client does not hold",
+				c.Play.Printf("sendspin: %q started a stream carrying nothing for a player",
 					name)
+			case session.Streaming():
+				c.Play.Printf("sendspin: %q started a %s stream", name, offered)
+			case !holdsPlayer(session.roles):
+				c.Play.Printf("sendspin: %q started a stream for a role this client does"+
+					" not hold", name)
 			default:
-				once("sendspin: %q offered a %s stream, and this player takes %s %d Hz"+
-					" %d ch %d bit", name, offered, codecPCM, StreamRate, StreamChannels,
-					StreamBitDepth)
+				c.Play.Printf("sendspin: %q offered a %s stream, and this player takes %s"+
+					" %d Hz %d ch %d bit", name, offered, codecPCM, StreamRate,
+					StreamChannels, StreamBitDepth)
 			}
 		case typeStreamEnd:
 			ours, err := session.EndStream(payload)
@@ -437,7 +464,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				return err
 			}
 			if ours {
-				once("sendspin: %q ended its stream", name)
+				heard.done(c.Play, name)
+				c.Play.Printf("sendspin: %q ended its stream", name)
 			}
 		case typeStreamClear:
 			ours, err := session.ClearStream(payload)
@@ -445,7 +473,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				return err
 			}
 			if ours {
-				once("sendspin: %q cleared what it had sent", name)
+				heard.report(c.Play, name)
+				c.Play.Printf("sendspin: %q cleared what it had sent", name)
 			}
 		case typeServerState, typeServerComm:
 			once("sendspin: %q is not handled yet", untrustedlog.Cut(kind))

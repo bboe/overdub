@@ -453,6 +453,144 @@ admission section describes, and it is easy to reproduce by accident, since a Go
 pointer to a nil slice marshals as `null` and reads back as omitted rather than as
 empty.
 
+## The audio itself
+
+Audio arrives as binary messages rather than JSON. The player's range is the four
+type bytes 4 to 7, and only **4** carries audio: `aiosendspin` defines
+`AUDIO_CHUNK = 4` and nothing for 5, 6 or 7, so a client meeting one of those has
+met a server from the future rather than a chunk it should try to play. The
+reference client refuses them the same way, by failing to construct its enum.
+
+The header is nine bytes, `>Bq`: the type byte, then the timestamp in
+**microseconds as a big-endian signed 64-bit integer**. This transport already
+peels the type byte off as the message kind, so what reaches the parser is the
+eight-byte stamp followed by the audio. The endianness is the trap worth naming:
+the header is big-endian and the PCM after it is little-endian, so a parser that
+picks one for the whole message reads plausible rubbish rather than failing.
+
+A refused chunk is **dropped rather than fatal**, and what it says carries none of
+the server's own numbers. The run loop reports most things once per connection by
+remembering what it has said, and what it remembers is the line *with its
+arguments filled in* -- so a stamp in the text makes every bad chunk a new thing
+to remember. That list is sixteen long, which a server stamping 25 ms chunks
+wrongly fills in under half a second, and after that nothing else on the
+connection is ever logged: not the roles, not the clock, not an unknown message.
+A refusal therefore names the rule it broke and not the number that broke it.
+
+The session survives it and says so once, because a server that stamps every chunk the same wrong way would
+otherwise be disconnected on the first chunk of every stream for ever, and Music
+Assistant stops retrying after about eight and a half minutes. That also matches
+how the same `onAClock` check is treated on a `server/time` reply, where an
+off-clock stamp refuses the measurement rather than the connection.
+
+Two refusals matter more than they look. A body shorter than eight bytes has no
+timestamp to read, and reading one anyway slices past the end -- which is a panic,
+and a panic here is the supervisor's five-second restart loop with the button
+ungrabbed each time. Audio whose length is not a whole number of frames is worse
+than a truncated chunk: at 16 bits a stray byte pairs every later byte with the
+wrong neighbour, so the stream stays desynchronised for as long as it runs rather
+than glitching once.
+
+A chunk arriving with no stream open is dropped rather than refused, because the
+format that would decode it is whatever the last `stream/start` named. The
+reference does the same, gating each binary type on whether its role's stream is
+active.
+
+**`send_ahead` is the server's number, not a field.** Nothing on the wire carries
+it. The server computes it from what this client declared -- `min_buffer_ms`,
+`static_delay_ms` and `required_lead_time_ms` -- and sends each chunk that far
+before it is due. So the timestamps are in the future by an amount this end chose,
+and the client's own declaration is what it will have to live with. Measured on
+hardware, the first chunk follows `stream/start` by about a millisecond, so a
+player is never given a quiet moment between being told the format and being
+handed audio in it.
+
+## What the log says while a stream runs
+
+The run loop reports most things once per connection, because a peer that repeats
+itself should not be able to fill `/data`. Stream transitions are the exception:
+`stream/start`, `stream/end` and `stream/clear` log every time. Measured on
+hardware, the dedupe made this log useless for exactly the question it was being
+read for -- several tracks played, and only the first one said anything, so
+nothing distinguished "the second track worked" from "the second track never
+arrived".
+
+Those lines spend a **budget of their own**. `internal/untrustedlog` allows twenty
+peer lines a minute and five thousand for the run, and the run ceiling never
+refills: once it is gone, nothing a peer does is logged again until the daemon
+restarts. Playing music is a peer talking constantly and legitimately, so a
+per-connection dedupe was the only thing keeping ordinary listening from retiring
+the log -- two summaries a minute alone reach five thousand in about forty hours
+of cumulative playback, and a server flapping its stream reaches it in minutes.
+
+So playback gets a second `untrustedlog.Log` rather than a share of the first. The
+counters live per `Log`, so the stream lines, the first-chunk lines and the
+summaries can spend themselves out without taking the handshake, the roles, the
+clock or an unknown message type with them. What reaches the disk is the sum of
+two bounded budgets rather than one unbounded one, and each says so when it starts
+dropping lines.
+
+Audio chunks are not logged one by one: Music Assistant sends 1,200 frames at a
+time, which is 25 ms, so that is forty lines a second. The first chunk of a stream
+is logged with how far ahead of now it is due, and a summary follows every thirty
+seconds, when the stream ends, and when the connection does: how many chunks,
+frames and bytes arrived, and the range of lead times.
+
+A summary is written when a message arrives and the interval has passed, rather
+than when a chunk does. A stream that stops sending audio while the server keeps
+talking is the starvation this number exists to make visible, and a summary that
+only ever followed a chunk would go quiet exactly then. A server that stops
+talking altogether is caught by the idle timeout instead, and the connection's
+last act is to report what it had heard.
+
+The interval is a **duration rather than a count**, because a count is a rate the
+server picks. At one summary per five hundred chunks, a server sending 10 ms
+chunks writes twelve lines a minute and one sending 1 ms chunks writes a hundred
+and twenty, which is over the twenty-a-minute limit and would sit at the limiter
+for as long as music played -- suppressing every other peer line, and spending the
+five thousand for the run in under an hour. Thirty seconds is two a minute
+whatever the server chooses.
+
+The lead is the number worth watching, because it is the server's `send_ahead` as
+this client actually sees it, and a stream whose lead shrinks toward zero is one
+that will starve.
+
+Measured on hardware across five streams, the first chunk is due 481 to 493 ms
+ahead and the lead grows to about 2.4 seconds. Both numbers are this client's own:
+the floor is the `min_buffer_ms` of 500 that `serve.go` declares, and the ceiling
+is that plus the two seconds of `buffer_capacity`. The server fills what it was
+told and stops, so a player that wants a different lead asks for it by declaring
+one rather than by asking the server for it.
+
+A `stream/start` carrying nothing for a player flushes nothing. The same message
+opens artwork and visualizer streams, and one of those arriving while music plays
+is not this player's stream ending -- flushing there would split a summary in two
+and make the next chunk of a stream that never stopped read as a new one starting.
+
+A `stream/clear` flushes the summary but keeps the stream, because the stream is
+still the one that was announced -- a clear discards what was buffered and the
+audio carries on. Giving up the player role mid-stream flushes it too, and there
+the flush has to happen at the moment the role goes: the counts would otherwise be
+reported against whatever stream started next, which reads as a summary for audio
+that had not arrived yet.
+
+Lead times are printed as durations rather than whole milliseconds. Integer
+division toward zero renders anything from -999 us to 0 as `0 ms`, so a stream
+already arriving late would read exactly like one running tight -- and late is the
+failure this number exists to catch.
+
+A chunk's timestamp is bounded the way a `server/time` stamp is, by `onAClock`.
+The stamps are microseconds on the server's own monotonic clock rather than since
+the epoch -- an epoch stamp is already past the ceiling, which is what makes the
+bound worth having: scheduling against one would put every frame decades away.
+
+That the stamps really are monotonic is measured rather than assumed, and the
+measurement matters because the failure would be total and quiet: every chunk
+refused, one line to say so, and a Dot that looks like it was sent no audio at
+all. Music Assistant was played to a Dot running this bound, and its chunks were
+accepted across four streams with leads of 182 to 490 ms. A wall-clock stamp would
+have refused every one of them.
+
 What is not implemented is `stream/request-format`, the message a client sends to
 ask for something it can play. With one declared format and a server that honours
 it, the path is unreachable; a refused stream logs and stops there.

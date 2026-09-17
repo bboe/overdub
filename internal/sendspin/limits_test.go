@@ -509,11 +509,11 @@ func TestTheKeepalivePingsAnIdleHolder(t *testing.T) {
 	}
 }
 
-func audioChunk(t *testing.T, samples int) []byte {
+func chunkFrame(t *testing.T, samples int) []byte {
 	t.Helper()
 	b := make([]byte, 1+8+samples)
 	b[0] = 4
-	binary.BigEndian.PutUint64(b[1:9], uint64(time.Now().UnixMicro()))
+	binary.BigEndian.PutUint64(b[1:9], uint64(nowMicros()))
 	return b
 }
 
@@ -524,7 +524,7 @@ func TestAnAudioChunkDoesNotDropTheSession(t *testing.T) {
 	peer, server, _ := bringUp(t, c, ln)
 
 	for range 3 {
-		peer.writeBinary(server.seal(t, audioChunk(t, 64)))
+		peer.writeBinary(server.seal(t, chunkFrame(t, 64)))
 	}
 	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
 	time.Sleep(300 * time.Millisecond)
@@ -553,7 +553,8 @@ func TestOrdinaryTrafficDoesNotSpendThePeerBudget(t *testing.T) {
 	before := c.Peer.Written()
 	for range 200 {
 		peer.writeBinary(server.sealJSON(t, typeStreamEnd, struct{}{}))
-		peer.writeBinary(server.seal(t, audioChunk(t, 8)))
+		peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+		peer.writeBinary(server.seal(t, []byte{0x40, 1, 2}))
 		peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{
 			PlaybackState: "playing", GroupID: "g1", GroupName: "kitchen",
 		}))
@@ -565,7 +566,7 @@ func TestOrdinaryTrafficDoesNotSpendThePeerBudget(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	if spent := c.Peer.Written() - before; spent > 6 {
-		t.Errorf("800 ordinary messages spent %d lines of the peer budget; one per"+
+		t.Errorf("1000 ordinary messages spent %d lines of the peer budget; one per"+
 			" distinct thing said is the most that says anything new", spent)
 	}
 	if !strings.Contains(out.String(), "not handled yet") {
@@ -832,5 +833,276 @@ func TestRepeatingAnActivationCostsNeitherAStateNorAKeepalive(t *testing.T) {
 	if !peer.quiet(400 * time.Millisecond) {
 		t.Error("a repeated activation was answered again: each one writes another" +
 			" client/state and leaves another keepalive ticker running")
+	}
+}
+
+func TestEveryStreamIsLoggedRatherThanOnlyTheFirst(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	for range 3 {
+		peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{
+			ServerTransmitted: 1, Player: &streamPlayer{
+				Codec: codecPCM, SampleRate: StreamRate,
+				Channels: StreamChannels, BitDepth: StreamBitDepth,
+			}}))
+		peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	if got := strings.Count(out.String(), "started a"); got != 3 {
+		t.Errorf("three streams were logged %d times; a track after the first says"+
+			" nothing, which is what made the second one unreadable on hardware", got)
+	}
+	if got := strings.Count(out.String(), "ended its stream"); got != 3 {
+		t.Errorf("three stream ends were logged %d times", got)
+	}
+}
+
+func TestAConnectionThatDropsMidStreamSaysWhatItHeard(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{
+		ServerTransmitted: 1, Player: &streamPlayer{
+			Codec: codecPCM, SampleRate: StreamRate,
+			Channels: StreamChannels, BitDepth: StreamBitDepth,
+		}}))
+	for range 3 {
+		peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	}
+	time.Sleep(300 * time.Millisecond)
+	peer.conn.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	if !strings.Contains(out.String(), "3 chunks") {
+		t.Error("a connection that dropped mid-stream threw away what it had counted," +
+			" which is exactly the run somebody reads the log to ask about")
+	}
+}
+
+func TestAChunkThisPlayerCannotReadDoesNotDropTheSession(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+
+	bad := make([]byte, 1+chunkStampBytes+2)
+	bad[0] = binaryAudioChunk
+	binary.BigEndian.PutUint64(bad[1:9], uint64(stampCeiling+1))
+	peer.writeBinary(server.seal(t, bad))
+	time.Sleep(200 * time.Millisecond)
+
+	peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 3}))
+	time.Sleep(400 * time.Millisecond)
+
+	if !strings.Contains(out.String(), "cannot read") {
+		t.Error("a chunk this player could not read was dropped with nothing said")
+	}
+	if !strings.Contains(out.String(), "ended its stream") {
+		t.Error("a chunk this player could not read closed the session, so the message" +
+			" after it was never read; a server stamping every chunk the same way is" +
+			" then never played at all")
+	}
+}
+
+func playing(t *testing.T, peer *wsPeer, server *serverSide) {
+	t.Helper()
+	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{
+		ServerTransmitted: 1, Player: &streamPlayer{
+			Codec: codecPCM, SampleRate: StreamRate,
+			Channels: StreamChannels, BitDepth: StreamBitDepth,
+		}}))
+}
+
+func TestClearingMidStreamDoesNotReadAsAnotherStreamStarting(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	peer.writeBinary(server.sealJSON(t, typeStreamClear, streamRoles{ServerTransmitted: 2}))
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	time.Sleep(400 * time.Millisecond)
+
+	if got := strings.Count(out.String(), "its first chunk"); got != 1 {
+		t.Errorf("one stream announced a first chunk %d times; a clear leaves the stream"+
+			" open, so the audio after it is the same stream carrying on", got)
+	}
+}
+
+func TestLosingThePlayerRoleSummarisesTheStreamItAbandoned(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	time.Sleep(200 * time.Millisecond)
+
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities: []string{}, ActiveRoles: &none}))
+	time.Sleep(300 * time.Millisecond)
+
+	said := out.String()
+	at := strings.Index(said, "1 chunks")
+	if at < 0 {
+		t.Fatal("the stream this client was told to abandon was never summarised, and its" +
+			" counts are reported against whatever stream comes next")
+	}
+	if holds := strings.Index(said, "holds no role now"); holds >= 0 && at > holds {
+		t.Error("the summary came after the role was given up, so it reads as belonging" +
+			" to a stream that had not started")
+	}
+}
+
+func badChunk(t *testing.T, stamp int64) []byte {
+	t.Helper()
+	b := make([]byte, 1+chunkStampBytes+2)
+	b[0] = binaryAudioChunk
+	binary.BigEndian.PutUint64(b[1:9], uint64(stamp))
+	return b
+}
+
+func TestAServerStampingEveryChunkWrongDoesNotBlindTheLog(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	for i := range 40 {
+		peer.writeBinary(server.seal(t, badChunk(t, stampCeiling+1+int64(i))))
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	peer.writeBinary(server.seal(t, []byte{0x40, 1, 2}))
+	time.Sleep(400 * time.Millisecond)
+
+	if got := strings.Count(out.String(), "cannot read"); got != 1 {
+		t.Errorf("forty unreadable chunks were reported %d times; each carried the"+
+			" server's own number, so each is a note of its own", got)
+	}
+	if !strings.Contains(out.String(), "not handled yet") {
+		t.Error("the note budget was spent on one server's bad stamps, so nothing else" +
+			" this connection does is ever logged again")
+	}
+}
+
+func TestAStreamForAnotherRoleDoesNotSplitThePlayersSummary(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{ServerTransmitted: 2}))
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	time.Sleep(400 * time.Millisecond)
+
+	if got := strings.Count(out.String(), "its first chunk"); got != 1 {
+		t.Errorf("the player's stream announced a first chunk %d times; a stream/start"+
+			" for artwork or a visualizer is not this player's stream ending", got)
+	}
+	if strings.Contains(out.String(), "1 chunks") {
+		t.Error("a stream/start for another role flushed a summary for audio that was" +
+			" still arriving on the player's own stream")
+	}
+}
+
+func TestAStreamThatStoppedSendingAudioIsStillSummarised(t *testing.T) {
+	var out lockedLog
+	was := log.Writer()
+	log.SetOutput(&out)
+	defer log.SetOutput(was)
+
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.reportEvery = 150 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
+	time.Sleep(300 * time.Millisecond)
+
+	if strings.Contains(out.String(), "1 chunks") {
+		t.Fatal("a summary arrived with no message to carry it, so nothing here is tested")
+	}
+	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{
+		PlaybackState: "playing", GroupID: "g1", GroupName: "kitchen"}))
+	time.Sleep(300 * time.Millisecond)
+
+	if !strings.Contains(out.String(), "1 chunks") {
+		t.Error("a stream that stopped sending audio said nothing more, which is the" +
+			" starvation the lead number exists to make visible")
+	}
+}
+
+func TestPlaybackCannotSpendTheBudgetTheHandshakeNeeds(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	before := c.Peer.Written()
+	for range 300 {
+		playing(t, peer, server)
+		peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
+	}
+	time.Sleep(700 * time.Millisecond)
+
+	if spent := c.Peer.Written() - before; spent > 2 {
+		t.Errorf("a server flapping its stream spent %d lines of the budget the roles,"+
+			" the clock and the handshake share, and that budget never refills", spent)
+	}
+	if c.Play.Written() == 0 {
+		t.Error("the streams were not logged at all")
 	}
 }
