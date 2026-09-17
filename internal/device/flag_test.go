@@ -2,6 +2,7 @@ package device
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,39 @@ func TestAFlagTellsAFailedReadFromAnUnsetOne(t *testing.T) {
 	}
 	if on || known {
 		t.Errorf("a failed read = (%v, %v), want (false, false)", on, known)
+	}
+}
+
+func TestAPropertyNameThisDeviceWillNotTakeIsRefusedHere(t *testing.T) {
+	was := setProp
+	defer func() { setProp = was }()
+	tried := false
+	setProp = func(string, string) error {
+		tried = true
+		return nil
+	}
+
+	long := strings.Repeat("x", keyMax-len(flagPrefix)+1)
+	if err := SetNumber(long, 250); err == nil {
+		t.Errorf("%s%s is %d characters and was accepted; setprop answers \"could not set"+
+			" property\" past %d, measured on a Dot, so a setting written under a name"+
+			" that long is never kept", flagPrefix, long, len(flagPrefix+long), keyMax)
+	}
+	if tried {
+		t.Error("the name went to the device anyway, so the check reads the failure back" +
+			" rather than heading it off")
+	}
+}
+
+func TestAPropertyNameThatFitsIsStillWritten(t *testing.T) {
+	was := setProp
+	wasRead := readProp
+	defer func() { setProp, readProp = was, wasRead }()
+	setProp = func(string, string) error { return nil }
+	readProp = func(string) (string, error) { return "250", nil }
+
+	if err := SetNumber("sendspin_delay", 250); err != nil {
+		t.Errorf("a name of %d characters was refused: %v",
+			len(flagPrefix+"sendspin_delay"), err)
 	}
 }

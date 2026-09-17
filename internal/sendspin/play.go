@@ -33,6 +33,7 @@ type playback struct {
 	name   string
 
 	stream Stream
+	delay  time.Duration
 
 	saidShut    bool
 	saidNoClock bool
@@ -77,7 +78,7 @@ func (p *playback) take(s *Session, c *audioChunk) {
 		}
 		return
 	}
-	if err := p.stream.Write(at, c.PCM); err != nil {
+	if err := p.stream.Write(at.Add(-p.delay), c.PCM); err != nil {
 		if !p.saidRefused {
 			p.saidRefused = true
 			p.say("sendspin: %q sent audio this player will not hold: %v", p.name, err)

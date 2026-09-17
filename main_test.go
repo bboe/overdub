@@ -431,10 +431,12 @@ func TestUninstallClearsThePersistedSendspinFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "persist.overdub." + sendspinFlag
-	if !strings.Contains(string(script), name) {
-		t.Errorf("deploy/uninstall.sh never names %s, so an uninstall leaves it behind and a "+
-			"reinstall starts with sendspin switched off", name)
+	for _, flag := range []string{sendspinFlag, sendspinDelay} {
+		name := "persist.overdub." + flag
+		if !strings.Contains(string(script), name) {
+			t.Errorf("deploy/uninstall.sh never names %s, so an uninstall leaves it behind"+
+				" and a reinstall starts with a setting nobody chose", name)
+		}
 	}
 }
 
@@ -832,5 +834,14 @@ func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 		sendspinLead)) {
 		t.Errorf("docs/sendspin.md does not say the lead is %d, so the page and the wire"+
 			" disagree about the one number measured on hardware", sendspinLead)
+	}
+}
+
+func TestEverySettingThisDotKeepsFitsAPropertyName(t *testing.T) {
+	for _, name := range []string{sendspinFlag, sendspinDelay} {
+		if err := device.SetNumber(name, 0); err != nil &&
+			strings.Contains(err.Error(), "characters") {
+			t.Errorf("%s cannot be kept on this device: %v", name, err)
+		}
 	}
 }

@@ -139,14 +139,15 @@ func TestServeTakesAConnectionThroughToClientState(t *testing.T) {
 		t.Errorf("min_buffer_ms = %d, want 500", state.Player.MinBufferMS)
 	}
 	if state.Player.SupportedCommands == nil {
-		t.Error("supported_commands must be present, empty when no command is accepted")
+		t.Error("supported_commands must be present, and it is what a server reads to see" +
+			" whether the delay can be set at all")
 	}
 	if state.Player.StaticDelayMS != 0 {
-		t.Errorf("static_delay_ms = %d, want 0: it is the delay *past* this device's audio"+
-			" port, which a Dot with one speaker does not have, and the server sends"+
-			" that much earlier for it. The delay inside the Dot is ours to compensate"+
-			" for by asking the player where its audio has reached, not to declare here",
-			state.Player.StaticDelayMS)
+		t.Errorf("static_delay_ms = %d, want 0 until a server sets one: it is the delay"+
+			" *past* this device's audio port, which a Dot with one speaker does not"+
+			" have, so nothing here declares a figure of its own. The delay inside the"+
+			" Dot is ours to compensate for by asking the player where its audio has"+
+			" reached, not to declare here", state.Player.StaticDelayMS)
 	}
 }
 

@@ -383,20 +383,34 @@ speaker it is and the audio is placed against the answer, which is 131 to 144 ms
 rather than the 95 ms a constant would have carried. docs/audio.md says why those
 two numbers differ and which one a scheduler needs.
 
-Declaring it anyway would appear to work, which is what makes it a trap. Both ends
-subtract it -- `aiosendspin` sends a chunk early by exactly this much
-(`effective_ts_us = entry.timestamp_us - role.get_static_delay_us()`) and the
-client takes it off the timestamp again -- so a Dot that declared 95 and did not
-compensate internally would land aligned. It would also be one operator click from
-silence-shaped breakage: the field is settable by a server through the command
-`set_static_delay` -- the library's name, the spec calls it `set_output_delay`,
-which is the same rename as the field it sets -- Music Assistant exposes it as
-`CONF_SENDSPIN_STATIC_DELAY`,
-and it is the knob somebody turns to *zero* when they notice this speaker has no
-external amp. The compensation would vanish with it, and the Dot would be 95 ms
-late with nothing in any log to say why. The spec's own accuracy target is stated
-after removing this field, which says plainly that it is not part of what the
-client is supposed to get right.
+Declaring it anyway would appear to work, which is what makes it a trap, and it
+would be one operator click from silence-shaped breakage: the field is settable by
+a server through the command `set_static_delay` -- the library's name, the spec
+calls it `set_output_delay`, which is the same rename as the field it sets --
+Music Assistant exposes it as `CONF_SENDSPIN_STATIC_DELAY`, and it is the knob
+somebody turns to *zero* when they notice this speaker has no external amp. A
+compensation declared here would vanish with it, and the Dot would be 95 ms late
+with nothing in any log to say why. The spec's own accuracy target is stated after
+removing this field, which says plainly that it is not part of what the client is
+supposed to get right.
+
+**The delay is applied once, at the client, and an earlier reading of this page
+had that wrong.** It said both ends subtract it, citing
+`effective_ts_us = entry.timestamp_us - role.get_static_delay_us()` in
+`aiosendspin`. That line is real but it is not the wire: it appears in a log field
+and in the late-drop decision, and the timestamp the server actually writes into a
+chunk is the stream's own, untouched. It has to be. The delay is per client and a
+chunk is one message for a whole group, so a server cannot shift the stamp for one
+listener without shifting it for all of them. What the server does with the figure
+instead is add it to its send-ahead floor -- `max(min_buffer, required_lead) +
+static` -- so the audio arrives early enough for the client to still be able to
+move it. The client is what subtracts: the reference does
+`compute_play_time = client_time - static_delay`, handing audio over that much
+sooner so a delay past the port makes it come out on time.
+
+That inverts the sign somebody guesses from the name. A larger delay makes this
+player sound **earlier**, not later, because the figure describes latency the
+player is about to add rather than a wait to perform.
 
 `required_lead_time_ms` is **350**, and it is the one number here derived from
 hardware rather than from the format. It says how far ahead of playback a server
@@ -1301,9 +1315,198 @@ same trade the idle timeout in docs/audio.md is refused for. A permanently broke
 player is a different case and is already covered: it is a `NewChime` that failed,
 and that Dot never sends the true at all.
 
-`supported_commands` is present and empty, because the field advertises
-settability rather than reportability, and a player that accepts no commands still
-has to say so.
+`supported_commands` names `set_static_delay`, and it is the whole of what makes
+the delay settable. There are two lists with that name and they hold different
+things: `client/hello`'s `player_support` carries `volume` and `mute`, which this
+player does not take and which stays empty; `client/state`'s player object carries
+a subset of `set_static_delay` alone, which is what 9.1.1's model allows there and
+nothing else. Music Assistant reads the second one and shows its delay control
+only for a player that names the command:
+
+```python
+if player_role is not None and PlayerCommand.SET_STATIC_DELAY in player_role.state_supported_commands:
+    entries.append(ConfigEntry(key=CONF_SENDSPIN_STATIC_DELAY, type=INTEGER,
+                               range=(0, 5000), immediate_apply=True, advanced=False))
+```
+
+So an empty list there was not a neutral default. It was the reason no delay box
+appeared for a Dot, and why the only way to nudge one against another player in
+the room was to change the build.
+
+## The delay a server sets
+
+`server/command` carries a player object, and the one command this player takes is
+`set_static_delay`. The figure is bounded 0 to 5,000 ms by `aiosendspin`'s own
+model and refused outside it here, along with a command naming no figure at all --
+a missing field would otherwise read as the zero it is not -- and one arriving for
+a client that holds no player role. None of those drop the connection: a command
+this player will not take is a line in the log and nothing else, because the
+alternative is a server losing its speaker over a value it can simply send again.
+`volume` and `mute` still answer that they are not handled yet, and the line saying
+so now names the command rather than the message, so the two cases read apart.
+
+Applying it is one subtraction at the point a server's timestamp becomes a moment
+of ours, and the section above says which way it goes and why.
+
+**The delay is persisted, because the spec says a client MUST keep it across
+reboots and server reconnections.** An earlier version of this page argued the
+opposite -- that Music Assistant re-sends the figure whenever a player's
+configuration loads, so there was nothing to keep. That is true of one server
+and is not the rule: a server that does not re-send would leave the Dot playing
+at a delay nobody chose. Zero is one of those figures rather than the absence of
+one -- a Dot with no external amp is meant to sit at zero -- so nothing here
+treats it as "unset": the figure lives in one place, seeded from the property
+when the client starts serving, and a server that sets zero gets zero back on
+its next connection. An earlier version kept the delay in two places and read
+the stored one whenever the live one was zero, which resurrected the old figure
+on every reconnect and, since Music Assistant writes back whatever a client
+reports, overwrote the operator's zero in the server's own configuration.
+
+**Writing it happens at most once a minute, from a goroutine of its own, and a
+drag that lands inside one window reaches flash once.**
+ The first version did none of that:
+`setprop` costs a measured 40 ms on this device, Music Assistant's control applies
+as it is dragged, and the write sat inline on the goroutine that reads audio
+chunks. Twenty-three values in one drag is nearly a second of not reading the
+socket, and a server sending values in a loop was an unbounded number of writes to
+flash with no budget at all -- next to a log path budgeted to twenty lines a
+minute. Now a change only wakes a keeper, which waits out the window and then
+writes whatever the figure has become, and only if that differs from what the
+property already holds. So a drag writes once, after it stops; a control nudged
+and put back inside one window writes nothing; and a server sending values forever
+costs one write a minute whatever it does. The window is what those promises are
+measured against rather than the gesture: a drag somebody holds for longer than a
+minute writes once while it is moving and once when it stops, and a nudge whose
+window closes on it writes twice. One write a minute is the ceiling, not one write
+a drag.
+
+What that trades away is the last change before the daemon stops: a delay set and
+lost inside the window comes back as the previous figure. The Sendspin switch is
+the one stop that does not lose it. Turning it off in Home Assistant returns from
+`Serve`, so the keeper writes whatever is still pending on its way out, and
+`Serve` waits for that write before returning -- turning the switch back on
+rebuilds the client by reading the property, and the two race otherwise, which
+would revert the figure in front of the operator who had just set it.
+
+Every other stop still loses it, the ordinary ones included. The signal handler
+calls `os.Exit`, which runs no deferred function, so `SIGTERM` -- what
+`install.sh` stops the old daemon with -- takes a pending figure with it, and so
+does a panic and a pulled plug. Making a reinstall keep it means closing the
+Sendspin listener from the handler and waiting, in a path no test here can reach,
+for a figure an operator set in the last minute and is standing in front of. That
+is the right side to lose on: the figure matters only across a reboot or a
+reconnect, an operator who has just moved a slider can move it again, and Music
+Assistant re-sends its own value whenever a player's configuration loads. Flash
+on a 2016 Echo Dot is the part that does not come back.
+
+A refused write is tried again on the next window -- three times in all, counted
+per figure rather than per run -- and then given up on until the figure changes.
+Both halves of that are load-bearing. `SetNumber` reads the property straight
+back, and a `setprop` followed immediately by a `getprop` on this device can
+report empty for a name that was in fact accepted, so the likely failure here is
+a spurious one and a single attempt would spend the whole figure on it -- the
+client would go on reporting a delay the next boot does not play at. Retrying
+forever is the other error: a name flash genuinely will not take would then cost
+a `setprop` a minute for the rest of the boot, which is the unbounded write this
+window exists to prevent, arrived at from the other side.
+
+The keeper writes once at startup, before it waits for anything, when the stored
+figure could not be **read** -- the one case where it cannot tell whether the disk
+agrees with it. It does not wait out a window first, because the write is this
+dot's own correction rather than anything a server asked for, and a window spent
+on it is a window in which a stop loses the correction. A read
+that fails leaves the client reporting zero while flash may hold some older
+figure, and a server that then sets zero is answered from the live figure and never
+reaches the keeper at all, so nothing would correct the disk and the next boot
+would play the old delay. An absent property is not that case: absent already reads
+as zero.
+
+The figure is kept in `persist.overdub.sendspin_delay`, beside the switch flag and
+for the same reason, and `uninstall.sh` clears both. The name is
+short because it has to be: 31 characters is all this device takes, and the first
+one written here was 33 and refused on hardware after passing every test.
+docs/device.md carries the sweep. Within a run
+it outlives a connection as well, so a reconnect does not start from zero. The
+value that goes back out in `client/state` is whatever is currently applied.
+
+**A change costs the log nothing, which took a second attempt.** The obvious line
+-- one per change, saying what the delay is now -- is a peer-driven write to
+`/data`, and Music Assistant's control is `immediate_apply`, so it sends a value
+for every step of a drag. Measured on a Dot the first time somebody used it: 23
+lines, values walking from 1.268 s down to 1.097 s, which spent the peer log's
+twenty a minute and took **13 other lines** with it, a playback summary among
+them. A slider is the most ordinary thing in the world to drag, so this is the
+common case rather than a hostile one. What is logged now is one line per
+connection saying a server is setting the delay, and the current figure rides on
+the thirty-second summary, which is already bounded at two lines a minute and
+always says what the audio was actually placed against.
+
+**A change applies to audio written after it, and the queue keeps what it already
+holds.** The server has already sent audio under the old figure, so raising the
+delay leaves some of that audio due in the past -- the spec spells this out for
+*lowering* a delay, where the excess is extra audio buffered, and says nothing
+about the other direction, where it is audio that can no longer be placed. The
+reference does the same: the delay is applied where a server's timestamp becomes a
+moment, not to audio already scheduled. Re-placing a queue of audio under the
+listener at every step of a drag is worse than the gap.
+
+The 4.9 seconds of silence measured in one window during a drag is **not** a clean
+measurement of that gap, and the attribution here used to say it was. The same
+drag also wrote the property once per value, on the goroutine that reads chunks
+off the socket, and that write is a measured 40 ms of `setprop` on this device --
+50 pairs took 2 seconds, while the reads alone are too fast to time. Twenty-three
+values is nearly a second of a read loop that is also feeding the speaker. Both
+causes were present in that window and nothing separates them. The write is off
+the loop now, so a repeat of the measurement would mean something; until then the
+honest statement is that a delay change costs *some* discontinuity, bounded by the
+size of the change.
+
+**A delay this player takes is reported straight back, and that is what makes it
+work at all.** The server schedules at least `min_buffer_ms + output_delay_ms`
+ahead -- `max(min_buffer_ms, required_lead_time_ms) + output_delay_ms` for a
+buffered stream, which is the same figure here only because this dot's 500 ms
+`min_buffer_ms` is above its 350 ms lead -- and
+it counts a chunk outstanding until `timestamp + duration - output_delay_ms`. Both
+of those read *the delay the client last reported in `client/state`* -- not the
+one the server just commanded. messaging.md says a client sends `client/state`
+"whenever any state changes thereafter", so reporting it is the client's job and
+skipping it is a conformance bug with an audible cost.
+
+Measured here, before that was understood. A delay of 1,814 ms was applied and
+not reported, because an earlier version of this code only answered back when it
+had to clamp a figure. Music Assistant went on sending as though the delay were
+zero -- leads of 1.767 to 1.973 s, the same as always -- and every chunk then
+landed behind where it had to be placed:
+
+| delay applied | reported back | leads that arrived | audio placed | silence |
+|---|---|---|---|---|
+| 5 ms | yes | 1.716 - 1.973 s | 27.83 s | 2.19 s |
+| 1.814 s | **no** | 1.767 - 1.973 s | **0.50 s** | 29.53 s |
+| 2.716 s | no | 0.493 - 2.371 s | 6.95 s | 23.18 s |
+| 1.5 s | **yes** | 1.990 - 3.473 s | 29.64 s | 405 ms |
+
+The last row is the mechanism proving itself. The moment the figure went back, the
+server's floor moved to exactly **1.990 s** -- 500 ms of `min_buffer_ms` plus the
+1,500 ms it had adopted -- and the ceiling rose to 3.473 s. Audio that had been
+unplayable played clean.
+
+**Which also means the buffer is not what pays for a delay.** The arithmetic runs
+the other way from the way it reads: a larger delay moves a chunk's completion
+time *earlier*, so it leaves the outstanding count sooner, and the lead a server
+can reach is `buffer_capacity + output_delay_ms` rather than `buffer_capacity`
+alone. The 3.473 s ceiling above is the two seconds this client declares plus the
+1.5 it had adopted. What the jitter buffer holds is the other side of the same
+subtraction -- a lead less the delay -- so it never needs more than the capacity
+either. `bufferSeconds` stays at 2 and `streamHold` at four seconds; raising both
+to carry a 5-second delay was a wrong turn taken on the way to this paragraph, and
+the measurement that looked like a capacity ceiling was a missing `client/state`.
+
+A figure outside 0 to 5,000 is still held at the end it passed, because the spec
+says clients MUST clamp to that range, and the log says so when it happens. What
+is never answered is a delay set again to what it already is: a server
+re-asserting its own figure gets silence rather than a reply, which is what keeps
+an `immediate_apply` control from being answered at every step of a drag.
+
 
 ## What finishing the player means
 
@@ -1679,8 +1882,11 @@ What this tree does about each:
   honest version, and the admission rules already refuse every pairing
   activation as `method_not_supported` on that basis. The shape gets decided when
   the flow is written, against whatever the target accepts then.
-- **`supported_commands` is sent in both places.** It costs nothing and 9.1.1
-  refuses `client/hello` without it in the support object.
+- **`supported_commands` is sent in both places, and they carry different
+  things.** 9.1.1 refuses `client/hello` without it in the support object, where
+  the valid entries are `volume` and `mute`; the list in `client/state` accepts
+  only `set_static_delay`. Sending either list's values in the other is a
+  validation error at the server rather than a field quietly dropped.
 - **`static_delay_ms` is what goes on the wire**, not the spec's
   `output_delay_ms`. Music Assistant's own configuration corroborates it -- its
   provider carries `CONF_SENDSPIN_STATIC_DELAY`. Sending the spec name is not an

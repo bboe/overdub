@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bboe/overdub/internal/mdns"
@@ -100,8 +101,16 @@ type Client struct {
 
 	MinBufferMS    int
 	RequiredLeadMS int
+	DelayMS        int
+	DelayUnknown   bool
+	SaveDelay      func(ms int) error
 
 	Player Player
+
+	delay     atomic.Int64
+	keeping   atomic.Int64
+	keepWake  chan struct{}
+	keepEvery time.Duration
 
 	handshakeAfter   time.Duration
 	provisionalAfter time.Duration
@@ -167,8 +176,26 @@ func (c *Client) Serve(ln net.Listener) error {
 	if c.Play == nil {
 		c.Play = &untrustedlog.Log{Subject: "sendspin playback"}
 	}
+	c.delay.Store(int64(max(0, min(c.DelayMS, maxStaticDelayMS))))
+	c.keeping.Store(c.delay.Load())
+	kept := make(chan struct{}, 1)
+	c.keepWake = kept
 	c.mu.Unlock()
 	c.Peer.Printf("sendspin listening on %s (client %q)", ln.Addr(), c.Config.Name)
+	if held := c.heldDelay(); held > 0 {
+		c.Peer.Printf("sendspin: output delay of %s kept from last time", held)
+	}
+	if c.SaveDelay != nil {
+		done, stopped := make(chan struct{}), make(chan struct{})
+		defer func() {
+			close(done)
+			<-stopped
+		}()
+		go func() {
+			defer close(stopped)
+			c.keepDelays(kept, done)
+		}()
+	}
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
@@ -320,6 +347,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	}
 	stated := false
 	synced := false
+	available := false
 	var roleless *time.Timer
 	var rolelessSince time.Time
 	var rolelessSpent time.Duration
@@ -332,7 +360,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	defer close(stop)
 
 	var noted noteSet
-	play := playback{player: c.Player, say: c.Play.Printf, name: name}
+	play := playback{player: c.Player, say: c.Play.Printf, name: name,
+		delay: c.heldDelay()}
 	defer play.stop()
 	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery), play: &play}
 	defer func() { heard.done(c.Play, name) }()
@@ -416,7 +445,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if !stated {
 				ws.setIdle(idleWait)
 				go keepalive(ws, stop, waitOr(c.pingEvery, pingAfter))
-				if err := c.state(session, false); err != nil {
+				if err := c.state(session, available, play.delay); err != nil {
 					return err
 				}
 				go c.keepTime(session, stop)
@@ -442,8 +471,9 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if !synced {
 				if converged, spread := session.clock.filter.state(); converged {
 					synced = true
+					available = c.Player != nil
 					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
-					if err := c.state(session, c.Player != nil); err != nil {
+					if err := c.state(session, available, play.delay); err != nil {
 						return err
 					}
 				}
@@ -492,7 +522,33 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				play.clear()
 				c.Play.Printf("sendspin: %q cleared what it had sent", name)
 			}
-		case typeServerState, typeServerComm:
+		case typeServerComm:
+			want, asked, ours, err := session.StaticDelay(payload)
+			if err != nil {
+				once("sendspin: %q sent a command this player will not take: %v", name, err)
+				continue
+			}
+			if !ours {
+				once("sendspin: %q sent a command that is not handled yet", name)
+				continue
+			}
+			if asked != int(want/time.Millisecond) {
+				once("sendspin: %q asked for a %d ms output delay, and the spec holds one"+
+					" to 0 through %d, so %s is what this player takes", name, asked,
+					maxStaticDelayMS, want)
+			}
+			if want == play.delay {
+				continue
+			}
+			play.delay = want
+			c.delay.Store(int64(want / time.Millisecond))
+			c.keep(int(want / time.Millisecond))
+			once("sendspin: %q is setting this player's output delay, and every summary"+
+				" below says what it currently is", name)
+			if err := c.state(session, available, want); err != nil {
+				return err
+			}
+		case typeServerState:
 			once("sendspin: %q is not handled yet", untrustedlog.Cut(kind))
 		default:
 			once("sendspin: ignoring %q", untrustedlog.Cut(kind))
@@ -515,13 +571,78 @@ func keepalive(ws *Conn, stop <-chan struct{}, every time.Duration) {
 	}
 }
 
-func (c *Client) state(session *Session, available bool) error {
+func (c *Client) heldDelay() time.Duration {
+	return time.Duration(c.delay.Load()) * time.Millisecond
+}
+
+func (c *Client) keep(ms int) {
+	c.keeping.Store(int64(ms))
+	c.mu.Lock()
+	wake := c.keepWake
+	c.mu.Unlock()
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}) {
+	apart := waitOr(c.keepEvery, keepApart)
+	written := max(0, min(c.DelayMS, maxStaticDelayMS))
+	unknown, attempted, tries := c.DelayUnknown, written, 0
+	settled := func() bool {
+		ms := int(c.keeping.Load())
+		if !unknown && ms == written {
+			return true
+		}
+		if ms != attempted {
+			attempted, tries = ms, 0
+		}
+		if tries >= keepTries {
+			return true
+		}
+		if err := c.SaveDelay(ms); err != nil {
+			c.Peer.Printf("sendspin: this dot took a %d ms output delay and could not"+
+				" remember it: %v", ms, err)
+			tries++
+			return tries >= keepTries
+		}
+		written, unknown, tries = ms, false, 0
+		return true
+	}
+	defer settled()
+	pending := false
+	if unknown {
+		pending = !settled()
+	}
+	for {
+		if !pending {
+			select {
+			case <-done:
+				return
+			case <-wake:
+			}
+		}
+		select {
+		case <-done:
+			return
+		case <-time.After(apart):
+		}
+		pending = !settled()
+	}
+}
+
+func (c *Client) state(session *Session, available bool, delay time.Duration) error {
 	return session.WriteJSON(typeClientState, clientState{
 		Available: available,
 		Player: &playerState{
+			StaticDelayMS:      int(delay / time.Millisecond),
 			RequiredLeadTimeMS: c.RequiredLeadMS,
 			MinBufferMS:        c.MinBufferMS,
-			SupportedCommands:  []string{},
+			SupportedCommands:  []string{commandStaticDelay},
 		},
 	})
 }

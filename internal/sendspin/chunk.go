@@ -148,6 +148,14 @@ func (r *chunkRun) tick(peer *untrustedlog.Log, name string) {
 	r.report(peer, name)
 }
 
+func (r *chunkRun) delaySet() string {
+	if r.play == nil || r.play.delay == 0 {
+		return ""
+	}
+	return ", placed " + r.play.delay.String() + " earlier than stamped for this" +
+		" player's output delay"
+}
+
 func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 	if r.chunks == 0 {
 		return
@@ -156,13 +164,15 @@ func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 	if r.leadKnown {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, due between"+
 			" %s and %s ahead, against a clock good to %s that moved %s; the player"+
-			" placed %s of audio against %s of silence", name,
+			" placed %s of audio against %s of silence%s", name,
 			r.chunks, r.frames, r.bytes, micros(r.leastLead), micros(r.mostLead),
-			micros(r.spread), micros(r.lastOff-r.firstOff), frames(audio), frames(silence))
+			micros(r.spread), micros(r.lastOff-r.firstOff), frames(audio), frames(silence),
+			r.delaySet())
 	} else {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, with no clock"+
 			" to say when they were due; the player placed %s of audio against %s of"+
-			" silence", name, r.chunks, r.frames, r.bytes, frames(audio), frames(silence))
+			" silence%s", name, r.chunks, r.frames, r.bytes, frames(audio), frames(silence),
+			r.delaySet())
 	}
 	*r = chunkRun{announced: r.announced, every: r.every, due: time.Now().Add(r.every),
 		clockKnown: r.clockKnown, firstOff: r.lastOff, lastOff: r.lastOff,

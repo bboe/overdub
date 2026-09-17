@@ -401,7 +401,10 @@ func loadPSK(path string) ([]byte, error) {
 	return psk, nil
 }
 
-const sendspinFlag = "sendspin"
+const (
+	sendspinFlag  = "sendspin"
+	sendspinDelay = "sendspin_delay"
+)
 
 type advertiser interface {
 	Advertise([]mdns.Advert) error
@@ -642,6 +645,13 @@ func sendspinKeys() (sendspin.Keys, bool) {
 
 func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
 	peer *untrustedlog.Log) *sendspin.Client {
+	delay, known, err := device.Number(sendspinDelay)
+	if err != nil {
+		log.Printf("sendspin: %v; starting with no output delay", err)
+	}
+	if err != nil || !known {
+		delay = 0
+	}
 	return &sendspin.Client{
 		Config: sendspin.Config{
 			Name:           name,
@@ -655,6 +665,9 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 		PSKs:           sendspin.PSKSet{Pairing: keys.PairingPSK},
 		MinBufferMS:    sendspinBuffer,
 		RequiredLeadMS: sendspinLead,
+		DelayMS:        delay,
+		DelayUnknown:   err != nil,
+		SaveDelay:      func(ms int) error { return device.SetNumber(sendspinDelay, ms) },
 		Player:         player,
 		Peer:           peer,
 	}

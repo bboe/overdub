@@ -181,8 +181,40 @@ assumption that `setprop` can fail by doing nothing the way most of this device
 does. A flag that was never written reads as unknown rather than as off, so the
 caller decides the default instead of inheriting one from a failed read, and that
 part is what makes the read-back worth having whether or not the write can fail
-silently. `persist.overdub.sendspin` is the only user today; docs/sendspin.md says
-what it decides.
+silently. `SetNumber` is the same shape for a setting that is a figure rather than
+a choice, and the Sendspin output delay is the one that uses it.
+
+**A property write costs about 40 ms, which matters when something writes one per
+keystroke.** Measured on a Dot: 50 `setprop`/`getprop` pairs took 2 seconds, while
+50 reads alone were too fast to time at one-second resolution. So a setting driven
+by a slider in somebody's browser must not be written from a goroutine with
+anything else to do, and should not reach flash once per step either;
+docs/sendspin.md carries what that cost the Sendspin delay and the window it
+writes in now.
+
+**A property name past 31 characters is refused outright, and that is measured.**
+`setprop` answers `could not set property` and writes nothing, which is louder
+than most failures here but still arrives as a line of shell output nobody reads.
+Swept on a Dot, one character at a time: 31 takes, 32 and 33 are refused. The
+prefix spends 16 of those, so a name has 15 characters to work with --
+`persist.overdub.sendspin_delay_ms` is 33 and was rejected on the device after
+passing every test, while `persist.overdub.sendspin_delay` is 30 and lands. So the
+length is checked here before the name reaches the device, and the error names the
+limit rather than leaving the caller with toolbox output.
+
+`SetNumber` reads the property back immediately after writing it, which is the
+same shape as the trap below and was worth checking rather than reasoning about:
+on hardware the write path was exercised by a server setting 1,000 ms, and the
+property held it with no complaint from the read-back. The difference from the
+trap is that these are two separate `execve`s rather than two commands in one
+shell line. If it ever does lose that race the cost is a line saying the figure
+could not be remembered for a write that in fact landed, which is the safe
+direction for this particular check.
+
+Watch for a second trap while measuring this: a `setprop` followed immediately by
+`getprop` in one shell command reads back empty even for a name that is accepted,
+because the write is not visible yet. A sweep without a `sleep` between them
+reports every length as failing, which reads exactly like a much lower limit.
 
 ## Whether the microphone is muted
 
