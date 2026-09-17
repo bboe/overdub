@@ -16,6 +16,7 @@ const (
 	typePairAbort      = "pair/abort"
 
 	rolePlayerV1 = "player@v1"
+	familyPlayer = "player"
 
 	methodPairingPSK = "pairing_psk"
 
@@ -240,7 +241,7 @@ func (c Config) hello() clientHello {
 		SupportedPairMethods: offeredPairMethods(),
 		PlayerSupport: &playerSupport{
 			SupportedFormats: []audioFormat{{
-				Codec:      "pcm",
+				Codec:      codecPCM,
 				Channels:   StreamChannels,
 				SampleRate: StreamRate,
 				BitDepth:   StreamBitDepth,
@@ -289,6 +290,9 @@ func (s *Session) Activate(payload json.RawMessage) ([]string, error) {
 		return s.roles, nil
 	}
 	s.roles = d.Roles
+	if !holdsPlayer(s.roles) {
+		s.streaming = false
+	}
 	return s.roles, nil
 }
 

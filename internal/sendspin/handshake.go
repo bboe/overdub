@@ -125,6 +125,8 @@ type Session struct {
 	unpaired bool
 	roles    []string
 
+	streaming bool
+
 	clock *clock
 }
 

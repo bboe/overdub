@@ -413,7 +413,41 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
 				}
 			}
-		case typeStreamStart, typeStreamClear, typeStreamEnd, typeServerState, typeServerComm:
+		case typeStreamStart:
+			offered, err := session.StartStream(payload)
+			if err != nil {
+				return err
+			}
+			switch {
+			case offered == nil:
+				once("sendspin: %q started a stream carrying nothing for a player", name)
+			case session.Streaming():
+				once("sendspin: %q started a %s stream", name, offered)
+			case !holdsPlayer(session.roles):
+				once("sendspin: %q started a stream for a role this client does not hold",
+					name)
+			default:
+				once("sendspin: %q offered a %s stream, and this player takes %s %d Hz"+
+					" %d ch %d bit", name, offered, codecPCM, StreamRate, StreamChannels,
+					StreamBitDepth)
+			}
+		case typeStreamEnd:
+			ours, err := session.EndStream(payload)
+			if err != nil {
+				return err
+			}
+			if ours {
+				once("sendspin: %q ended its stream", name)
+			}
+		case typeStreamClear:
+			ours, err := session.ClearStream(payload)
+			if err != nil {
+				return err
+			}
+			if ours {
+				once("sendspin: %q cleared what it had sent", name)
+			}
+		case typeServerState, typeServerComm:
 			once("sendspin: %q is not handled yet", untrustedlog.Cut(kind))
 		default:
 			once("sendspin: ignoring %q", untrustedlog.Cut(kind))

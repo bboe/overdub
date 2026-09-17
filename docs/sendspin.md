@@ -369,9 +369,116 @@ Four numbers go out with it, and a server plans playback around them, so each on
 is wrong silently rather than loudly. `buffer_capacity` is two seconds of the
 declared format, 192,000 bytes, derived from the format rather than written down
 beside it, and a test holds it to whole seconds. `min_buffer_ms` is 500.
-`static_delay_ms` and `required_lead_time_ms` are both **0**, which is honest and
-temporary: nothing plays audio yet, so there is no output path whose latency could
-be measured, and the spec allows both to be updated mid-session once there is.
+
+`static_delay_ms` is **0**, and the reason is worth reading before changing it,
+because the field looks exactly like the place to declare the ~95 ms that
+docs/audio.md measures between handing the player a frame and hearing it. It is
+not. The spec is explicit: the delay it carries is the one *past* the device's
+audio port -- an external amplifier, a powered speaker -- and "processing delays
+before the port (DAC latency, audio buffers)" are the client's own to compensate.
+A Dot's speaker is on the near side of that port, so the honest declaration is
+zero and the 95 ms comes off the timestamp before the audio is scheduled.
+
+Declaring it anyway would appear to work, which is what makes it a trap. Both ends
+subtract it -- `aiosendspin` sends a chunk early by exactly this much
+(`effective_ts_us = entry.timestamp_us - role.get_static_delay_us()`) and the
+client takes it off the timestamp again -- so a Dot that declared 95 and did not
+compensate internally would land aligned. It would also be one operator click from
+silence-shaped breakage: the field is settable by a server through the command
+`set_static_delay` -- the library's name, the spec calls it `set_output_delay`,
+which is the same rename as the field it sets -- Music Assistant exposes it as
+`CONF_SENDSPIN_STATIC_DELAY`,
+and it is the knob somebody turns to *zero* when they notice this speaker has no
+external amp. The compensation would vanish with it, and the Dot would be 95 ms
+late with nothing in any log to say why. The spec's own accuracy target is stated
+after removing this field, which says plainly that it is not part of what the
+client is supposed to get right.
+
+`required_lead_time_ms` is still **0**, and that one is honest for the old reason:
+it says how far ahead of playback a server must deliver, which is a property of a
+jitter buffer that does not exist yet.
+
+## The three messages that bracket a stream
+
+`stream/start` opens one, `stream/end` closes it, `stream/clear` throws away what
+was buffered and leaves it open. The Dot reads all three now and carries the
+state; what it does not yet do is play the audio between them.
+
+The format check is the substance of `stream/start`. Its player object names a
+codec, a sample rate, a channel count and a bit depth, and anything but the
+`pcm` 48 kHz mono 16-bit this client advertised is refused. A server should never
+send one, since it picks from `supported_formats`, so a mismatch means something
+is wrong rather than something is negotiable -- and playing it anyway is noise or
+the right audio at the wrong pitch, neither of which announces itself. A refused
+format also **closes** a stream that was open rather than leaving it, because the
+alternative is audio that follows being taken for the old format.
+
+A `stream/start` carrying no player object at all is not an error: the same
+message opens artwork and visualizer streams, and a server sending one to a
+client that only plays audio is just talking about something else.
+
+**Roles are matched by family.** `stream/clear` and `stream/end` carry role names,
+and `aiosendspin` validates them against families -- `player`, `visualizer` --
+while `active_roles` elsewhere names versions like `player@v1`. So both are
+accepted and anything before the `@` is what decides, since a server naming the
+version is not wrong and ignoring it would drop a real end.
+
+An **omitted** list means every role, which is the common case and the one a server
+sends at the start of a session. An **empty** list means no role at all, and ends
+nothing. The reference client gates on `roles is None or "player" in roles`, so the
+two readings differ by exactly one message a server may really send, and the Go
+type has to carry the difference: a `[]string` collapses `null` and `[]` onto the
+same empty slice, which reads an empty list as every role and closes a stream the
+server left running. `*[]string` is what separates them, the same way
+`active_roles` does.
+
+A `stream/clear` is this client's only when it holds the player role and a stream
+is open. Nothing is buffered otherwise, so a clear arriving before a
+`stream/start`, or after the format of one was refused, has nothing of ours to
+throw away -- and reporting one would spend a peer-driven log line on nothing
+today and flush a buffer for a role the server never activated once 9D lands.
+`stream/end` already reads this way, since it reports whether a stream was open.
+
+A `stream/start` is refused when this client holds no player role, for the same
+reason giving up the roles closes the stream. The run loop keeps reading after a
+`server/activate` that leaves it holding nothing, so a `stream/start` arriving
+afterwards would otherwise re-open a stream for a role the server never granted.
+
+Giving up the roles closes the stream with them. A `server/activate` whose
+`active_roles` is an explicit empty list leaves this client holding nothing, and a
+stream that was open would otherwise still read as open for the rest of the
+connection -- audio scheduled for a role it no longer has. The empty list has to
+be explicit: an *omitted* one means the roles persist, which is the asymmetry the
+admission section describes, and it is easy to reproduce by accident, since a Go
+pointer to a nil slice marshals as `null` and reads back as omitted rather than as
+empty.
+
+What is not implemented is `stream/request-format`, the message a client sends to
+ask for something it can play. With one declared format and a server that honours
+it, the path is unreachable; a refused stream logs and stops there.
+
+## The numbers may move while a session runs
+
+Sendspin expects a player to learn, and says so for each field. A client MAY
+update `required_lead_time_ms` and `min_buffer_ms` **at any time**, and a server
+MUST factor the new values into subsequent playback, with the caveat that a client
+SHOULD debounce -- change them when conditions have shifted, not on a transient.
+`output_delay_ms` may be updated too, though for a narrower reason: when the audio
+output itself changes, such as a speaker being plugged in, with a delay persisted
+per output and across reboots.
+
+The spec also says how to derive one of them rather than guess it: `min_buffer_ms`
+comes from the distribution of chunk arrival delay, where a chunk's delay is
+`arrival - compute_client_time(timestamp - send_ahead)`, sized from the upper tail
+over a window long enough to catch intermittent interference, and with samples
+taken before the time filter converged thrown away. `required_lead_time_ms` is
+explicitly *not* derivable from that distribution, because it is measured from a
+start trigger and the chunks after a `stream/start` arrive in a burst that says
+nothing about steady state.
+
+So the 500 ms this client declares is a placeholder in the same sense the zeros
+are: the machinery to measure it does not exist yet, and when it does, the wire
+already supports correcting it without reconnecting.
 
 **No pairing method is advertised**, and that is a deliberate deviation: the spec
 says every client offers at least the Pairing PSK method, and this one does not,
@@ -844,6 +951,43 @@ play into, so the answer stays false and stays honest. `supported_commands`
 is present and empty, because the field advertises settability rather than
 reportability, and a player that accepts no commands still has to say so.
 
+## What finishing the player means
+
+`available: true` is not the finish line, because a player that is in the group
+and a quarter of a second behind it is worse than one that never joined. The test
+is **two players and one server**: put the Dot in a group with a second Sendspin
+player and listen for the two to be one sound rather than two.
+
+That test is worth more than any instrument on the device, and the reason is in
+docs/audio.md. The Dot can read the DAC's own clock to well under a millisecond,
+but it cannot see which of *its* frames is on that clock -- AudioFlinger mixes its
+track into a stream that runs regardless -- so the 95 ms bridge between the two is
+known only to about 3 ms. A second player cancels exactly that: the error either
+speaker cannot measure in itself shows up immediately as the difference between
+them.
+
+What each pairing buys is different. **Two Dots on one build** test whether the
+offset is the same on every unit, which is what a shared 95 ms has to be for it to
+cancel rather than accumulate; they cannot catch the offset being wrong, because
+both are wrong together. **A Dot against any other Sendspin player** catches
+exactly that, because the other speaker compensates its own latency honestly, so
+an error in what this client declares as `static_delay_ms` is audible as the two
+drifting apart by that amount.
+
+Ear resolution is the limit worth knowing: two speakers within about 5 ms sound
+like one, 5 to 20 ms combs and hollows out, and past that it is an echo. So
+listening settles anything over a few milliseconds and nothing under it. Below
+that, one microphone recording both speakers and a click through the group turns
+the question into a cross-correlation, and the mic's own 48 kHz is finer than
+anything else in this stack -- with the acoustic path the thing to control, since
+a metre of distance is 2.9 ms all by itself.
+
+Music Assistant carries a per-player delay in its own configuration
+(`CONF_SENDSPIN_STATIC_DELAY`), which is how a real installation absorbs whatever
+is left after all of this. That is the operator's dial rather than a reason to
+declare a wrong number: a client that reports its delay honestly starts aligned,
+and the dial is for the room.
+
 ## The pairing token must not be logged
 
 The token is `client_key || pairing_psk`, so printing it is the same act as
@@ -1085,6 +1229,11 @@ version Music Assistant's provider pins. Both ends are pinned on purpose: pinnin
 one and floating the other is what makes a difference impossible to attribute
 later.
 
+The fifth row is the fourth one twice: the command is named after the field, so
+the library renaming one renamed the other. It is listed because
+`supported_commands` is where it would be sent, not because it is a separate
+disagreement.
+
 **These are not four library bugs.** All four point the same way -- `psk_category`
 present in the document and absent from the library, `supported_commands`
 required in a second place, `output_delay_ms` under another name,
@@ -1102,6 +1251,7 @@ the library is what answers on the wire.
 | `supported_pair_methods` | object keyed by method | `list[PairMethodDescriptor]` |
 | `supported_commands` | in `client/state`'s player object | **also required** in `player@v1_support` |
 | the player's fixed output delay | `output_delay_ms` | `static_delay_ms` |
+| the command that sets it | `set_output_delay` | `set_static_delay` |
 
 What this tree does about each:
 

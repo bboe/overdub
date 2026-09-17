@@ -256,6 +256,102 @@ Go's `time` and Java's `System.nanoTime`. Over 292 seconds it fits a line at
 **48000.19 Hz**, +3.9 ppm from nominal, with a residual of 0.136 ms mean and
 0.485 ms worst. It is a plain file read.
 
+### How long until a written sample is heard
+
+About **95 ms**, and the number is stable enough to compensate rather than chase.
+
+Measuring it needs three instruments, because no single one sees the whole path.
+ALSA cannot: `/proc/asound` describes the HAL's stream, which runs whether we feed
+it or not, and the section above says so. What can be seen is where our samples
+are: `GetPosition` on `SLPlayItf` reports the frames AudioFlinger has played from
+*our* track, and the `delay` field of the ALSA status reports the frames the HAL
+still holds beyond that. So the frames that have actually reached the DAC at an
+instant `T` are `position - delay`, and the moment our first frame was audible is
+`T - (position - delay)/48000`. That origin is the useful quantity: with it, frame
+N is heard at `origin + N/48000` for as long as the stream does not starve, which
+is the whole of what synchronised playback needs from this end.
+
+Measured over five starts, forty samples each, a six-second sweep per start:
+
+| start | origin, after writing began | spread over the run |
+|---|---|---|
+| cold, from standby | 68.7 ms | 16.4 ms |
+| warm | 95.7 ms | 3.3 ms |
+| warm | 90.5 ms | 3.3 ms |
+| warm | 97.1 ms | 13.5 ms |
+| warm | 95.7 ms | 13.3 ms |
+
+The four warm starts sit within 6.6 ms of each other and the quietest runs hold
+to 3.3 ms, which is about the instrument floor: `GetPosition` is quantised to a
+millisecond and AudioFlinger advances it in bursts, and `delay` moves a period at
+a time. So the true figure is at least that steady and may be steadier; **±1 ms
+is not a claim these instruments can support**, and a measurement that produced
+one would be the `getTimestamp` story below repeating itself.
+
+**That is not the same as saying sub-millisecond timing is out of reach here, and
+the two numbers on this page are easy to read as contradicting each other.** The
+clock above is sub-millisecond -- 0.485 ms at worst over 292 seconds, and 3.9 ppm
+of rate error, which is 0.4 ms of drift per hundred seconds and trackable from a
+file read. What that clock gives is the DAC's *timeline*. What it cannot give is
+which of **our** frames is on it, because AudioFlinger mixed ours into a stream
+that runs whether we feed it or not. The 95 ms is the bridge between the two, and
+only the bridge is ±3 ms.
+
+Which is the useful shape, because the bridge is a constant and mostly cancels.
+Two of these Dots running one build should share it, and what multi-room playback
+needs is that they agree with each other rather than that either knows its own
+latency in absolute terms: a shared 95 ms is inaudible, while 6 ms between them is
+not. So the open question is not whether sub-millisecond is reachable but whether
+this offset is the same on every start and on every unit -- and 6.6 ms across
+starts is, as measured here, indistinguishable from the instrument's own noise.
+
+**The experiment that settles it is two players and one server**, because a
+difference between two speakers cancels the absolute error this page cannot
+remove. docs/sendspin.md carries it as what a player has to pass before it is
+finished. Measuring three Dots one at a time is what that claim replaces, and it
+was tried first:
+
+| Dot | three runs | mean | run to run |
+|---|---|---|---|
+| bryce | 72.7, 85.9, 66.4 | 75.0 ms | 19.5 ms |
+| caroline | 70.9, 67.5, 77.7 | 72.0 ms | 10.2 ms |
+| daniel | 63.3, 59.1, 73.9 | 65.4 ms | 14.8 ms |
+
+One standalone binary, pushed and run under `su` on each, so their daemons were
+left alone and the three were measured identically. The means differ by 9.6 ms
+and every unit's own runs differ by 10 to 20, so **the units are indistinguishable
+from each other by this instrument**. That is not the same as being identical: it
+says the question needs a sharper method, and the sharper method is two of them
+playing together.
+
+**And the number moves with how it is measured, which is the finding that matters
+most.** The same Dot read about 95 ms from inside the daemon and about 75 ms from
+a standalone binary minutes later. The production shape is the daemon -- a player
+opened once at startup and living for the boot, with the rest of the daemon around
+it -- so 95 ms is the figure to compensate by. But a 20 ms sensitivity to
+conditions is wider than the 3 ms any single run suggested, and it is the honest
+uncertainty on that number until two speakers settle it. Compensating is the
+client's own job, and the next section says why it is not something to declare on
+the wire.
+
+**The cold start is the one to design around.** The first sound after the device
+has gone to standby reads 27 ms lower than the rest, with the widest spread of any
+run, and the reading is least trustworthy exactly there -- the HAL buffer is
+filling while the samples are being taken, so `delay` understates and the origin
+comes out early. Whether the true cold-start latency differs or only the
+measurement does is not settled here. Either way a player that has just woken the
+amp should not assume the warm number, and the cheap answer is to not go cold:
+keeping the stream fed across a gap costs the standby the hum section describes.
+
+This 95 ms is **not** what Sendspin's `static_delay_ms` carries, which is the
+first thing anybody will assume: that field is for delay past the device's audio
+port, and a Dot's speaker is on the near side of it. The 95 ms is the client's
+own to subtract from a timestamp before scheduling, which docs/sendspin.md
+explains at more length and with the trap that makes declaring it look like it
+works. The eight-block queue does not add to it either -- the first frame is at
+the head of the queue rather than behind it -- and what the queue bounds is how
+far *ahead* the writer may run.
+
 `AudioTrack.getTimestamp` is reachable without an APK -- `javac`, `d8`, then
 `CLASSPATH=x.dex app_process /system/bin Main` -- and answered all 1194 calls
 across a five-minute run without one refusal. Do not trust it. Three runs of the
