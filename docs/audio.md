@@ -298,6 +298,7 @@ that runs whether we feed it or not. The 95 ms is the bridge between the two, an
 only the bridge is ±3 ms.
 
 Which is the useful shape, because the bridge is a constant and mostly cancels.
+
 Two of these Dots running one build should share it, and what multi-room playback
 needs is that they agree with each other rather than that either knows its own
 latency in absolute terms: a shared 95 ms is inaudible, while 6 ms between them is
@@ -365,6 +366,111 @@ observed, and it looked like the best result of the night. A clock claim here
 needs a second independent source -- measured over the same span as the first,
 since comparing 295 seconds of one against 12 seconds of the other produced a
 confident wrong verdict on the way to this one.
+
+### Asking the player where it is
+
+`Chime.Played` holds the player's own lock and refuses after a close, because the
+alternative is not a wrong answer but a crash: `audio_close` clears its pointer and
+then destroys the object, so a reader that passed the null check a moment earlier
+dereferences a freed vtable. The supervisor turns that into a five-second restart
+with the button ungrabbed, so an ordinary shutdown would become an outage.
+
+`Chime.Played` is that pair of instruments behind one call: `GetPosition` on
+`SLPlayItf` for the frames AudioFlinger has taken from our track, minus the ALSA
+`delay` for what the HAL still holds, with the moment of the reading beside it. A
+caller wanting the origin computes `At - Frames/48000`; a caller wanting to
+schedule frame N plays it at `origin + N/48000`.
+
+`Frames` is signed on purpose, and it really does go negative: measured on a Dot,
+the first reading after a sound starts reported **-2,704** frames. That is not an
+error. It says our audio is queued and none of it has reached the DAC yet, and how
+much is still to come is exactly what a scheduler wants to know. Discarding the
+sign would turn "56 ms early" into "here now".
+
+The two halves of a reading are taken around the stamp rather than before it. The
+`/proc` read is the slow one, so it goes first, then `At`, then `GetPosition`,
+which is a function call. Taking both after the stamp would make `delay` stale by
+the length of the file read -- and stale one way: the HAL drains while the file is
+being read, so the delay would be understated and every origin would come out
+early by that much. Measured on a Dot over twelve readings, the `/proc` read costs
+253 to 389 us, mean about 300 -- which is the whole of the bias, and the same size
+as the tightest agreement this instrument has produced. A systematic error the
+size of your best case is not noise that averages away.
+
+A position of `SL_TIME_UNKNOWN` is refused rather than returned. `GetPosition` can
+answer `SL_RESULT_SUCCESS` and still hand back `(SLmillisecond)-1`, which Android
+does when the underlying `AudioTrack` is not there yet. Unsigned, that is
+4,294,967,295 ms: positive, so a sign check passes it, and about 49.7 days of
+audio. The C side answers -1 instead, because a position nobody knows should look
+like a failure rather than like a confident number.
+
+The path to the status file is a constant here -- card, PCM and subdevice alike --
+while `internal/device` globs for it, and the two are asking different questions: that one wants to know whether
+*anything* is playing and will take any PCM, this one wants the delay on the
+stream ours is mixed into, which is `pcm23p` on biscuit. The hazard the glob
+exists for -- a path resolved while ALSA is still registering -- does not reach
+here either, because this path is resolved on every call rather than cached, so a
+file that is not there yet is an error this time and fine the next. A Dot that
+enumerated its outputs under another card or subdevice would fail this read with
+ENOENT every time rather than answer wrongly, which is the direction to fail in:
+`Played` would go dark and say so, while `SpeakerPlaying` kept working.
+
+**A reading is refused unless something of ours is playing**, and that is a
+different question from whether the output is running. `GetPosition` counts frames
+taken from *our* track; the `delay` beside it describes the shared queue that
+stock Alexa is mixed into. Between our own sounds our track's position freezes
+while hers does not, so a reading taken then subtracts her buffer from our frozen
+count, and the origin it implies slides backwards a second per second for as long
+as she talks. The `RUNNING` check does not catch it -- the output really is
+running, just not for us. The mixer knows the answer, so the reading asks it.
+
+Measured, sampling twice a second with nothing of ours playing: the output read
+`RUNNING` with a delay wandering between 2,464 and 3,072 frames, for minutes at a
+time, whether or not Alexa was making a sound. So the idle case is not an unlucky
+window -- a reading taken any time we are not writing would have come back with a
+plausible number built out of somebody else's queue, and the `RUNNING` check alone
+would have passed every one of them.
+
+What the guard costs is the tail. The mixer drains a clip into the player's queue
+faster than the speaker empties it, so it goes idle while the last ~80 ms is still
+audible, and readings stop before the sound does. Sampling every 50 ms across a
+chime gives six readings over about 250 ms and then nothing. For a player being
+fed continuously that is invisible; for a short sound it means the reading is
+available while the audio is being written rather than while it is being heard.
+Refusing there is the conservative direction: the alternative is a number that
+looks right.
+
+**A reading is also refused when the output is not `RUNNING`.** This is not a
+theoretical guard: between two chimes four seconds apart, the status file read
+`XRUN` with `delay: 0`, because the queue had drained and the HAL had stopped. A
+zero delay there does not mean the queue had emptied into the speaker -- it means
+there is no queue to describe, and taking it at face value would place our frames
+about 57 ms later than they are.
+
+Three presses, the origin sampled every ten blocks while the chime played. A
+fourth was pressed and fell past the probe's own cap, so it carries no row:
+
+| press | spread, all four samples | spread, after the first |
+|---|---|---|
+| 1 | 6.3 ms | 0.09 ms |
+| 2 | 6.3 ms | 6.3 ms |
+| 3 | 8.9 ms | 3.8 ms |
+
+**The first sample of a sound is the one to distrust, and it is inconsistent about
+which way it is wrong.** On press 1 it sat 6.3 ms early and the other three agreed
+to 90 microseconds; on press 3 it sat 8.9 ms late; on press 2 it was
+unremarkable and a later sample was the outlier instead. What is reproducible is
+the frame count: every first reading came back at exactly **-3,056** frames, so the
+writer is a fixed distance ahead when the first block lands and the variation is in
+the HAL's delay rather than in our own position.
+
+That is the cold-start finding above in miniature -- the buffer is filling while
+the sample is taken. A scheduler that needs the origin should take it after audio
+is flowing rather than at the first opportunity, and should expect its own best
+case only once the stream is steady.
+
+The `delay` itself held between 2,768 and 3,072 frames across all three presses,
+which is 58 to 64 ms of HAL buffer.
 
 ## Testing audio here
 

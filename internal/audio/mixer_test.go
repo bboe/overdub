@@ -264,3 +264,20 @@ func TestALongBlockIsFilledRatherThanPaddedWithSilence(t *testing.T) {
 		}
 	}
 }
+
+func TestAMixerWithNothingToPlayIsNotSounding(t *testing.T) {
+	m := newMixer()
+	if m.sounding() {
+		t.Error("a mixer with no source reported that ours was playing, so the shared" +
+			" queue Alexa fills would be read as our own")
+	}
+	m.start(steady(500, BlockFrames))
+	if !m.sounding() {
+		t.Error("a mixer with a source reported nothing playing")
+	}
+	m.next(make([]int16, BlockFrames))
+	if m.sounding() {
+		t.Error("a spent source still counts as ours playing, so a position taken after" +
+			" the sound ended is measured against whatever plays next")
+	}
+}

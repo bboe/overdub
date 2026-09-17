@@ -14,4 +14,8 @@ func (c *Chime) Play() error {
 	return errors.New("audio: built without OpenSL ES")
 }
 
+func (c *Chime) Played() (Point, error) {
+	return Point{}, errors.New("audio: built without OpenSL ES")
+}
+
 func (c *Chime) Close() {}

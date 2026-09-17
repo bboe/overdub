@@ -108,6 +108,24 @@ func (c *Chime) waiting() bool {
 	}
 }
 
+func (c *Chime) Played() (Point, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return Point{}, errors.New("audio: played after close")
+	}
+	if !c.mix.sounding() {
+		return Point{}, errors.New("audio: nothing of ours is playing, so the queue the" +
+			" output reports is somebody else's")
+	}
+	st, err := readStatus(statusPath)
+	if err != nil {
+		return Point{}, err
+	}
+	at := time.Now()
+	return point(int64(C.audio_position()), st, at)
+}
+
 func (c *Chime) Close() {
 	c.mu.Lock()
 	if c.closed {

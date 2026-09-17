@@ -65,6 +65,12 @@ func (m *mixer) start(c *clip) {
 	}
 }
 
+func (m *mixer) sounding() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.srcs) > 0
+}
+
 func (m *mixer) next(block []int16) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

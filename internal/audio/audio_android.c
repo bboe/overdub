@@ -110,6 +110,14 @@ int audio_start(void) {
 	return 0;
 }
 
+long long audio_position(void) {
+	if (player_play == NULL) return -1;
+	SLmillisecond ms = 0;
+	if ((*player_play)->GetPosition(player_play, &ms) != SL_RESULT_SUCCESS) return -1;
+	if (ms == SL_TIME_UNKNOWN) return -1;
+	return (long long)ms;
+}
+
 void audio_close(void) {
 	if (player_play != NULL) {
 		(*player_play)->SetPlayState(player_play, SL_PLAYSTATE_STOPPED);
