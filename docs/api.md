@@ -996,6 +996,106 @@ and the switch-command path hold it, and `readLive` is the one exception. What
 must not happen is taking the lock to read them from inside the command path,
 which already holds it: that deadlocks, and the suite hangs rather than failing.
 
+**A number, for the one setting that is a figure.** `number.<name>_sendspin_output_delay`
+is the Sendspin output delay, the milliseconds this player is asked to place its
+audio earlier than a server stamped it. docs/sendspin.md carries what the figure
+means on the wire, that a server can set it too, and which writer wins. What
+belongs here is the entity.
+
+`ListEntitiesNumberResponse` is 49, `NumberStateResponse` 50 and
+`NumberCommandRequest` 51, and the fields are per message again: on the listing
+the icon is 5, the range 6 and 7, the step 8, `disabled_by_default` 9, the
+category 10, the unit 11 and the mode 12, where a select carries its options at
+6 and its category at 8. The state and the command both put the figure in field
+2 as a `float`. API version 1.12 already covers it: numbers are older than that
+and `aioesphomeapi` reads whichever entity messages arrive rather than gating
+them on the version.
+
+It is optional the way the switch is. `UseSendspinDelay` is what creates it, so a
+Dot with no Sendspin identity lists no delay either, and the maximum arrives from
+the caller rather than being written down twice: `serve.go` hands over
+`sendspin.MaxStaticDelayMS`, which is the bound a server's own figure is held to,
+so the control cannot offer one the thing behind it would clamp.
+
+**The mode is the box rather than the slider, which is the whole reason the step
+is 1 ms.** A slider sends a value per step dragged, and every value is a property
+write -- two forks -- and a `client/state` to whatever server is playing. Music
+Assistant's own control is one: 23 values from a single drag, measured on a Dot,
+which spent the peer log's whole minute. A box sends one figure when committed,
+so a fine step costs nothing and the wire carries whole milliseconds anyway.
+Home Assistant would have drawn a box at this step regardless -- its frontend
+gives up on sliders past 256 steps -- so declaring the mode only stops the
+control depending on that heuristic. There is no `device_class`: `duration` is
+the only candidate and Home Assistant's units for it stop at seconds, so the unit
+says `ms` and the icon carries the identification.
+
+Its setter must not block either, and for the same class of reason as the
+switch's: persisting the figure is a `setprop` and a `getprop` read-back, two
+forks, on the goroutine that reads every other frame from that connection. So the
+seam is a `func(int)` handed to a worker rather than applied inline.
+
+It is the **switch's** worker. A figure and a switch toggle on two workers can
+interleave, and the figure then lands on a switch an `enable` is at that moment
+giving a client -- persisted, and never told to the client that is playing. One
+worker cannot do that. What it costs is a figure queued behind an `enable`,
+waiting out the xtables lock: late is recoverable and silently ignored is not.
+
+With Sendspin off, a set wakes `liveWake` when the figure is taken, so a control
+does not sit at its old value while the window holds the write back; the write
+wakes it again when it lands. Two wakes for one set costs an extra poll and the
+count is not worth defending -- what matters is that the first one does not wait
+on flash. A write that fails wakes nothing, and the control is already showing
+the figure by then. The reading is in `readLive`, which the poll takes on
+`HeavyEvery` ticks. With a client up there is no wake of its own:
+the figure goes to the client and the property write is the keeper's, so the
+entity follows within `liveTick` times `HeavyEvery`, 2.5 s, from reading the
+client rather than from being told.
+
+**A peer's figure is read as a float or not at all.** Field 2 sent as a varint is
+not a float that happens to be zero, and neither is a `NaN`: taking either as
+zero would move a playing stream by whatever the delay was, on a malformed frame.
+The figure is rounded and held to 0 through the maximum before it goes anywhere,
+because the range is Sendspin's own and one outside it is refused there.
+
+**A field that is absent is not that case, and reading it as one made 0
+unsendable.** proto3 leaves a zero-valued scalar off the wire, so a command for 0
+carries its key and nothing else -- the bottom of the range the entity itself
+offers was the one figure the control could not send. Found on a Dot rather than
+here: the log has the 1 ms and the 2 ms either side of it and no line at all for
+the 0, because every test built the frame by writing the field. Absent now reads
+as zero; a field present with the wrong wire type is still refused.
+
+The media player's volume is the same rule and had the same defect, with
+`has_volume` separating the two readings there: a slider at exactly 0.0 sends the
+flag and omits the figure, so mute was dropped the same way.
+
+A command carrying a figure the delay already holds is neither passed on nor
+logged, which is the button mode's rule. It is refused as a repeat only when it
+matches both what is applied and what was last asked for: the entity reports what
+has been **applied**, and a figure queued behind a busy worker is not applied
+yet, so comparing against the applied figure alone dropped an operator's second
+command and let the first one win.
+
+**An entity is named three times over, and the three are not interchangeable.**
+Each listing carries an `object_id`, a `key`, and a name. Home Assistant builds
+the entity id from the **name** -- `_attr_has_entity_name` is set on its side --
+so `number.<name>_sendspin_output_delay` comes from "Sendspin output delay" and
+not from the `object_id` beside it. The `key` is what every state message is
+routed by, so it is the one that must never move for an entity that already
+exists. The `object_id` is the one with the least reach and the easiest trap: it
+is part of the older form of the unique id Home Assistant stores, so changing it
+on an entity somebody already has can re-identify that entity even though its id
+and its key are untouched. This tree keeps `object_id` as the slug of the name,
+which makes all three agree and the question not come up.
+
+`NumberStateResponse` carries a `missing_state` like a sensor's and it is always
+false, which is the one place this entity differs from everything else on the
+list. Every other reading here is taken off the device and can fail; this one is
+a setting the daemon holds, so there is always an answer. What it reports is the
+figure actually applied rather than the last one Home Assistant asked for, which
+is what makes a server moving the delay show up in the control rather than the
+two disagreeing silently.
+
 ## Discovery
 
 Home Assistant finds the Dot over mDNS. The responder is `internal/mdns`, which

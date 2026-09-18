@@ -149,11 +149,15 @@ func (r *chunkRun) tick(peer *untrustedlog.Log, name string) {
 }
 
 func (r *chunkRun) delaySet() string {
-	if r.play == nil || r.play.delay == 0 {
+	if r.play == nil {
 		return ""
 	}
-	return ", placed " + r.play.delay.String() + " earlier than stamped for this" +
-		" player's output delay"
+	held := r.play.delay()
+	if held == 0 {
+		return ""
+	}
+	return ", placed " + held.String() + " earlier than stamped for this player's output" +
+		" delay"
 }
 
 func (r *chunkRun) report(peer *untrustedlog.Log, name string) {

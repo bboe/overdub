@@ -73,7 +73,7 @@ func TestADelayOutsideWhatTheSpecAllowsIsHeldAtTheEndItPassed(t *testing.T) {
 	s := &Session{roles: []string{rolePlayerV1}}
 	for ms, want := range map[int]time.Duration{
 		-1:                   0,
-		maxStaticDelayMS + 1: maxStaticDelayMS * time.Millisecond,
+		MaxStaticDelayMS + 1: MaxStaticDelayMS * time.Millisecond,
 	} {
 		payload, err := json.Marshal(delayCommand(&ms))
 		if err != nil {
@@ -169,7 +169,8 @@ func TestASummarySaysWhatDelayItWasPlacedAgainst(t *testing.T) {
 	startWith(t, s, &p)
 
 	run := chunkRun{every: reportEvery,
-		play: &playback{stream: &fakeStream{}, delay: 1097 * time.Millisecond}}
+		play: &playback{stream: &fakeStream{},
+			held: func() time.Duration { return 1097 * time.Millisecond }}}
 	feedChunks(t, &run, peer, s, 2)
 	run.report(peer, "server")
 
@@ -186,7 +187,7 @@ func TestADelayBeyondWhatTheLeadCarriesIsHeldAtWhatItCanAndReportedBack(t *testi
 	serveOn(t, c, ln)
 	peer, server, _ := bringUp(t, c, ln)
 
-	asked := maxStaticDelayMS + 2000
+	asked := MaxStaticDelayMS + 2000
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
 
 	kind, payload := nextJSON(t, peer, server)
@@ -200,9 +201,9 @@ func TestADelayBeyondWhatTheLeadCarriesIsHeldAtWhatItCanAndReportedBack(t *testi
 	if err := json.Unmarshal(payload, &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Player == nil || state.Player.StaticDelayMS != maxStaticDelayMS {
+	if state.Player == nil || state.Player.StaticDelayMS != MaxStaticDelayMS {
 		t.Errorf("reported %v back, want the %d ms the spec holds it to", state.Player,
-			maxStaticDelayMS)
+			MaxStaticDelayMS)
 	}
 }
 
@@ -479,14 +480,14 @@ func TestEachDelayGetsItsOwnAttemptsAtThePropertyRatherThanTheRunsLeftovers(t *t
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&second)))
 
 	waitFor(t, "the second figure to spend its own attempts", func() bool {
-		return count(second) >= keepTries
+		return count(second) >= KeepTries
 	})
 	time.Sleep(20 * c.keepEvery)
-	if got := count(second); got != keepTries {
+	if got := count(second); got != KeepTries {
 		t.Errorf("a figure that arrived after another had already been refused was"+
 			" written %d times, want %d: the attempts are what one figure is worth, and"+
 			" counting them per run spends an earlier figure's failures on this one",
-			got, keepTries)
+			got, KeepTries)
 	}
 }
 
@@ -543,12 +544,12 @@ func TestADelayThePropertyKeepsRefusingIsGivenUpOn(t *testing.T) {
 	asked := 900
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
 
-	waitFor(t, "the writes to be given up on", func() bool { return count() >= keepTries })
+	waitFor(t, "the writes to be given up on", func() bool { return count() >= KeepTries })
 	time.Sleep(20 * c.keepEvery)
-	if got := count(); got != keepTries {
+	if got := count(); got != KeepTries {
 		t.Errorf("a property that refuses every write was written %d times in %d windows,"+
 			" want the %d this keeper gives up after: a figure that cannot be stored is"+
-			" not worth a setprop a minute for the rest of the boot", got, 20, keepTries)
+			" not worth a setprop a minute for the rest of the boot", got, 20, KeepTries)
 	}
 }
 

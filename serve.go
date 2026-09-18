@@ -65,9 +65,18 @@ var advertised atomic.Pointer[mdns.Responder]
 
 var api atomic.Pointer[esphome.Server]
 
+var switched atomic.Pointer[sendspinSwitch]
+
 func withdraw() {
 	if r := advertised.Load(); r != nil {
 		r.Goodbye()
+	}
+}
+
+func stopping() {
+	withdraw()
+	if s := switched.Load(); s != nil {
+		s.flush()
 	}
 }
 
@@ -87,7 +96,7 @@ func serve(flags config) error {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
-		withdraw()
+		stopping()
 		i.Close()
 		os.Exit(0)
 	}()
@@ -231,7 +240,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 		err := i.Press(muteKey)
 		if errors.Is(err, button.ErrKeyStuck) {
 			log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
-			withdraw()
+			stopping()
 			i.Close()
 			os.Exit(1)
 		}
@@ -243,7 +252,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 			err := volume.Step(up, n)
 			if errors.Is(err, button.ErrKeyStuck) {
 				log.Printf("volume: %v; exiting so the device is rebuilt", err)
-				withdraw()
+				stopping()
 				i.Close()
 				os.Exit(1)
 			}
@@ -284,15 +293,19 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 	advertised.Store(responder)
 	go responder.Run()
 
+	delay, delayKnown := keptDelay()
 	up := false
 	if haveKeys {
 		toggle := &sendspinSwitch{
 			name: name, mac: mac, keys: keys, player: player,
 			responder: responder, base: base,
-			wake: server.NoteSendspin,
-			peer: &untrustedlog.Log{Subject: "sendspin"},
-			want: make(chan bool, 1),
+			wake:      server.NoteSendspin,
+			peer:      &untrustedlog.Log{Subject: "sendspin"},
+			want:      make(chan bool, 1),
+			wantDelay: make(chan int, 1),
 		}
+		toggle.tookDelay(delay, delayKnown)
+		switched.Store(toggle)
 		go toggle.run()
 		if wantSendspin {
 			toggle.enable()
@@ -301,6 +314,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 			log.Printf("sendspin: switched off at the last restart, so it stays off")
 		}
 		server.UseSendspin(toggle.On, toggle.Set)
+		server.UseSendspinDelay(sendspin.MaxStaticDelayMS, toggle.Delay, toggle.SetDelay)
 	}
 	if !up {
 		go sweepSendspinRule()
@@ -313,7 +327,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 	server.Poll(sensorTick, liveTick)
 
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
-	withdraw()
+	stopping()
 	os.Exit(1)
 }
 
@@ -404,6 +418,7 @@ func loadPSK(path string) ([]byte, error) {
 const (
 	sendspinFlag  = "sendspin"
 	sendspinDelay = "sendspin_delay"
+	sendspinFlush = 2 * time.Second
 )
 
 type advertiser interface {
@@ -412,6 +427,8 @@ type advertiser interface {
 
 type sendspinServer interface {
 	Serve(net.Listener) error
+	Delay() int
+	SetDelay(ms int)
 	Close()
 }
 
@@ -435,17 +452,35 @@ type sendspinSwitch struct {
 	deny      func(int) error
 	allow     func(int) error
 	ready     func(<-chan struct{}) bool
+	save      func(int) error
+	kept      func() (int, bool)
+	flag      func(bool) error
+	holdOpen  func(<-chan struct{})
 	peer      *untrustedlog.Log
 
-	want chan bool
+	want      chan bool
+	wantDelay chan int
 
-	mu      sync.Mutex
-	on      bool
-	working bool
-	client  sendspinServer
-	ln      net.Listener
-	hold    chan struct{}
-	held    sync.WaitGroup
+	flushFor  time.Duration
+	keepEvery time.Duration
+
+	writing sync.Mutex
+
+	mu          sync.Mutex
+	on          bool
+	delayMS     int
+	diskMS      int
+	diskUnknown bool
+	owes        bool
+	owedFor     int
+	owedTries   int
+	wroteAt     time.Time
+	working     bool
+	client      sendspinServer
+	ln          net.Listener
+	served      chan struct{}
+	hold        chan struct{}
+	held        sync.WaitGroup
 }
 
 func (s *sendspinSwitch) On() bool {
@@ -469,23 +504,197 @@ func (s *sendspinSwitch) Set(on bool) {
 	}
 }
 
-func (s *sendspinSwitch) run() {
-	for on := range s.want {
-		accepted := false
-		if on {
-			accepted = s.enable()
-		} else {
-			accepted = s.disable()
+func (s *sendspinSwitch) Delay() int {
+	s.mu.Lock()
+	client, ms := s.client, s.delayMS
+	s.mu.Unlock()
+	if client != nil {
+		return client.Delay()
+	}
+	return ms
+}
+
+func (s *sendspinSwitch) SetDelay(ms int) {
+	select {
+	case s.wantDelay <- ms:
+	default:
+		select {
+		case <-s.wantDelay:
+		default:
 		}
-		if !accepted {
-			continue
+		select {
+		case s.wantDelay <- ms:
+		default:
 		}
-		if err := device.SetFlag(sendspinFlag, on); err != nil {
-			log.Printf("sendspin: %v; the switch holds until the next restart only", err)
-		}
+	}
+}
+
+func (s *sendspinSwitch) applyDelay(ms int) {
+	s.mu.Lock()
+	client, held := s.client, sendspin.HoldDelayMS(ms)
+	s.mu.Unlock()
+	if client != nil {
+		client.SetDelay(held)
+		return
+	}
+	if s.Delay() == held {
+		return
+	}
+	s.mu.Lock()
+	s.delayMS = held
+	s.mu.Unlock()
+	s.keepOwed(false)
+}
+
+func (s *sendspinSwitch) keptDelay() (int, bool) {
+	if s.kept != nil {
+		return s.kept()
+	}
+	return keptDelay()
+}
+
+func (s *sendspinSwitch) tookDelay(ms int, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tookDelayLocked(ms, known)
+}
+
+func (s *sendspinSwitch) tookDelayLocked(ms int, known bool) {
+	s.delayMS, s.diskMS, s.owedFor = ms, ms, ms
+	s.diskUnknown, s.owes, s.owedTries = !known, false, 0
+}
+
+func (s *sendspinSwitch) owed() (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owes && !(s.diskUnknown && s.owedTries < sendspin.KeepTries) {
+		return 0, false
+	}
+	apart := s.keepEvery
+	if apart <= 0 {
+		apart = sendspin.KeepApart
+	}
+	if wait := apart - time.Since(s.wroteAt); wait > 0 {
+		return wait, true
+	}
+	return 0, true
+}
+
+func (s *sendspinSwitch) keepOwed(now bool) {
+	s.writing.Lock()
+	defer s.writing.Unlock()
+	s.mu.Lock()
+	ms, tries := s.delayMS, s.owedTries
+	if ms != s.owedFor {
+		s.owedFor, tries = ms, 0
+		s.owedTries = 0
+	}
+	s.owes = ms != s.diskMS || s.diskUnknown
+	owes := s.owes
+	s.mu.Unlock()
+	if !owes {
+		return
+	}
+	if wait, _ := s.owed(); wait > 0 && !now {
 		if s.wake != nil {
 			s.wake()
 		}
+		return
+	}
+	err := s.keepDelay(ms)
+	s.mu.Lock()
+	s.wroteAt = time.Now()
+	if err == nil {
+		s.owes, s.owedTries = false, 0
+	} else {
+		s.owedTries = tries + 1
+		s.owes = s.owedTries < sendspin.KeepTries
+	}
+	s.mu.Unlock()
+	if err != nil {
+		log.Printf("sendspin: %v; the output delay holds until the next restart only", err)
+	}
+}
+
+func (s *sendspinSwitch) flush() {
+	s.keepOwed(true)
+	s.mu.Lock()
+	ln, served := s.ln, s.served
+	s.mu.Unlock()
+	if ln == nil {
+		return
+	}
+	ln.Close()
+	s.settle(served)
+}
+
+func (s *sendspinSwitch) settle(served <-chan struct{}) {
+	if served == nil {
+		return
+	}
+	wait := s.flushFor
+	if wait <= 0 {
+		wait = sendspinFlush
+	}
+	select {
+	case <-served:
+	case <-time.After(wait):
+	}
+}
+
+func (s *sendspinSwitch) keepDelay(ms int) error {
+	save := s.save
+	if save == nil {
+		save = func(ms int) error { return device.SetNumber(sendspinDelay, ms) }
+	}
+	if err := save(ms); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.diskMS, s.wroteAt, s.diskUnknown = ms, time.Now(), false
+	if s.client != nil {
+		s.delayMS = ms
+	}
+	s.mu.Unlock()
+	if s.wake != nil {
+		s.wake()
+	}
+	return nil
+}
+
+func (s *sendspinSwitch) run() {
+	for {
+		var due <-chan time.Time
+		if wait, owes := s.owed(); owes {
+			due = time.After(wait)
+		}
+		select {
+		case on := <-s.want:
+			s.applyWant(on)
+		case ms := <-s.wantDelay:
+			s.applyDelay(ms)
+		case <-due:
+			s.keepOwed(false)
+		}
+	}
+}
+
+func (s *sendspinSwitch) applyWant(on bool) {
+	accepted := false
+	if on {
+		s.keepOwed(true)
+		accepted = s.enable()
+	} else {
+		accepted = s.disable()
+	}
+	if !accepted {
+		return
+	}
+	if err := s.setFlag(on); err != nil {
+		log.Printf("sendspin: %v; the switch holds until the next restart only", err)
+	}
+	if s.wake != nil {
+		s.wake()
 	}
 }
 
@@ -518,27 +727,37 @@ func (s *sendspinSwitch) enable() bool {
 	}
 	defer s.end()
 
-	client := sendspinClient(s.name, s.mac, s.keys, s.player, s.peer)
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", sendspin.Port))
 	if err != nil {
 		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
 		return true
 	}
-	if err := device.AllowTCP(sendspin.Port); err != nil {
+	if err := s.allowRule(); err != nil {
 		log.Printf("firewall: %v", err)
 	}
 	hold := make(chan struct{})
 	s.held.Add(1)
 	go func() {
 		defer s.held.Done()
-		device.HoldTCPOpen(sendspin.Port, firewallRe, hold)
+		s.holdRuleOpen(hold)
 	}()
 
+	delay, delayKnown := s.keptDelay()
 	s.mu.Lock()
-	s.on, s.client, s.ln, s.hold = true, client, ln, hold
+	if !delayKnown || s.delayMS != s.diskMS {
+		delay, delayKnown = s.delayMS, false
+	}
+	s.tookDelayLocked(delay, delayKnown)
+	client := sendspinClient(s.name, s.mac, s.keys, s.player, s.peer, delay,
+		!delayKnown, s.keepDelay)
+	served := make(chan struct{})
+	s.on, s.client, s.ln, s.served, s.hold = true, client, ln, served, hold
 	s.mu.Unlock()
 
-	go func() { s.peer.Printf("sendspin stopped: %v", client.Serve(ln)) }()
+	go func() {
+		defer close(served)
+		s.peer.Printf("sendspin stopped: %v", client.Serve(ln))
+	}()
 	s.held.Add(1)
 	go func() {
 		defer s.held.Done()
@@ -546,6 +765,21 @@ func (s *sendspinSwitch) enable() bool {
 	}()
 	s.peer.Printf("sendspin: switched on")
 	return true
+}
+
+func (s *sendspinSwitch) setFlag(on bool) error {
+	if s.flag != nil {
+		return s.flag(on)
+	}
+	return device.SetFlag(sendspinFlag, on)
+}
+
+func (s *sendspinSwitch) holdRuleOpen(stop <-chan struct{}) {
+	if s.holdOpen != nil {
+		s.holdOpen(stop)
+		return
+	}
+	device.HoldTCPOpen(sendspin.Port, firewallRe, stop)
 }
 
 func (s *sendspinSwitch) allowRule() error {
@@ -602,8 +836,8 @@ func (s *sendspinSwitch) disable() bool {
 	defer s.end()
 
 	s.mu.Lock()
-	client, ln, hold := s.client, s.ln, s.hold
-	s.on, s.client, s.ln, s.hold = false, nil, nil, nil
+	client, ln, served, hold := s.client, s.ln, s.served, s.hold
+	s.on, s.client, s.ln, s.served, s.hold = false, nil, nil, nil, nil
 	s.mu.Unlock()
 
 	if err := s.responder.Advertise(append([]mdns.Advert{}, s.base...)); err != nil {
@@ -613,6 +847,10 @@ func (s *sendspinSwitch) disable() bool {
 	s.held.Wait()
 	ln.Close()
 	client.Close()
+	s.settle(served)
+	s.mu.Lock()
+	s.delayMS = client.Delay()
+	s.mu.Unlock()
 	if err := s.denyRule(); err != nil {
 		log.Printf("firewall: %v; tcp/%d stays open with nothing behind it until netd"+
 			" rebuilds the chain", err, sendspin.Port)
@@ -643,15 +881,21 @@ func sendspinKeys() (sendspin.Keys, bool) {
 	return keys, true
 }
 
-func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
-	peer *untrustedlog.Log) *sendspin.Client {
-	delay, known, err := device.Number(sendspinDelay)
+func keptDelay() (ms int, known bool) {
+	delay, stored, err := device.Number(sendspinDelay)
 	if err != nil {
 		log.Printf("sendspin: %v; starting with no output delay", err)
+		return 0, false
 	}
-	if err != nil || !known {
-		delay = 0
+	if !stored {
+		return 0, true
 	}
+	return sendspin.HoldDelayMS(delay), true
+}
+
+func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
+	peer *untrustedlog.Log, delay int, unknown bool,
+	save func(ms int) error) *sendspin.Client {
 	return &sendspin.Client{
 		Config: sendspin.Config{
 			Name:           name,
@@ -666,8 +910,8 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 		MinBufferMS:    sendspinBuffer,
 		RequiredLeadMS: sendspinLead,
 		DelayMS:        delay,
-		DelayUnknown:   err != nil,
-		SaveDelay:      func(ms int) error { return device.SetNumber(sendspinDelay, ms) },
+		DelayUnknown:   unknown,
+		SaveDelay:      save,
 		Player:         player,
 		Peer:           peer,
 	}

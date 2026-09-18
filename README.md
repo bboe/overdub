@@ -36,6 +36,9 @@ fallback key is a published constant; what is behind it is playback and nothing
 that reads off the device, but see [SECURITY.md](SECURITY.md) for what it does
 hold. `switch.<name>_sendspin` turns the whole thing off -- the advert, the port
 and any session -- and the setting survives a reboot.
+`number.<name>_sendspin_output_delay` is the output delay, the one figure a music
+server can also set: the last end to set it wins, and the number shows what is
+applied whichever did.
 
 What has not been settled is whether the Dot is in step with a *second* speaker
 to better than a few milliseconds. One Dot can measure everything but that, so
@@ -238,6 +241,13 @@ stored name is updated in place; the entity ids keep the prefix they were
 created with. The display name is separate, and you set it in Home Assistant
 afterwards.
 
+`<name>` below is therefore the name **Home Assistant** knows the device by,
+which is this one until somebody changes it there. Renaming the device in Home
+Assistant offers to rename its entity ids to match, so a Dot installed as
+`kitchen` and renamed afterwards answers to the new name in every id in the
+table and to neither name in the daemon's own log, which goes on saying what
+`-name` was given.
+
 Reboot to start the daemon. It is supervised, and failure is fail-open: if it
 dies the grab is released and the action button goes back to Alexa.
 
@@ -272,7 +282,8 @@ the way out.
 
 Everything goes: the boot script, the binary, the API key, the Sendspin identity,
 `mapdump.jar` and the directory it sits in, the log the boot script writes, and
-the property that remembers whether Sendspin was switched off -- so installing
+the two properties that remember whether Sendspin was switched off and the
+output delay it was left at -- so installing
 again starts with it on rather than inheriting a decision nothing on the device
 explains.
 `/data/local/bin` goes with them if nothing else is left in it. Removing the jar
@@ -337,6 +348,7 @@ Dot's own firewall.
 | `text.<name>_alexa_command` | config | a box that runs what you type on the Echo as though it had been spoken; listed only where `mapdump.jar` is installed and the Dot is registered |
 | `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
 | `switch.<name>_sendspin` | config | whether the Dot offers Sendspin at all: off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule and ends any session in progress. Survives a reboot. Listed only where the Dot could read its Sendspin identity |
+| `number.<name>_sendspin_output_delay` | config | milliseconds the Dot plays a server's audio ahead of the moment it was stamped for, 0 to 5,000. A music server can set the same figure and the last one set wins; whichever did, this is what is applied. Survives a reboot, works with the switch off, and is listed under the same condition |
 
 Uptime, signal and the registration are read once a minute, and again when Home
 Assistant subscribes. Both volumes, the jack, the temperature, the memory and the

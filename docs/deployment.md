@@ -234,12 +234,21 @@ because the chain is not ours alone and one pass proves nothing, and then read
 back. A rule left behind is reported rather than failed on: nothing listens behind
 it once the daemon is gone, and it does not survive a reboot in any case.
 
-`persist.overdub.sendspin` goes with them. It is the one thing an uninstall leaves
-behind that would change what the *next* install does: a Dot switched off through
-Home Assistant would come back switched off, with nothing on disk to say why. The
-script clears the property, removes its file under `/data/property`, and reads it
-back; a value that survives is reported rather than failed on, because it decides
-nothing until something is installed again.
+Both `persist.overdub.` properties go with them, because both would change what
+the *next* install does: a Dot switched off through Home Assistant would come back
+switched off, and one whose output delay was tuned would come back playing that
+much early, with nothing on disk to say why either. The script clears each, removes
+its file under `/data/property`, and reads the switch flag back; a value that
+survives is reported rather than failed on, because it decides nothing until
+something is installed again.
+
+Reading one of the two back rather than both is a choice about what the check is
+for. It proves the mechanism worked -- the clear, the file, and the shape of the
+answer -- and the second property is cleared by the same two lines in the same
+shell. What it does not prove is that a name added later is on that list at all,
+which is the failure this actually had: three properties from measuring this
+device's name limit sat in `/data/property` for weeks because nothing enumerated
+the prefix.
 
 The ports are Go constants -- `apiPort` in `serve.go` and `sendspin.Port` -- and
 shell cannot read either, so the script assigns them to variables of its own. A

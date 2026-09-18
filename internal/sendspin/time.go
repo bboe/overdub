@@ -3,6 +3,7 @@ package sendspin
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -154,10 +155,13 @@ func pause(stop <-chan struct{}, woken <-chan struct{}, d time.Duration) bool {
 	return true
 }
 
-func (c *Client) keepTime(session *Session, stop <-chan struct{}) {
+func (c *Client) keepTime(session *Session, nc net.Conn, stop <-chan struct{}) {
 	k := session.clock
 	for {
 		if err := k.ask(session); err != nil {
+			c.Peer.Printf("sendspin: this player could not ask its server for the time,"+
+				" so the connection goes: %v", err)
+			nc.Close()
 			return
 		}
 		if !pause(stop, k.replied, waitOr(c.answerAfter, answerWait)) {

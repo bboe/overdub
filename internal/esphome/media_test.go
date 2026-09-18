@@ -944,3 +944,27 @@ func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
 		t.Errorf("the log said %q; wiring a player that was already there drops nobody", got)
 	}
 }
+
+func TestAVolumeCommandCarryingNoVolumeAtAllIsZero(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	s.volumeSettle = time.Millisecond
+	f := wireFakeVolume(s, 6, 30)
+
+	var bare pb
+	bare.fixed32(1, s.keySpeaker)
+	bare.boolean(4, true)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, bare.b); err != nil {
+		t.Fatalf("a media command carrying no volume was an error: %v", err)
+	}
+	waitVolumeIdle(t, s)
+	if speaker, _, _, downs := f.state(); speaker != 0 || downs == 0 {
+		t.Errorf("a command asking for volume 0 left the speaker at %d after %d presses"+
+			" down, want 0: proto3 leaves a zero-valued scalar off the wire, and"+
+			" has_volume is the presence flag that says one was meant", speaker, downs)
+	}
+}

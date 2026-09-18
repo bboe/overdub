@@ -69,11 +69,11 @@ func TestAPropertyNameThisDeviceWillNotTakeIsRefusedHere(t *testing.T) {
 		return nil
 	}
 
-	long := strings.Repeat("x", keyMax-len(flagPrefix)+1)
+	long := strings.Repeat("x", keyMax-len(Prefix)+1)
 	if err := SetNumber(long, 250); err == nil {
 		t.Errorf("%s%s is %d characters and was accepted; setprop answers \"could not set"+
 			" property\" past %d, measured on a Dot, so a setting written under a name"+
-			" that long is never kept", flagPrefix, long, len(flagPrefix+long), keyMax)
+			" that long is never kept", Prefix, long, len(Prefix+long), keyMax)
 	}
 	if tried {
 		t.Error("the name went to the device anyway, so the check reads the failure back" +
@@ -90,6 +90,6 @@ func TestAPropertyNameThatFitsIsStillWritten(t *testing.T) {
 
 	if err := SetNumber("sendspin_delay", 250); err != nil {
 		t.Errorf("a name of %d characters was refused: %v",
-			len(flagPrefix+"sendspin_delay"), err)
+			len(Prefix+"sendspin_delay"), err)
 	}
 }

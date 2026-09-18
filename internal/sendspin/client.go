@@ -107,10 +107,12 @@ type Client struct {
 
 	Player Player
 
-	delay     atomic.Int64
-	keeping   atomic.Int64
-	keepWake  chan struct{}
-	keepEvery time.Duration
+	delay      atomic.Int64
+	onDisk     atomic.Int64
+	firstDelay sync.Once
+	keeping    atomic.Int64
+	keepWake   chan struct{}
+	keepEvery  time.Duration
 
 	handshakeAfter   time.Duration
 	provisionalAfter time.Duration
@@ -124,10 +126,11 @@ type Client struct {
 	Peer *untrustedlog.Log
 	Play *untrustedlog.Log
 
-	mu     sync.Mutex
-	held   *Session
-	live   map[net.Conn]*Session
-	closed bool
+	mu        sync.Mutex
+	held      *Session
+	heldReady bool
+	live      map[net.Conn]*Session
+	closed    bool
 }
 
 var (
@@ -176,8 +179,12 @@ func (c *Client) Serve(ln net.Listener) error {
 	if c.Play == nil {
 		c.Play = &untrustedlog.Log{Subject: "sendspin playback"}
 	}
-	c.delay.Store(int64(max(0, min(c.DelayMS, maxStaticDelayMS))))
+	c.firstDelay.Do(c.takeKeptDelay)
 	c.keeping.Store(c.delay.Load())
+	stored := HoldDelayMS(c.DelayMS)
+	if put := c.onDisk.Load(); put > 0 {
+		stored = int(put - 1)
+	}
 	kept := make(chan struct{}, 1)
 	c.keepWake = kept
 	c.mu.Unlock()
@@ -188,13 +195,17 @@ func (c *Client) Serve(ln net.Listener) error {
 	if c.SaveDelay != nil {
 		done, stopped := make(chan struct{}), make(chan struct{})
 		defer func() {
+			c.mu.Lock()
+			c.keepWake = nil
+			c.mu.Unlock()
 			close(done)
 			<-stopped
 		}()
 		go func() {
 			defer close(stopped)
-			c.keepDelays(kept, done)
+			c.keepDelays(kept, done, stored)
 		}()
+		c.keep()
 	}
 	for {
 		nc, err := ln.Accept()
@@ -323,13 +334,13 @@ func (c *Client) serveConn(nc net.Conn) {
 	c.release(session)
 }
 
-func (c *Client) hold(s *Session) error {
+func (c *Client) hold(s *Session, ready bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.held != nil && c.held != s {
 		return errBusy
 	}
-	c.held = s
+	c.held, c.heldReady = s, ready
 	return nil
 }
 
@@ -337,8 +348,22 @@ func (c *Client) release(s *Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.held == s {
-		c.held = nil
+		c.held, c.heldReady = nil, false
 	}
+}
+
+func (c *Client) holdReady(s *Session, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.held == s {
+		c.heldReady = ready
+	}
+}
+
+func (c *Client) reporting() (*Session, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.held, c.heldReady
 }
 
 func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error {
@@ -361,7 +386,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 
 	var noted noteSet
 	play := playback{player: c.Player, say: c.Play.Printf, name: name,
-		delay: c.heldDelay()}
+		held: c.heldDelay}
 	defer play.stop()
 	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery), play: &play}
 	defer func() { heard.done(c.Play, name) }()
@@ -430,7 +455,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				once("sendspin: %q holds no role now", name)
 				continue
 			}
-			if err := c.hold(session); err != nil {
+			regained := !rolelessSince.IsZero()
+			if err := c.hold(session, available); err != nil {
 				_ = session.Goodbye(goodbyeConcurrent)
 				return err
 			}
@@ -444,12 +470,15 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			}
 			if !stated {
 				ws.setIdle(idleWait)
-				go keepalive(ws, stop, waitOr(c.pingEvery, pingAfter))
-				if err := c.state(session, available, play.delay); err != nil {
+				go c.keepalive(ws, nc, stop, waitOr(c.pingEvery, pingAfter))
+				if err := c.state(session, available, c.heldDelay()); err != nil {
 					return err
 				}
-				go c.keepTime(session, stop)
+				go c.keepTime(session, nc, stop)
+				go c.reportDelays(session, nc, stop)
 				stated = true
+			} else if regained {
+				c.tellServer()
 			}
 			once("sendspin: %q activated %s", name, strings.Join(roles, ","))
 		case typeGroupUpdate:
@@ -472,8 +501,9 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				if converged, spread := session.clock.filter.state(); converged {
 					synced = true
 					available = c.Player != nil
+					c.holdReady(session, available)
 					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
-					if err := c.state(session, available, play.delay); err != nil {
+					if err := c.state(session, available, c.heldDelay()); err != nil {
 						return err
 					}
 				}
@@ -535,17 +565,15 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if asked != int(want/time.Millisecond) {
 				once("sendspin: %q asked for a %d ms output delay, and the spec holds one"+
 					" to 0 through %d, so %s is what this player takes", name, asked,
-					maxStaticDelayMS, want)
+					MaxStaticDelayMS, want)
 			}
-			if want == play.delay {
+			if !c.takeDelay(int(want / time.Millisecond)) {
 				continue
 			}
-			play.delay = want
-			c.delay.Store(int64(want / time.Millisecond))
-			c.keep(int(want / time.Millisecond))
+			c.keep()
 			once("sendspin: %q is setting this player's output delay, and every summary"+
 				" below says what it currently is", name)
-			if err := c.state(session, available, want); err != nil {
+			if err := c.state(session, available, c.heldDelay()); err != nil {
 				return err
 			}
 		case typeServerState:
@@ -556,7 +584,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	}
 }
 
-func keepalive(ws *Conn, stop <-chan struct{}, every time.Duration) {
+func (c *Client) keepalive(ws *Conn, nc net.Conn, stop <-chan struct{}, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -565,6 +593,9 @@ func keepalive(ws *Conn, stop <-chan struct{}, every time.Duration) {
 			return
 		case <-t.C:
 			if err := ws.Ping(); err != nil {
+				c.Peer.Printf("sendspin: this player could not reach its server to keep"+
+					" the connection alive, so the connection goes: %v", err)
+				nc.Close()
 				return
 			}
 		}
@@ -572,15 +603,71 @@ func keepalive(ws *Conn, stop <-chan struct{}, every time.Duration) {
 }
 
 func (c *Client) heldDelay() time.Duration {
+	c.firstDelay.Do(c.takeKeptDelay)
 	return time.Duration(c.delay.Load()) * time.Millisecond
 }
 
-func (c *Client) keep(ms int) {
+func (c *Client) Delay() int {
+	c.firstDelay.Do(c.takeKeptDelay)
+	return int(c.delay.Load())
+}
+
+func (c *Client) takeKeptDelay() {
+	c.delay.Store(int64(HoldDelayMS(c.DelayMS)))
+}
+
+func (c *Client) takeDelay(ms int) bool {
+	c.firstDelay.Do(c.takeKeptDelay)
+	return int(c.delay.Swap(int64(ms))) != ms
+}
+
+func (c *Client) SetDelay(ms int) {
+	if !c.takeDelay(HoldDelayMS(ms)) {
+		return
+	}
+	c.keep()
+	c.tellServer()
+}
+
+func (c *Client) tellServer() {
+	session, _ := c.reporting()
+	if session == nil {
+		return
+	}
+	select {
+	case session.report <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) reportDelays(session *Session, nc net.Conn, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-session.report:
+		}
+		held, available := c.reporting()
+		if held != session {
+			continue
+		}
+		if err := c.state(session, available, c.heldDelay()); err != nil {
+			c.Peer.Printf("sendspin: this player's output delay could not be reported,"+
+				" so its connection goes: %v", err)
+			nc.Close()
+			return
+		}
+	}
+}
+
+func (c *Client) keep() {
+	ms := int(c.delay.Load())
 	c.keeping.Store(int64(ms))
 	c.mu.Lock()
 	wake := c.keepWake
 	c.mu.Unlock()
 	if wake == nil {
+		c.keepNow(ms)
 		return
 	}
 	select {
@@ -589,9 +676,22 @@ func (c *Client) keep(ms int) {
 	}
 }
 
-func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}) {
-	apart := waitOr(c.keepEvery, keepApart)
-	written := max(0, min(c.DelayMS, maxStaticDelayMS))
+func (c *Client) keepNow(ms int) {
+	if c.SaveDelay == nil {
+		return
+	}
+	if err := c.SaveDelay(ms); err != nil {
+		if c.Peer != nil {
+			c.Peer.Printf("sendspin: this dot took a %d ms output delay and could not"+
+				" remember it: %v", ms, err)
+		}
+		return
+	}
+	c.onDisk.Store(int64(ms) + 1)
+}
+
+func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written int) {
+	apart := waitOr(c.keepEvery, KeepApart)
 	unknown, attempted, tries := c.DelayUnknown, written, 0
 	settled := func() bool {
 		ms := int(c.keeping.Load())
@@ -601,16 +701,17 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}) {
 		if ms != attempted {
 			attempted, tries = ms, 0
 		}
-		if tries >= keepTries {
+		if tries >= KeepTries {
 			return true
 		}
 		if err := c.SaveDelay(ms); err != nil {
 			c.Peer.Printf("sendspin: this dot took a %d ms output delay and could not"+
 				" remember it: %v", ms, err)
 			tries++
-			return tries >= keepTries
+			return tries >= KeepTries
 		}
 		written, unknown, tries = ms, false, 0
+		c.onDisk.Store(int64(ms) + 1)
 		return true
 	}
 	defer settled()

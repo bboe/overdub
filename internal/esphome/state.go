@@ -14,6 +14,7 @@ const (
 	kindSwitch
 	kindMedia
 	kindText
+	kindNumber
 )
 
 type reading struct {
@@ -121,6 +122,9 @@ func (s *Server) readLive() []reading {
 	if s.sendspinOn != nil {
 		out = append(out, reading{key: s.keySendspin, value: boolValue(s.sendspinOn()), ok: true, kind: kindSwitch})
 	}
+	if s.delayMS != nil {
+		out = append(out, reading{key: s.keyDelay, value: float32(s.delayMS()), ok: true, kind: kindNumber})
+	}
 	return out
 }
 
@@ -153,6 +157,8 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.state, r.value, r.muted)
 		case kindText:
 			msgType, payload = msgTextState, textState(r.key, r.text)
+		case kindNumber:
+			msgType, payload = msgNumberState, floatState(r.key, r.value, !r.ok)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err

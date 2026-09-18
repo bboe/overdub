@@ -1380,46 +1380,73 @@ minute writes once while it is moving and once when it stops, and a nudge whose
 window closes on it writes twice. One write a minute is the ceiling, not one write
 a drag.
 
-What that trades away is the last change before the daemon stops: a delay set and
-lost inside the window comes back as the previous figure. The Sendspin switch is
-the one stop that does not lose it. Turning it off in Home Assistant returns from
-`Serve`, so the keeper writes whatever is still pending on its way out, and
-`Serve` waits for that write before returning -- turning the switch back on
-rebuilds the client by reading the property, and the two race otherwise, which
-would revert the figure in front of the operator who had just set it.
+What that trades away is the last change before the daemon stops, so every stop
+that can see it writes first. There are five: the Sendspin switch turned off, a
+signal, a key found stuck, the ESPHome listener returning, and `serve` itself
+returning an error to `main`. Each closes the Sendspin listener and waits for
+that client to stop serving, which is when its keeper has written what it held.
+`Serve`'s defer does the writing; the callers wait on it.
 
-Every other stop still loses it, the ordinary ones included. The signal handler
-calls `os.Exit`, which runs no deferred function, so `SIGTERM` -- what
-`install.sh` stops the old daemon with -- takes a pending figure with it, and so
-does a panic and a pulled plug. Making a reinstall keep it means closing the
-Sendspin listener from the handler and waiting, in a path no test here can reach,
-for a figure an operator set in the last minute and is standing in front of. That
-is the right side to lose on: the figure matters only across a reboot or a
-reconnect, an operator who has just moved a slider can move it again, and Music
-Assistant re-sends its own value whenever a player's configuration loads. Flash
-on a 2016 Echo Dot is the part that does not come back.
+The waiting is the part worth stating, because two things read the property back:
+a switch-on rebuilds the client from it, and `os.Exit` runs no deferred function.
+`SIGTERM` is what `install.sh` stops the old daemon with, which made a reinstall
+the ordinary way to lose a figure.
+
+Each wait is bounded at `sendspinFlush`, two seconds, because a write that will
+not finish must not hold the daemon open -- the supervisor cannot see a wedge,
+and one `setprop` is a measured 40 ms. A write still running after that is
+abandoned, so the figure it finally lands on the property is the one from before
+the switch went off. On the property only: what the switch holds, and so what the
+control shows and the next client starts at, is not moved by a write the switch
+did not make. The trade is deliberate, and the case needs a write fifty times
+slower than any observed.
+
+The keeper's wake is cleared before the keeper is told to stop, rather than after,
+and that ordering is the whole of whether this works. A figure set while `Serve`
+is returning would otherwise find the channel still there, post to it, and be read
+by nobody -- and that window is one property write wide, since the flush is
+writing while it happens. Cleared first, a set arriving that late finds no keeper
+and writes the figure itself, and one arriving earlier stored its figure before
+the keeper's last read of it.
+
+What is left to lose is the stop nothing can be done about: a panic, a
+`SIGKILL`, a pulled plug. A signal landing while the switch is already part-way
+through turning off is the one narrow case still in that list rather than the
+one above it, because the listener is already gone and there is nothing left to
+wait on. That is the right side to lose on: the figure matters only across a
+reboot or a reconnect, an operator who has just moved a control can move it
+again, and Music Assistant re-sends its own value whenever a player's
+configuration loads. Flash on a 2016 Echo Dot is the part that does not come
+back.
+
+Waiting became worth doing when the figure stopped being a music server's alone.
+A delay only a server could set is one a server re-sends; a delay somebody typed
+in Home Assistant a moment ago, and is standing in front of, is not.
 
 A refused write is tried again on the next window -- three times in all, counted
 per figure rather than per run -- and then given up on until the figure changes.
-Both halves of that are load-bearing. `SetNumber` reads the property straight
-back, and a `setprop` followed immediately by a `getprop` on this device can
-report empty for a name that was in fact accepted, so the likely failure here is
-a spurious one and a single attempt would spend the whole figure on it -- the
-client would go on reporting a delay the next boot does not play at. Retrying
-forever is the other error: a name flash genuinely will not take would then cost
-a `setprop` a minute for the rest of the boot, which is the unbounded write this
-window exists to prevent, arrived at from the other side.
+Both halves are load-bearing. `SetNumber` reads the property straight back, and a
+`setprop` followed immediately by a `getprop` on this device can report empty for
+a name that was in fact accepted, so the likely failure is a spurious one and a
+single attempt would spend the figure on it. Retrying forever is the other error:
+a name flash genuinely will not take would cost a `setprop` a minute for the rest
+of the boot, which is the unbounded write this window exists to prevent.
 
-The keeper writes once at startup, before it waits for anything, when the stored
+The keeper writes once at startup, before waiting for anything, when the stored
 figure could not be **read** -- the one case where it cannot tell whether the disk
-agrees with it. It does not wait out a window first, because the write is this
-dot's own correction rather than anything a server asked for, and a window spent
-on it is a window in which a stop loses the correction. A read
-that fails leaves the client reporting zero while flash may hold some older
-figure, and a server that then sets zero is answered from the live figure and never
-reaches the keeper at all, so nothing would correct the disk and the next boot
-would play the old delay. An absent property is not that case: absent already reads
-as zero.
+agrees with it. It does not wait out a window first, because a window spent on
+this dot's own correction is one in which a stop loses it. A failed read leaves
+the client reporting zero while flash may hold something older, and a server that
+then sets zero is answered from the live figure and never reaches the keeper, so
+nothing would correct the disk and the next boot would play the old delay. An
+absent property is not that case: absent already reads as zero.
+
+A figure the direct write **refused** is primed rather than written: the keeper is
+woken as it starts, so it writes on its first window rather than waiting for a
+change that may never come. A window's delay is the point here -- the figure is
+already held and reported, and only flash is behind. The unreadable case above is
+the one that cannot wait, because there the client does not know what flash
+holds.
 
 The figure is kept in `persist.overdub.sendspin_delay`, beside the switch flag and
 for the same reason, and `uninstall.sh` clears both. The name is
@@ -1507,6 +1534,214 @@ is never answered is a delay set again to what it already is: a server
 re-asserting its own figure gets silence rather than a reply, which is what keeps
 an `immediate_apply` control from being answered at every step of a drag.
 
+
+## The same delay, set from Home Assistant
+
+The delay is one figure with two writers. `number.<name>_sendspin_output_delay`
+sets it over the ESPHome API and `set_static_delay` sets it over this connection,
+and docs/api.md carries the entity.
+
+**Last writer wins, and neither end is deferred to.** The figure describes this
+Dot -- the latency past its audio port, and in a group the alignment somebody
+tunes by ear -- so the operator moving it locally is as authoritative as the
+server that sent the last value. What would be worse is either alternative: a
+local set a server silently overrides is a control that springs back, and a
+server's set refused because somebody once touched the local one is a player that
+drifts out of its group with nothing to say why. So a set from either end applies
+at once and is reported in `client/state` at once -- and the entity reports what
+is applied rather than what it last asked for, so a server moving the delay shows
+up in Home Assistant within a tick of the live poll rather than leaving the two
+disagreeing.
+
+Keeping it is the one thing that is not immediate, and with a client up both
+writers share the keeper's window: a figure typed in Home Assistant reaches flash
+on the same terms as one a server sends. Two writers is exactly why the property
+has one -- the alternative is two policies racing for one name, and the figure
+that lands is whichever fork returned last.
+
+Reporting it back matters as much here as it does for a server's own command, and
+for the same measured reason: the server schedules `min_buffer_ms +
+output_delay_ms` ahead and counts a chunk outstanding against *the delay the
+client last reported*. A figure set locally and not reported would leave Music
+Assistant sending for the old one, which is the 0.50 s of audio against 29.53 s
+of silence in the table above.
+
+**One value, read where it is used rather than copied.** The figure lives in an
+atomic on the `Client`, and the connection no longer holds a copy of it: the
+playback path asks for the current figure as it places each chunk. That is what
+makes a local set apply mid-track instead of at the next reconnect, and it is the
+same subtraction either way -- so what the thirty-second summary says is "this
+player's output delay" rather than the one a server set, because by then it may
+not be.
+
+The figure kept from the last run is read into that atomic the first time
+anything needs it, rather than being treated as a fallback for a zero. A zero
+that means "unset" cannot be told from a zero somebody chose, and it made the
+control un-turn-off-able: a Dot that kept 700 ms and was set to 0 before any
+server connected went back to 700.
+
+**The same figure set again writes nothing and says nothing**, whichever end
+sends it. That was already the rule for a server re-asserting its own value; it
+now also means a server that sets what Home Assistant already set gets silence
+rather than a reply. It has the figure either way -- the `client/state` sent when
+it activates the player role carries whatever is currently applied.
+
+**A set from here writes one line, and it is not a server's to spend.** A server
+gets one line per connection saying it is setting the delay, whatever it sends
+after. The API side notes each figure it commits instead, through the same
+rate-limited log, because what arrives there is one command per operator action
+rather than one per step of a drag. A refused write is the keeper's problem: the
+figure stays applied and reported, and the retry and the giving-up are the ones
+above. That does spend a server's budget -- three lines for a figure only an
+operator asked for -- but it is bounded and it is the same log the other writer
+uses, which is the reason not to open a second.
+
+**Reporting runs off the caller's goroutine, and the wake belongs to the session
+that holds.** The report is a socket write whose deadline is 150 seconds once the
+connection is up, and it can queue behind another writer; the caller is the
+switch's one worker, so a server that stopped reading would otherwise take the
+switch with it -- no toggle, no further sets, no owed write. A per-session
+reporter takes a wake instead and reads the figure fresh, so the report carries
+the latest value and rapid sets coalesce into one.
+
+Per session rather than per client, because a server can drop the player role and
+take it back on one connection. A wake posted while nothing holds has nowhere to
+go, so a figure moved in that window is reported when the role returns -- and
+only then, since a repeated activation that never lost the role costs neither a
+state nor a keepalive.
+
+A write this player cannot make ends the connection, and that is not a choice
+about tidiness. `seal` advances the Noise nonce before the bytes reach the
+socket, so a write that fails leaves the sender at *n+1* and the peer expecting
+*n*: every later frame on that session fails authentication at the far end, with
+`chacha20poly1305: message authentication failed` the same as a wrong key. A
+partial write is worse again, since the peer is then mid-frame -- the write-side
+form of the boundary problem docs/api.md describes for reads. So there is no
+losing one message and carrying on: either the write landed, or the session is
+finished and only a reconnect gets it back.
+
+The claim is about what is **reachable** rather than about TCP. Two errors sit
+above `seal` -- a payload that will not marshal, and `WriteTyped` refusing the
+fragment type -- and neither advances the nonce or says anything about the
+socket. Neither is reachable from these writers: the payloads are plain integers
+and strings, and nothing here sends a fragment. Everything below that line is
+either the cipher or the socket, and both finish the session. The read side is
+the opposite case and always has been, where an over-long message, a bad opcode
+or a failed decrypt is a peer breaking the protocol on a socket that is perfectly
+healthy.
+
+Three writers run off the read loop and each closes the connection now rather
+than only ending itself: the delay report, the time sync, and the keepalive. The
+time sync is the one that hid best. `send` and `recv` are separate cipher states,
+so a session that can no longer send goes on receiving and playing audio
+correctly while its clock stops being corrected -- the figure drifts, the audio
+is placed against it, and the read deadline never expires because the server's
+own frames keep refreshing it. The keepalive is the plainest: it takes no payload
+and skips `seal`, so its only errors are the socket, and it is also the mechanism
+that would otherwise have noticed the peer was gone.
+
+**The state a local set writes has to carry the availability the connection
+already reported.** `available` is the connection's own progress -- false until
+the clock has converged -- and it rides on every `client/state`, so a state
+written elsewhere that guessed at it would tell the server this player had gone
+away and take the Dot out of its group for a figure somebody typed. The session
+records what it last reported, and a local set repeats it rather than deciding
+it.
+
+**With Sendspin switched off there is no client, and the control still works.**
+The switch holds the figure and writes it itself, since there is no keeper to
+hand it to, and the next client that comes up is built from it -- which is also how a
+figure survives the switch being toggled, since each switch-on builds a fresh
+`Client`. The switch holds the figure to the same 0 to 5,000 before keeping it,
+because what reads that property back is a client that would clamp it anyway.
+
+**It writes under the same window, and that was missed the first time.** Writing
+each figure as it arrived left the switched-off path with no limit at all. The
+keeper exists because a figure can be set faster than flash should take it, and
+a box committing one figure per operator action is a statement about a control
+rather than a bound on what may arrive: an automation recomputing the delay puts
+every value on flash at a `setprop` apiece, where the identical traffic with
+Sendspin on costs one write a minute. So the switch takes `KeepApart` and
+`KeepTries` from the keeper rather than copying the minute, and the property has
+one policy whichever writer reaches it.
+
+What the switch holds and what the property holds are then two figures. The
+control shows what is held and shows it at once -- the wake goes out when the
+figure is taken rather than when it is written, or a figure inside the window
+would leave the control a minute behind. What is owed is written on three stops:
+the window closing, the switch being turned on, and the daemon stopping. The
+switch-on is the one easy to miss, because `enable` builds its client by reading
+the property, so an owed write has to go in front of it or the client starts at
+the figure before last.
+
+Deciding a write is owed, making it, and recording it are one operation, under a
+mutex of their own. Two callers that each decide before either records both spend
+a flash write and both count an attempt against a bound neither can see -- and
+they do arrive together, the window closing on the worker and a signal reaching
+`flush` from its own goroutine. The mutex is not the field lock because a
+`setprop` is 40 ms and the entity's poll reads the figure through that lock.
+
+What a write records is what the **property** holds. It records what the switch
+holds only when a client made it, since a client's figure is where the switch
+learns what to report once that client is gone. Recording it unconditionally let
+a write in flight put its own figure back over one set while it ran -- on the
+control, in flash, and into the next client, with nothing owed and nothing
+logged. The same line made an abandoned write after a switch-off revert the
+control rather than only the property.
+
+Switching off then has to take the figure its client was holding, because that
+client's own keeper writes it on the way out and the switch would otherwise go on
+reporting an older one. Nothing would correct it either: with the property
+already holding the client's figure, nothing is owed, and an operator who typed
+the older figure back would be refused as a repeat.
+
+A switch-on's read can fail, and a read that failed is not a figure. `keptDelay`
+answers `(0, false)` when `getprop` could not be run at all, which is not the
+answer for a property that is absent: absent is a known zero. Taking the zero
+would hand the new client 0 and a disk it believes unreadable, and that client's
+immediate correcting write would destroy whatever flash held. So a failed read
+falls back to the figure the switch already holds, and only the *disk* is marked
+unknown.
+
+That covers a later switch-on and not the first one. At boot there is nothing to
+fall back to -- the failed read is the only read there has been -- so a Dot whose
+`getprop` fails at startup does write 0 over whatever flash held. The fallback is
+worth having for the case where something better exists, and the boot case is the
+one where nothing does.
+
+An unreadable disk is a reason to write once, not an exemption from the bound.
+The write is attempted on the same terms as any other -- `KeepTries` and then
+given up on -- because a `setprop` that will not take would otherwise cost a
+write and a log line every window for the rest of the boot, which is the
+unbounded write this whole section exists to prevent.
+
+Measured on a Dot with a track playing. Every claim above held.
+
+A figure set in Home Assistant applied mid-track, inside the five seconds to the
+next summary, and the summary named it. Music Assistant's send-ahead floor
+followed the figure this player reported -- a stream's first chunk arrived `due
+in 1.475334s` against a 985 ms delay, which is 500 ms of `min_buffer_ms` plus the
+figure -- and its own control read what Home Assistant had set. What it does not
+do is push that to a browser, so its page shows the old figure until reloaded,
+which looks exactly like a report that never arrived and is not one.
+
+The keeper held: the control's arrows send one command per click about 200 ms
+apart, so eleven commands arrived in two bursts inside a minute and flash took
+one figure. A restart read it back and logged it before any server connected, and
+Music Assistant reconnected without overriding it.
+
+Two more from the same run. A change applied mid-track costs a gap its own size
+-- a 489 ms jump placed 490 ms of silence, the discontinuity measured above
+arrived at from the local end. And a delay Music Assistant is told to use can
+land a minute later, at the next stream boundary, so a figure set at both ends
+inside that minute settles on Music Assistant's: last-writer-wins with a late
+writer rather than a server overriding anything.
+
+Measured again with the switch off, which is the path with its own window: 21
+commands over 29 seconds took **two** flash writes -- the first immediately, the
+rest coalesced into one 61 seconds later carrying the value the operator ended
+on. The log shows the commands stopping at 118 while flash holds 120, which is
+the peer log's twenty a minute rather than a dropped figure.
 
 ## What finishing the player means
 

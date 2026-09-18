@@ -7,12 +7,14 @@ import (
 )
 
 const (
-	flagPrefix = "persist.overdub."
-	keyMax     = 31
+	// Prefix is every property name this daemon keeps.
+	Prefix = "persist.overdub."
+
+	keyMax = 31
 )
 
 func key(name string) (string, error) {
-	full := flagPrefix + name
+	full := Prefix + name
 	if len(full) > keyMax {
 		return "", fmt.Errorf("%s is %d characters, and this device refuses a property"+
 			" name past %d", full, len(full), keyMax)

@@ -70,6 +70,9 @@ const (
 	msgSubscribeHAStates = 38
 	msgListService       = 41
 	msgExecuteService    = 42
+	msgListNumber        = 49
+	msgNumberState       = 50
+	msgNumberCommand     = 51
 	msgListSelect        = 52
 	msgSelectState       = 53
 	msgSelectCommand     = 54
@@ -138,6 +141,7 @@ type Server struct {
 	keySpeaker  uint32
 	keyMicMute  uint32
 	keySendspin uint32
+	keyDelay    uint32
 	keyADB      uint32
 	keyAlexa    uint32
 	keyText     uint32
@@ -189,6 +193,11 @@ type Server struct {
 
 	sendspinOn  func() bool
 	sendspinSet func(bool)
+	delayMS     func() int
+	delaySet    func(int)
+	delayMaxMS  int
+	delayAsked  int
+	delayWasSet bool
 	cpu         func() (float32, bool)
 	alexa       func() (bool, bool)
 	memory      func() (float32, bool)
@@ -243,6 +252,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keySpeaker:   entityKey("speaker"),
 		keyMicMute:   entityKey("microphone_muted"),
 		keySendspin:  entityKey("sendspin"),
+		keyDelay:     entityKey("sendspin_output_delay"),
 		keyADB:       entityKey("network_adb"),
 		keyAlexa:     entityKey("alexa_registered"),
 		keyText:      entityKey("alexa_command"),
@@ -324,6 +334,10 @@ func (s *Server) UseButton(objectID string, mode func() string, setMode func(str
 
 func (s *Server) UseSendspin(on func() bool, set func(bool)) {
 	s.sendspinOn, s.sendspinSet = on, set
+}
+
+func (s *Server) UseSendspinDelay(maxMS int, ms func() int, set func(int)) {
+	s.delayMaxMS, s.delayMS, s.delaySet = maxMS, ms, set
 }
 
 func (s *Server) NoteSendspin() {
@@ -623,6 +637,31 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}
 		return nil
 
+	case msgNumberCommand:
+		var key uint32
+		var want float32
+		var sawState, isFloat bool
+		if err := walk("NumberCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				sawState = true
+				if f.wire == wireFixed32 {
+					want, isFloat = math.Float32frombits(uint32(f.num)), true
+				}
+			}
+		}); err != nil {
+			return err
+		}
+		if !sawState {
+			want, isFloat = 0, true
+		}
+		if key == s.keyDelay && s.delaySet != nil && isFloat && isFinite(want) {
+			s.setDelayLocked(conn, want)
+		}
+		return nil
+
 	case msgSwitchCommand:
 		var key uint32
 		var on bool
@@ -649,7 +688,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 	case msgMediaPlayerCmd:
 		var key uint32
 		var command uint64
-		var hasCommand, hasVolume, volumeIsFloat, hasURL, announcement bool
+		var hasCommand, hasVolume, sawVolume, volumeIsFloat, hasURL, announcement bool
 		var volume float32
 		var url string
 		if err := walk("MediaPlayerCommandRequest", payload, func(f pbField) {
@@ -663,6 +702,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			case 4:
 				hasVolume = f.num != 0
 			case 5:
+				sawVolume = true
 				if f.wire == wireFixed32 {
 					volume, volumeIsFloat = math.Float32frombits(uint32(f.num)), true
 				}
@@ -678,6 +718,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		}
 		if key != s.keySpeaker {
 			return nil
+		}
+		if hasVolume && !sawVolume {
+			volume, volumeIsFloat = 0, true
 		}
 		switch {
 		case hasURL && url != "":
@@ -701,6 +744,18 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Server) setDelayLocked(conn *conn, want float32) {
+	ms := int(math.Round(float64(want)))
+	ms = max(0, min(ms, s.delayMaxMS))
+	if s.delayMS != nil && s.delayMS() == ms && (!s.delayWasSet || s.delayAsked == ms) {
+		return
+	}
+	s.delayAsked, s.delayWasSet = ms, true
+	s.delaySet(ms)
+	conn.noted = fmt.Sprintf("esphome api: %s set the sendspin output delay to %d ms",
+		conn.sock.RemoteAddr(), ms)
 }
 
 func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {

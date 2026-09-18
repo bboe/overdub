@@ -114,10 +114,11 @@ for port in "$APIPORT" "$SENDPORT"; do
 done
 
 adb shell "su -c '
-  setprop persist.overdub.sendspin \"\"
-  rm -f /data/property/persist.overdub.sendspin
-  setprop persist.overdub.sendspin_delay \"\"
-  rm -f /data/property/persist.overdub.sendspin_delay
+  for f in /data/property/persist.overdub.*; do
+    [ -e \"\$f\" ] || continue
+    setprop \"\${f##*/}\" \"\"
+    rm -f \"\$f\"
+  done
 '" >/dev/null 2>&1 || true
 
 flag_answer=$(adb shell "su -c 'getprop persist.overdub.sendspin; echo checked'" | tr -d '\r')

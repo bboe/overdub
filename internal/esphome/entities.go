@@ -22,11 +22,21 @@ const (
 
 	sendspinIcon = "mdi:speaker-multiple"
 
+	delayIcon = "mdi:timer-outline"
+
 	adbIcon = "mdi:console-network"
 
 	commandIcon = "mdi:microphone-message"
 
 	alexaIcon = "mdi:account-check"
+)
+
+const (
+	numberModeBox = 1
+
+	delayStepMS = 1
+
+	delayUnit = "ms"
 )
 
 // ListEntitiesServicesArgument.ServiceArgType
@@ -181,6 +191,24 @@ func (s *Server) listEntities(conn *conn) error {
 		sw.boolean(7, false)
 		sw.u32(8, entityCategoryConfig)
 		if err := s.send(conn, msgListSwitch, sw.b); err != nil {
+			return err
+		}
+	}
+
+	if s.delayMS != nil {
+		var delay pb
+		delay.str(1, "sendspin_output_delay")
+		delay.fixed32(2, s.keyDelay)
+		delay.str(3, "Sendspin output delay")
+		delay.str(5, delayIcon)
+		delay.float(6, 0)                     // min_value
+		delay.float(7, float32(s.delayMaxMS)) // max_value
+		delay.float(8, delayStepMS)           // step
+		delay.boolean(9, false)               // disabled_by_default
+		delay.u32(10, entityCategoryConfig)
+		delay.str(11, delayUnit) // unit_of_measurement
+		delay.u32(12, numberModeBox)
+		if err := s.send(conn, msgListNumber, delay.b); err != nil {
 			return err
 		}
 	}

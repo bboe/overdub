@@ -46,7 +46,7 @@ func main() {
 	log.Print(versionLine())
 
 	if err := serve(flags); err != nil {
-		withdraw()
+		stopping()
 		log.Printf("overdub: %v", err)
 		os.Exit(1)
 	}

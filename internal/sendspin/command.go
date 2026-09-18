@@ -9,10 +9,16 @@ import (
 
 const (
 	commandStaticDelay = "set_static_delay"
-	maxStaticDelayMS   = 5000
-	keepApart          = time.Minute
-	keepTries          = 3
+
+	// KeepApart and KeepTries are this package's flash-write policy, and the
+	// Sendspin switch writes the same property under it when no client holds one.
+	KeepApart = time.Minute
+	KeepTries = 3
+
+	MaxStaticDelayMS = 5000
 )
+
+func HoldDelayMS(ms int) int { return max(0, min(ms, MaxStaticDelayMS)) }
 
 type serverCommand struct {
 	Player *playerCommand `json:"player,omitempty"`
@@ -41,6 +47,5 @@ func (s *Session) StaticDelay(payload json.RawMessage) (delay time.Duration, ask
 			" static_delay_ms")
 	}
 	asked = *cmd.Player.StaticDelayMS
-	ms := max(0, min(asked, maxStaticDelayMS))
-	return time.Duration(ms) * time.Millisecond, asked, true, nil
+	return time.Duration(HoldDelayMS(asked)) * time.Millisecond, asked, true, nil
 }
