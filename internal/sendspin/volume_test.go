@@ -13,13 +13,20 @@ type fakeVolume struct {
 	mu   sync.Mutex
 	at   int
 	ok   bool
+	off  bool
 	sets []int
 }
 
-func (v *fakeVolume) read() (int, bool) {
+func (v *fakeVolume) level() (int, bool, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.at, v.ok
+	return v.at, v.off, v.ok
+}
+
+func (v *fakeVolume) mute(on bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.off = on
 }
 
 func (v *fakeVolume) set(percent int) {
@@ -45,7 +52,7 @@ func volumeClient(t *testing.T) (*Client, *fakeVolume) {
 	t.Helper()
 	c, _ := playingClient(t)
 	v := &fakeVolume{at: 40, ok: true}
-	c.Config.Volume, c.Config.SetVolume = v.read, v.set
+	c.Config.Level, c.Config.SetVolume = v.level, v.set
 	return c, v
 }
 
@@ -60,7 +67,7 @@ func TestHelloOffersVolumeOnlyWhenThereIsAVolumeToSet(t *testing.T) {
 	}
 	cfg := testConfig()
 	v := &fakeVolume{at: 40, ok: true}
-	cfg.Volume, cfg.SetVolume = v.read, v.set
+	cfg.Level, cfg.SetVolume = v.level, v.set
 	h := cfg.hello()
 	if got := h.PlayerSupport.SupportedCommands; len(got) != 1 || got[0] != commandVolume {
 		t.Errorf("client/hello offers %v, want just %q: aiosendspin 9.1.1 reads volume"+
@@ -184,4 +191,75 @@ func TestTheVolumePollLeavesRoomForTheReadItMakes(t *testing.T) {
 		t.Errorf("the volume is polled every %v and one read may take %v, so a slow read"+
 			" overlaps the next", volumeEvery, device.VolumeReadBudget())
 	}
+}
+
+func muteCommand(on *bool) serverCommand {
+	return serverCommand{Player: &playerCommand{Command: commandMute, Mute: on}}
+}
+
+func mutingClient(t *testing.T) (*Client, *fakeVolume) {
+	t.Helper()
+	c, v := volumeClient(t)
+	c.Config.SetMute = v.mute
+	return c, v
+}
+
+func TestHelloOffersMuteOnlyWhenThereIsAMuteToSet(t *testing.T) {
+	cfg := testConfig()
+	v := &fakeVolume{at: 40, ok: true}
+	cfg.Level, cfg.SetVolume = v.level, v.set
+	if got := cfg.playerCommands(); len(got) != 1 || got[0] != commandVolume {
+		t.Errorf("a dot that cannot mute offers %v, want just %q", got, commandVolume)
+	}
+	cfg.SetMute = func(bool) {}
+	if got := cfg.playerCommands(); len(got) != 2 || got[1] != commandMute {
+		t.Errorf("client/hello offers %v, want volume and mute: aiosendspin 9.1.1 reads"+
+			" both out of the hello support object", got)
+	}
+}
+
+func TestTheStateCarriesTheMuteBesideTheLevel(t *testing.T) {
+	ln := listenLocal(t)
+	c, v := mutingClient(t)
+	v.off = true
+	serveOn(t, c, ln)
+	_, _, state := bringUp(t, c, ln)
+
+	if state.Player == nil || state.Player.Muted == nil {
+		t.Fatal("client/state carries no mute while this player offers the command")
+	}
+	if !*state.Player.Muted {
+		t.Error("a muted player reported itself unmuted")
+	}
+}
+
+func TestAMuteAServerSetsReachesTheDevice(t *testing.T) {
+	ln := listenLocal(t)
+	c, v := mutingClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	on := true
+	peer.writeBinary(server.sealJSON(t, typeServerComm, muteCommand(&on)))
+	waitFor(t, "the mute to reach the device", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.off
+	})
+}
+
+func TestAMuteCommandIsRefusedByAPlayerThatNeverOfferedOne(t *testing.T) {
+	ln := listenLocal(t)
+	c, _ := volumeClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	on := true
+	peer.writeBinary(server.sealJSON(t, typeServerComm, muteCommand(&on)))
+
+	ms := 1500
+	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&ms)))
+	waitFor(t, "the delay that followed to be taken", func() bool {
+		return c.heldDelay() == 1500*time.Millisecond
+	})
 }

@@ -133,8 +133,16 @@ func Grab(f *os.File, on bool) error {
 	if on {
 		v = 1
 	}
-	if err := ioctl(f.Fd(), eviocgrab, v); err != nil {
+	conn, err := f.SyscallConn()
+	if err != nil {
 		return fmt.Errorf("eviocgrab(%v): %w", on, err)
+	}
+	inner := error(nil)
+	if err := conn.Control(func(fd uintptr) { inner = ioctl(fd, eviocgrab, v) }); err != nil {
+		return fmt.Errorf("eviocgrab(%v): %w", on, err)
+	}
+	if inner != nil {
+		return fmt.Errorf("eviocgrab(%v): %w", on, inner)
 	}
 	return nil
 }

@@ -41,8 +41,9 @@ internal/alexa     her synthesizer: the intent that hands it a clip, and the
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them; and the stream, which places a
                    server's audio on the frame the player says it belongs on
-internal/button    the exclusive grab, the clone, the read loop, and whether
-                   the action key is ours or Alexa's
+internal/button    the exclusive grab, the clone, the read loop, whether the
+                   action key is ours or Alexa's, and the volume keys held
+                   while the dot is muted
 internal/device    the Dot itself: its network, the firewall rule, network
                    adb, the microphone mute, the music volume, and a setting
                    that survives a reboot

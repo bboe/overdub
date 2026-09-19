@@ -79,6 +79,7 @@ func Advert(name string) mdns.Advert {
 
 type playerState struct {
 	Volume             *int     `json:"volume,omitempty"`
+	Muted              *bool    `json:"muted,omitempty"`
 	StaticDelayMS      int      `json:"static_delay_ms"`
 	RequiredLeadTimeMS int      `json:"required_lead_time_ms"`
 	MinBufferMS        int      `json:"min_buffer_ms"`
@@ -111,6 +112,7 @@ type Client struct {
 
 	delay      atomic.Int64
 	toldVolume atomic.Int64
+	toldMute   atomic.Int64
 	onDisk     atomic.Int64
 	firstDelay sync.Once
 	keeping    atomic.Int64
@@ -577,6 +579,20 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				once("sendspin: %q is setting this player's volume", name)
 				continue
 			}
+			on, mineMute, err := session.Mute(payload)
+			if err != nil {
+				once("sendspin: %q sent a command this player will not take: %v", name, err)
+				continue
+			}
+			if mineMute {
+				if !c.Config.setsMute() {
+					once("sendspin: %q sent a mute, and this player never offered one", name)
+					continue
+				}
+				c.Config.SetMute(on)
+				once("sendspin: %q is setting this player's mute", name)
+				continue
+			}
 			want, asked, ours, err := session.StaticDelay(payload)
 			if err != nil {
 				once("sendspin: %q sent a command this player will not take: %v", name, err)
@@ -767,9 +783,15 @@ func (c *Client) state(session *Session, available bool, delay time.Duration) er
 		MinBufferMS:        c.MinBufferMS,
 		SupportedCommands:  []string{commandStaticDelay},
 	}
-	if percent, ok := c.volume(); ok {
-		player.Volume = &percent
-		c.toldVolume.Store(int64(percent) + 1)
+	if percent, on, ok := c.level(); ok {
+		if c.Config.setsVolume() {
+			player.Volume = &percent
+			c.toldVolume.Store(int64(percent) + 1)
+		}
+		if c.Config.setsMute() {
+			player.Muted = &on
+			c.toldMute.Store(mutedAs(on))
+		}
 	}
 	return session.WriteJSON(typeClientState, clientState{
 		Available: available,
@@ -777,19 +799,26 @@ func (c *Client) state(session *Session, available bool, delay time.Duration) er
 	})
 }
 
-func (c *Client) volume() (int, bool) {
-	if !c.Config.setsVolume() {
-		return 0, false
+func (c *Client) level() (percent int, muted, ok bool) {
+	if c.Config.Level == nil {
+		return 0, false, false
 	}
-	percent, ok := c.Config.Volume()
+	percent, muted, ok = c.Config.Level()
 	if !ok {
-		return 0, false
+		return 0, false, false
 	}
-	return HoldVolume(percent), true
+	return HoldVolume(percent), muted, true
+}
+
+func mutedAs(on bool) int64 {
+	if on {
+		return 2
+	}
+	return 1
 }
 
 func (c *Client) watchVolume(stop <-chan struct{}) {
-	if !c.Config.setsVolume() {
+	if !c.Config.setsVolume() && !c.Config.setsMute() {
 		return
 	}
 	tick := time.NewTicker(waitOr(c.volumeEvery, volumeEvery))
@@ -800,10 +829,16 @@ func (c *Client) watchVolume(stop <-chan struct{}) {
 			return
 		case <-tick.C:
 		}
-		percent, ok := c.volume()
-		if !ok || c.toldVolume.Load() == int64(percent)+1 {
+		percent, on, ok := c.level()
+		if !ok {
 			continue
 		}
-		c.tellServer()
+		if c.Config.setsMute() && c.toldMute.Load() != mutedAs(on) {
+			c.tellServer()
+			continue
+		}
+		if c.Config.setsVolume() && c.toldVolume.Load() != int64(percent)+1 {
+			c.tellServer()
+		}
 	}
 }

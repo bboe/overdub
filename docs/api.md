@@ -675,11 +675,29 @@ then do nothing at all the second time, because the step is already where it was
 asked for. So the volume field carries `step / max`, and read and write count
 from the same number by construction.
 
+**The mute is a control now, not only a reading.** `VOLUME_MUTE` joins the
+feature flags when there is a mute to set; `MUTE` and `UNMUTE` are commands 3
+and 4. They share the volume's worker shape -- one pending state, the last one
+winning, `liveWake` at the end -- so a mute and an unmute arriving together
+leave the Dot unmuted.
+
+**Holding the mute means holding the volume keys.** `setStreamMute` is
+transaction 8 and takes, but a press while it is set does not lift it: measured,
+muted at step 5, one press left the mute set and the level at **1**, because the
+muted index reads 0 and the press moves up from there. So `/dev/input/event2` is
+grabbed for as long as the mute is -- it carries those two keycodes and nothing
+else -- and the first press lifts the mute and moves nothing. Measured: 29
+presses swallowed, level unmoved. A daemon that cannot take the grab mutes
+anyway and says so. What it costs is Alexa's advanced factory reset, mute and
+volume down together, which cannot complete while muted; docs/hardware.md has
+the gesture.
+
 The mute travels beside it as its own flag, read from `Mute count:` rather than
 recovered from a percentage that happens to be zero. Those two are not the same
 question: a level stepped all the way down is also zero percent, and reporting
-*that* as muted puts Home Assistant's mute indicator on a player with no
-`VOLUME_MUTE` among its features, so nothing can lift it. `MusicVolume` carries
+*that* as muted puts Home Assistant's mute indicator on a level the mute control
+cannot lift, since stepping to zero is not what `Mute count` reports.
+`MusicVolume` carries
 the flag for that reason. Nothing on this Dot has ever produced the mute it
 separates, which is the reason to pin both halves in tests rather than leave
 them agreeing by accident.

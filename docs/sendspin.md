@@ -1556,10 +1556,9 @@ two lists are different: `{volume, mute}` in `client/hello`'s player support,
 reference server, the handshake never completes. The interop test wires a volume
 so that placement is checked rather than read.
 
-**`mute` is offered by neither, because this Dot has no output mute to set.**
-docs/api.md has the measurements: `input keyevent 164` does nothing, "Alexa,
-mute" sets the level to 0, and `setStreamMute` over binder does produce a
-`Mute count` but destroys the level rather than holding it.
+**`mute` is offered beside it.** Setting it grabs the volume keys for as long as
+it is held, so a press lifts the mute rather than moving a level nobody can
+hear. docs/api.md carries why, and Home Assistant's mute is the same path.
 
 **The level is read and set through the ESPHome server**, which already owns the
 route choice, the call and the read back; `serve.go` wires the two together, so
