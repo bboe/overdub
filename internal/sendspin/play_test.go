@@ -291,7 +291,7 @@ func TestTheDeclaredLeadIsWhatTheBufferNeeds(t *testing.T) {
 	}
 }
 
-func TestEndingAStreamLetsThePlayerPlayOutWhatItHolds(t *testing.T) {
+func TestEndingAStreamLeavesTheSourceForTheNextOne(t *testing.T) {
 	ln := listenLocal(t)
 	c, player := playingClient(t)
 	serveOn(t, c, ln)
@@ -304,11 +304,10 @@ func TestEndingAStreamLetsThePlayerPlayOutWhatItHolds(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
 	waitFor(t, "the stream to be ended", func() bool { return stream.ended() == 1 })
 	if stream.shut() != 0 {
-		t.Error("stream/end closed the player's stream, which throws away the audio the" +
-			" server had already delivered and was still to play. Measured against" +
-			" Music Assistant: chunks were still arriving 1.9 s ahead of when they" +
-			" were due at the moment stream/end came, so 1.836 s of the track went" +
-			" unplayed -- the tail of every track that ends on its own")
+		t.Error("stream/end closed the player's stream rather than ending it. The" +
+			" audio it held is discarded either way, but closing gives the source up," +
+			" so a stream/start arriving before the writer retires it pays 134 to" +
+			" 164 ms of silence learning a mapping it already had")
 	}
 }
 
@@ -328,9 +327,9 @@ func TestAStreamStartingAgainCarriesOnWhereTheLastOneLeftOff(t *testing.T) {
 	playing(t, peer, server)
 	waitFor(t, "the stream to take audio again", func() bool { return stream.carriedOn() == 1 })
 	if player.count() != 1 {
-		t.Errorf("%d streams were opened over a track change; the one still playing out"+
-			" holds the mapping, and a new one spends 150 ms of silence learning it"+
-			" again", player.count())
+		t.Errorf("%d streams were opened over a track change; the one that has not been"+
+			" retired yet holds the mapping, and a new one spends 150 ms of silence"+
+			" learning it again", player.count())
 	}
 }
 

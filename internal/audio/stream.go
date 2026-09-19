@@ -31,13 +31,11 @@ const (
 
 	observeEvery = 10
 	blindAfter   = 100
-
-	drainWait = 5 * time.Second
 )
 
 var (
 	errStreamClosed = errors.New("audio: the stream is closed")
-	errStreamDone   = errors.New("audio: the stream has been ended and is playing out")
+	errStreamDone   = errors.New("audio: the stream has been ended")
 )
 
 func frameTime(n int64) time.Duration {
@@ -93,7 +91,7 @@ type Stream struct {
 	blocks int64
 	first  time.Time
 	done   bool
-	doneAt time.Time
+	ended  int64
 	spent  bool
 	closed bool
 
@@ -172,7 +170,8 @@ func (s *Stream) Finish() {
 	if s.closed || s.spent || s.done {
 		return
 	}
-	s.done, s.doneAt = true, time.Now()
+	s.done = true
+	s.ended += s.discard()
 }
 
 func (s *Stream) Resume() bool {
@@ -197,15 +196,17 @@ func (s *Stream) Spent() bool {
 	return s.spent || s.closed
 }
 
-func (s *Stream) drained() bool {
-	return s.done && (len(s.queue) == 0 || time.Since(s.doneAt) >= drainWait)
-}
-
 func (s *Stream) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.discard()
+}
+
+func (s *Stream) discard() int64 {
+	held := s.held
 	s.queue, s.held = nil, 0
 	s.began, s.smooth, s.easedAt = false, 0, 0
+	return held
 }
 
 func (s *Stream) Close() {
@@ -217,18 +218,19 @@ func (s *Stream) Close() {
 	s.closed = true
 	placed, silence, late := s.placed, s.silence, s.late
 	eased, slips := s.eased, s.slips
-	anchored, held := s.anchored, s.held
+	anchored, held, ended := s.anchored, s.held, s.ended
 	s.mu.Unlock()
 
 	if anchored {
 		s.report("audio: the stream placed %s of audio against %s of silence, dropped %s"+
-			" that arrived late, eased %s onto the server's clock, and was placed again"+
-			" %d times", frameTime(placed), frameTime(silence), frameTime(late),
+			" that arrived late and %s that was still buffered when the server ended it,"+
+			" eased %s onto the server's clock, and was placed again %d times",
+			frameTime(placed), frameTime(silence), frameTime(late), frameTime(ended),
 			frameTime(eased), slips)
 	} else {
 		s.report("audio: the stream never learned where the player had reached, so it"+
 			" played %s of silence and threw away the %s it was holding",
-			frameTime(silence), frameTime(held))
+			frameTime(silence), frameTime(held+ended))
 	}
 	if s.closer != nil {
 		s.closer()
@@ -241,7 +243,7 @@ func (s *Stream) read(block []int16) (int, bool) {
 	if s.closed || s.spent {
 		return 0, false
 	}
-	if s.drained() {
+	if s.done {
 		s.spent = true
 		return 0, false
 	}

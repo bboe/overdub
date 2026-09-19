@@ -560,15 +560,14 @@ which is 58 to 64 ms of HAL buffer.
 `Stream` is what a network stream plays through: a mixer source like the chime,
 but one whose samples carry the moment they are due rather than starting when
 they arrive. `Chime.OpenStream` attaches one, `Write(at, pcm)` schedules audio at
-a client-clock instant, `Clear` throws away what is buffered, `Finish` plays out
-what is already due and then retires the source, and `Close` stops it where it
-stands so the writer can go idle and the amp can reach standby. One at a time, for
-the same reason there is one player: the second would be scheduled against the
-first's timeline.
+a client-clock instant, `Clear` throws away what is buffered, `Finish` throws it
+away and retires the source, and `Close` stops it where it stands so the writer
+can go idle and the amp can reach standby. One at a time, for the same reason
+there is one player: the second would be scheduled against the first's timeline.
 
 The player's slot for it is an `atomic.Pointer` rather than a field under the
 player's lock, and that is a race rather than a preference. A stream that has
-played itself out is retired by the writer, which runs the check at the top of
+been ended is retired by the writer, which runs the check at the top of
 its loop -- and the writer then **blocks**, because a mixer with no source has no
 block to ask for. So the slot stayed full for as long as nothing else made a
 sound, and the next `stream/start` was refused with a stream already open: one

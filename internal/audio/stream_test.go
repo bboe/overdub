@@ -342,6 +342,10 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 	block := make([]int16, BlockFrames)
 	s.read(block)
 	s.read(block)
+	if err := s.Write(now.Add(time.Second), level(720, 3000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	s.Finish()
 	s.Close()
 
 	if len(lines) != 1 {
@@ -349,14 +353,33 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 			" inserted and the audio it dropped are readable is this line", len(lines))
 	}
 	want := []any{frameTime(BlockFrames), frameTime(BlockFrames), frameTime(240),
-		frameTime(0), 0}
+		frameTime(720), frameTime(0), 0}
 	for i, got := range lines[0] {
 		if got != want[i] {
 			t.Errorf("the line reports %v at position %d, want %v: one block of audio"+
-				" played, one of silence after it, a chunk a second late dropped, and"+
-				" nothing eased",
+				" played, one of silence after it, a chunk a second late dropped, a"+
+				" chunk still buffered when the stream ended, and nothing eased",
 				got, i, want[i])
 		}
+	}
+}
+
+func TestAStreamThatNeverAnchoredStillSaysWhatItThrewAway(t *testing.T) {
+	var lines [][]any
+	s := &Stream{say: func(_ string, args ...any) { lines = append(lines, args) }}
+	if err := s.Write(time.Now().Add(time.Second), level(4800, 3000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	s.Finish()
+	s.Close()
+
+	if len(lines) != 1 {
+		t.Fatalf("a stream that never anchored said %d things", len(lines))
+	}
+	if got := lines[0][1]; got != frameTime(4800) {
+		t.Errorf("the line reports %v thrown away, want %v; ending the stream empties"+
+			" the queue, so a report reading the queue afterwards says a whole stream"+
+			" was worth nothing", got, frameTime(4800))
 	}
 }
 
@@ -515,7 +538,7 @@ func TestTheSwingThisInstrumentMakesOnItsOwnIsInsideTheThreshold(t *testing.T) {
 	}
 }
 
-func TestAFinishedStreamPlaysOutWhatItHoldsBeforeItGoes(t *testing.T) {
+func TestAFinishedStreamDropsWhatItStillHolds(t *testing.T) {
 	s := quiet()
 	now := time.Now()
 	anchorAt(s, now)
@@ -525,23 +548,16 @@ func TestAFinishedStreamPlaysOutWhatItHoldsBeforeItGoes(t *testing.T) {
 	s.Finish()
 
 	block := make([]int16, BlockFrames)
-	for b := range 3 {
-		n, more := s.read(block)
-		if n != BlockFrames || !more {
-			t.Fatalf("block %d of the audio already delivered was refused (%d, %v); the"+
-				" tail of every track that ends on its own goes with it", b, n, more)
-		}
-		if block[0] != 5000 {
-			t.Fatalf("block %d came out silent after the stream was ended", b)
-		}
-	}
-	if _, more := s.read(block); more {
-		t.Error("a stream with nothing left to play still asks for blocks, so the writer" +
-			" feeds silence and the amp never reaches standby")
+	if n, more := s.read(block); n != 0 || more {
+		t.Fatalf("a finished stream delivered %d frames and asked for more (%v); a pause"+
+			" then takes as long as the buffer to go quiet", n, more)
 	}
 	if !s.Spent() {
-		t.Error("a stream that played itself out does not report itself spent, so the" +
+		t.Error("a stream that was ended does not report itself spent, so the" +
 			" next track is written into a source the mixer has already dropped")
+	}
+	if s.held != 0 {
+		t.Errorf("%d frames survived the end of the stream", s.held)
 	}
 }
 
@@ -578,23 +594,6 @@ func TestAStreamThatCarriesOnKeepsItsMappingAndTakesAudioAgain(t *testing.T) {
 	if s.placed != BlockFrames {
 		t.Errorf("%d frames were placed after the stream carried on, want %d",
 			s.placed, BlockFrames)
-	}
-}
-
-func TestAStreamHoldingAudioThatNeverComesDueGivesUp(t *testing.T) {
-	s := quiet()
-	now := time.Now()
-	anchorAt(s, now)
-	if err := s.Write(now.Add(streamAhead-time.Second), level(BlockFrames, 100)); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	s.Finish()
-	s.doneAt = time.Now().Add(-drainWait)
-
-	if _, more := s.read(make([]int16, BlockFrames)); more {
-		t.Errorf("a finished stream holding audio due in %s still asks for blocks; it"+
-			" would feed silence and hold the amp awake for that long",
-			streamAhead-time.Second)
 	}
 }
 

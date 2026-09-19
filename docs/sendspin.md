@@ -439,30 +439,33 @@ derived downward later cannot silently take the start of every track with it.
 was buffered and leaves it open. Each one now reaches the player as well as the
 session: a playable `stream/start` opens an `audio.Stream` on it or takes up the
 one already there, `stream/clear` empties its jitter buffer without closing it,
-and `stream/end` lets it **play out what it still holds** and then go.
+and `stream/end` **throws away what it still holds** and then goes.
 
-**`stream/end` is not a discard, and reading it as one clips the end of every
-track.** The first version of this closed the stream, and Music Assistant showed
-what that costs within a minute: 2,171 chunks arrived, 54.275 s of audio, and
-52.438 s of it was placed. The missing **1.836 s** was neither played nor dropped
--- it was buffered, still ahead of its own due time, and thrown away when the
-stream closed. The final summary of that stream reported chunks still arriving
-1.92 to 1.97 s ahead, so the server had not waited for the audio to finish before
-saying the stream had ended; it does not, and it is not supposed to.
+**`stream/end` is a discard.** The spec says clients "MUST stop output and clear
+its buffers unless that role explicitly defines different completion behavior",
+and the player role defines nothing for `stream/end`. Player Buffer Accounting
+agrees from the server's side: a player `stream/clear` or `stream/end` "resets
+it, removing previously sent chunks".
 
-`aiosendspin` settles it rather than the spec. Its server's `PushStream.stop`
-says to "call `clear()` first if buffered client audio should be discarded before
-the successor PushStream takes over" -- so discarding is the server's own extra
-step, through the message that means discard, and `stream/end` on its own is not
-it. The reference client agrees from the other side: `_handle_stream_end` clears
-`_stream_active`, the current player and the current format, and touches no audio
-at all.
+This tree drained for a while, on two readings of `aiosendspin` that do not
+hold. `PushStream.stop`'s "call `clear()` first" is scoped to its
+`keep_stream=True` branch, which *skips* sending `stream/end`. And the reference
+client's `_handle_stream_end` touches no audio because `connection.py` holds
+none. One spec line does read the other way -- `server/activate` clears buffers
+"even if an earlier `stream/end` allowed buffered data to finish playing" -- but
+no role defines that behavior, so the MUST stands.
 
-So a finished stream keeps its place in the mixer, refuses new audio, plays what
-is already due, and retires itself once it holds nothing -- bounded at
-`drainWait`, five seconds, because audio a server stamped far enough ahead would
-otherwise hold the source, the writer and the amp awake for as long as the
-timestamp says.
+Draining cost a pause the whole buffer, since Music Assistant sends a bare
+`stream/end` there and moves the group to `stopped` 89-850 us later, exactly as
+at a queue end. Measured on a Dot: a pause discarded **1.817 s** and went quiet
+in 30 ms, where draining took 1.853 s. A track transition and a track that ran
+out discarded **0 s** -- MA stops sending, lets the buffer empty, and only then
+ends the stream, so nothing is clipped off a natural end.
+
+A finished stream drops its queue, refuses new audio, and retires at the next
+block. The 134 to 164 ms already inside the player still plays, being past the
+jitter buffer. The close report counts what was discarded, so how early a server
+ends its streams is readable rather than inferred.
 
 Giving the player role up, a format this client cannot take, and the connection
 going away **do** stop it outright -- and the first of those is gated on the
@@ -481,13 +484,17 @@ player for the life of the daemon, which holds the amp awake and never reaches
 standby. The difference is the whole point: those three are the stream being taken
 away, and `stream/end` is the stream finishing.
 
-A **repeated** `stream/start`, or one arriving while the last is still playing
-out, takes up the stream that is there rather than opening another. The timestamps
-are absolute, so the next track's audio places itself in the same timeline the
-last one was using, and a fresh stream would spend another 134 to 164 ms learning
-a mapping that had not changed -- silence at the start of every track after the
-first. Measured on hardware, Music Assistant ends one stream and starts the next
-**60 ms** later, so that transition is the common case rather than a corner.
+A **repeated** `stream/start`, or one arriving before the writer has retired the
+last, takes up the stream that is there rather than opening another. The
+timestamps are absolute, so the audio places itself in the same timeline, where a
+fresh stream spends another 134 to 164 ms learning a mapping that had not changed.
+
+After a `stream/end` that window is one block wide, since the queue is empty and
+the writer retires an empty stream at its next pass. Music Assistant restarts 60
+to 90 ms later and re-anchors -- as it did before the queue was discarded, because
+it ends a transition holding nothing and an empty queue retired the stream then
+too. So carrying on is what a `stream/start` on a stream nobody ended gets, which
+is the case the spec asks servers to use for a track transition anyway.
 
 The format check is the substance of `stream/start`. Its player object names a
 codec, a sample rate, a channel count and a bit depth, and anything but the
