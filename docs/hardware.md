@@ -114,6 +114,11 @@ eighteenth transaction on `IAudioFlinger` and the reply is one int32.
 
 ```sh
 adb shell 'su -c "service call media.audio_flinger 18"'   # Parcel(00000000) live, 00000001 muted
+adb shell 'su -c "service call audio 13 i32 3"'           # music level on the live route
+adb shell 'su -c "service call audio 15 i32 3"'           # its maximum, 30 on biscuit
+adb shell 'su -c "service call audio 4 i32 3 i32 9 i32 0 s16 overdub"'   # set it to 9
+adb shell 'su -c "service call media.audio_flinger 11"'   # master mute, 00000001 is silence
+adb shell 'su -c "service call media.audio_flinger 9 i32 0"'   # lift it
 ```
 
 - About 12ms a call, measured at 500 calls in 6 seconds.
@@ -121,6 +126,26 @@ adb shell 'su -c "service call media.audio_flinger 18"'   # Parcel(00000000) liv
   and a second `1` while the key is held does nothing either.
 - `dumpsys audio`'s `Mute count` is not this: it is the per-stream *output*
   mute, 0 whatever the microphone is doing.
+
+**A silent Dot whose every reading looks right is the master mute.** No dumpsys
+on this build prints it -- not `audio`, not `media.audio_flinger` -- so audio
+reaches the HAL, DL1 prepares and starts, I2S enables, the external amp switches
+on and pops audibly, and nothing is heard. Counting back from `GET_MIC_MUTE` at
+18 gives `SET_MASTER_MUTE` 9, `MASTER_VOLUME` 10, `MASTER_MUTE` 11, and that is
+the first thing to read when the Dot goes quiet.
+
+**Do not go looking for a transaction by calling one.** `setStreamVolume` at 4
+was found by calling its neighbours blind, and that cost a music volume zeroed to
+0, four streams left muted by `setStreamSolo`, and the master mute above -- none
+of which announced itself. Probe the getters, which name themselves by answering
+a level or a maximum you already know, and derive the setters from the ordering.
+
+**A mute taken over `service call` is permanent.** AudioService releases a stream
+mute or solo when the client that took it dies, through a death recipient on the
+binder the caller passed. `service call` passes none, so there is nothing to fire
+when it exits: `setStreamSolo(3, true)` left `RING`, `ALARM`, `NOTIFICATION` and
+`TTS` muted across a daemon restart, and only `setStreamSolo(3, false)` cleared
+them.
 
 Injecting the key is a real mute, so it silences the microphone until it is
 pressed again:

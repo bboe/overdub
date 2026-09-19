@@ -29,7 +29,6 @@ const (
 	actionKey  = 138
 	muteKey    = 113
 	uinputName = "mtk-kpd"
-	volumeName = "overdub-volume"
 	wifiIface  = device.WifiInterface
 	apiPort    = 6053
 
@@ -109,20 +108,12 @@ func serve(flags config) error {
 		defer chime.Close()
 	}
 
-	volume, err := button.NewVolumeKeys(volumeName)
-	if err != nil {
-		log.Printf("warning: %v; the volume cannot be set from home assistant", err)
-		volume = nil
-	} else {
-		defer volume.Close()
-	}
-
 	var player sendspin.Player
 	if chime != nil {
 		player = chimePlayer{chime: chime}
 	}
 
-	go serveAPI(flags.Name, psk, i, volume, player)
+	go serveAPI(flags.Name, psk, i, player)
 
 	var held []string
 	for code, b := range buttons {
@@ -215,8 +206,7 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 	return "", false
 }
 
-func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.VolumeKeys,
-	player sendspin.Player) {
+func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Player) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		log.Printf("%s has no address yet; the button works, and the api starts if it appears", wifiIface)
@@ -247,18 +237,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, volume *button.Vol
 		return err
 	})
 
-	if volume != nil {
-		server.UseVolumeKeys(func(up bool, n int) error {
-			err := volume.Step(up, n)
-			if errors.Is(err, button.ErrKeyStuck) {
-				log.Printf("volume: %v; exiting so the device is rebuilt", err)
-				stopping()
-				i.Close()
-				os.Exit(1)
-			}
-			return err
-		})
-	}
+	server.UseVolumeSetter(device.SetMusicVolume)
 
 	switch jar, registered, known := commandState(); {
 	case commandReady(jar, registered, known):
@@ -893,18 +872,36 @@ func keptDelay() (ms int, known bool) {
 	return sendspin.HoldDelayMS(delay), true
 }
 
+func speakerVolume() (int, bool) {
+	server := api.Load()
+	if server == nil {
+		return 0, false
+	}
+	return server.SpeakerVolume()
+}
+
+func setSpeakerVolume(percent int) {
+	if server := api.Load(); server != nil {
+		server.SetSpeakerVolume(percent)
+	}
+}
+
 func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
 	peer *untrustedlog.Log, delay int, unknown bool,
 	save func(ms int) error) *sendspin.Client {
+	config := sendspin.Config{
+		Name:           name,
+		ProductName:    deviceModel,
+		Manufacturer:   "Amazon",
+		MACAddress:     strings.ToLower(mac),
+		UnpairedAccess: true,
+		BufferCapacity: sendspin.BufferCapacity,
+	}
+	if server := api.Load(); server != nil && server.CanSetVolume() {
+		config.Volume, config.SetVolume = speakerVolume, setSpeakerVolume
+	}
 	return &sendspin.Client{
-		Config: sendspin.Config{
-			Name:           name,
-			ProductName:    deviceModel,
-			Manufacturer:   "Amazon",
-			MACAddress:     strings.ToLower(mac),
-			UnpairedAccess: true,
-			BufferCapacity: sendspin.BufferCapacity,
-		},
+		Config:         config,
 		Keys:           keys,
 		PSKs:           sendspin.PSKSet{Pairing: keys.PairingPSK},
 		MinBufferMS:    sendspinBuffer,

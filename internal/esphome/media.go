@@ -5,7 +5,6 @@ import (
 	"log"
 	"math"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/bboe/overdub/internal/device"
@@ -27,8 +26,6 @@ const (
 	mediaVolumeUp   = 6
 	mediaVolumeDown = 7
 )
-
-const volumeSettleFor = 400 * time.Millisecond
 
 type volumeWant struct {
 	fraction float32
@@ -74,7 +71,7 @@ func activeVolume(v device.MusicVolume, occupied, jackKnown bool) (step int, per
 
 func (s *Server) mediaFeatures() uint32 {
 	var flags uint32
-	if s.volumeKeys != nil {
+	if s.CanSetVolume() {
 		flags |= featVolumeSet | featVolumeStep
 	}
 	if s.play != nil {
@@ -259,24 +256,47 @@ func (s *Server) commandWorker() {
 
 func isFinite(v float32) bool { return !math.IsInf(float64(v), 0) && !math.IsNaN(float64(v)) }
 
-func (s *Server) UseVolumeKeys(step func(up bool, n int) error) {
-	s.volumeKeys = step
+func (s *Server) UseVolumeSetter(set func(step int) error) {
+	s.volumeSet = set
 }
 
 func (s *Server) setVolumeLocked(conn *conn, want volumeWant) {
+	s.queueVolumeLocked(want)
+	conn.noted = fmt.Sprintf("esphome api: %s set the volume to %s",
+		conn.sock.RemoteAddr(), s.volWant)
+}
+
+func (s *Server) queueVolumeLocked(want volumeWant) {
 	if s.volHasPending && !want.absolute {
 		s.volWant.steps += want.steps
 	} else {
 		s.volWant = want
 	}
 	s.volHasPending = true
-	conn.noted = fmt.Sprintf("esphome api: %s set the volume to %s",
-		conn.sock.RemoteAddr(), s.volWant)
 	if s.volWorking {
 		return
 	}
 	s.volWorking = true
 	go s.volumeWorker()
+}
+
+func (s *Server) CanSetVolume() bool { return s.volumeSet != nil }
+
+func (s *Server) SpeakerVolume() (percent int, ok bool) {
+	step, max, ok := s.readVolumeStep()
+	if !ok {
+		return 0, false
+	}
+	return int(math.Round(float64(step) * 100 / float64(max))), true
+}
+
+func (s *Server) SetSpeakerVolume(percent int) {
+	if !s.CanSetVolume() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queueVolumeLocked(volumeWant{fraction: float32(percent) / 100, absolute: true})
 }
 
 func (s *Server) volumeWorker() {
@@ -311,29 +331,29 @@ func (s *Server) applyVolume(want volumeWant) {
 		return
 	}
 	target := clampStep(want.target(step, max), max)
-	delta := target - step
-	if delta == 0 {
+	if target == step {
 		return
 	}
-	if s.volumeKeys == nil {
-		s.untrustedLog.Printf("volume: asked for %s, and there are no keys to press", want)
+	s.setStep(target, max, want)
+}
+
+func (s *Server) setStep(target, max int, want volumeWant) {
+	if s.volumeSet == nil {
+		s.untrustedLog.Printf("volume: asked for %s, and there is nothing to set it with", want)
 		return
 	}
-	if err := s.volumeKeys(delta > 0, abs(delta)); err != nil {
+	if err := s.volumeSet(target); err != nil {
 		s.untrustedLog.Printf("volume: %v", err)
 		return
 	}
-	time.Sleep(s.volumeSettle)
-
-	landed, _, ok := s.readVolumeStep()
-	switch {
+	switch at, _, ok := s.readVolumeStep(); {
 	case !ok:
-		s.untrustedLog.Printf("volume: asked for step %d of %d, and the level could not be read back",
-			target, max)
-	case landed != target:
-		s.untrustedLog.Printf("volume: asked for step %d of %d, device is at %d", target, max, landed)
+		s.untrustedLog.Printf("volume: asked for step %d of %d, and the level could not be"+
+			" read back", target, max)
+	case at != target:
+		s.untrustedLog.Printf("volume: asked for step %d of %d, device is at %d", target, max, at)
 	default:
-		s.untrustedLog.Printf("volume: step %d of %d", landed, max)
+		s.untrustedLog.Printf("volume: step %d of %d", at, max)
 	}
 }
 

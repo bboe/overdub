@@ -16,8 +16,7 @@ type fakeVolume struct {
 	v         device.MusicVolume
 	occupied  bool
 	jackKnown bool
-	ups       int
-	downs     int
+	sets      int
 	err       error
 }
 
@@ -35,25 +34,19 @@ func wireFakeVolume(s *Server, step, max int) *fakeVolume {
 		defer f.mu.Unlock()
 		return f.occupied, f.jackKnown
 	}
-	s.volumeKeys = func(up bool, n int) error {
+	s.volumeSet = func(step int) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.sets++
 		if f.err != nil {
 			return f.err
 		}
-		delta := n
-		if up {
-			f.ups += n
-		} else {
-			f.downs += n
-			delta = -n
-		}
 		if f.occupied {
-			f.v.JackStep += delta
-			f.v.Jack = stepPercentFor(f.v.JackStep, f.v.Max)
+			f.v.JackStep = step
+			f.v.Jack = stepPercentFor(step, f.v.Max)
 		} else {
-			f.v.SpeakerStep += delta
-			f.v.Speaker = stepPercentFor(f.v.SpeakerStep, f.v.Max)
+			f.v.SpeakerStep = step
+			f.v.Speaker = stepPercentFor(step, f.v.Max)
 		}
 		return nil
 	}
@@ -62,10 +55,10 @@ func wireFakeVolume(s *Server, step, max int) *fakeVolume {
 
 func stepPercentFor(step, max int) float32 { return float32(step) * 100 / float32(max) }
 
-func (f *fakeVolume) state() (speaker, jack, ups, downs int) {
+func (f *fakeVolume) state() (speaker, jack, sets int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.v.SpeakerStep, f.v.JackStep, f.ups, f.downs
+	return f.v.SpeakerStep, f.v.JackStep, f.sets
 }
 
 func waitVolumeIdle(t *testing.T, s *Server) {
@@ -94,33 +87,30 @@ func TestAVolumeSetStepsToTheLevelAskedFor(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	speaker, _, ups, downs := f.state()
-	if speaker != 15 || ups != 9 || downs != 0 {
-		t.Errorf("half of thirty left the speaker at %d after %d up and %d down, "+
-			"want 15 after 9 up", speaker, ups, downs)
+	speaker, _, sets := f.state()
+	if speaker != 15 || sets != 1 {
+		t.Errorf("half of thirty left the speaker at %d after %d sets, want 15 from one",
+			speaker, sets)
 	}
 }
 
-func TestAVolumeAlreadyWhereItWasAskedPressesNothing(t *testing.T) {
+func TestAVolumeAlreadyWhereItWasAskedSetsNothing(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 15, 30)
 
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if _, _, ups, downs := f.state(); ups != 0 || downs != 0 {
-		t.Errorf("a volume already at the level asked for was pressed %d up and %d down",
-			ups, downs)
+	if _, _, sets := f.state(); sets != 0 {
+		t.Errorf("a volume already at the level asked for was set %d times", sets)
 	}
 }
 
@@ -129,21 +119,20 @@ func TestVolumeUpAndDownMoveOneStep(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	askVolume(s, volumeWant{steps: 1})
 	waitVolumeIdle(t, s)
-	if speaker, _, ups, _ := f.state(); speaker != 7 || ups != 1 {
-		t.Errorf("one step up left the speaker at %d after %d presses, want 7 after 1",
-			speaker, ups)
+	if speaker, _, sets := f.state(); speaker != 7 || sets != 1 {
+		t.Errorf("one step up left the speaker at %d after %d sets, want 7 after 1",
+			speaker, sets)
 	}
 
 	askVolume(s, volumeWant{steps: -1})
 	waitVolumeIdle(t, s)
-	if speaker, _, _, downs := f.state(); speaker != 6 || downs != 1 {
-		t.Errorf("one step down left the speaker at %d after %d presses, want 6 after 1",
-			speaker, downs)
+	if speaker, _, sets := f.state(); speaker != 6 || sets != 2 {
+		t.Errorf("one step down left the speaker at %d after %d sets, want 6 after 2",
+			speaker, sets)
 	}
 }
 
@@ -164,13 +153,12 @@ func TestTheVolumeIsClampedToTheScale(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := testServer(t, testPSK(t))
-			s.volumeSettle = time.Millisecond
 			f := wireFakeVolume(s, tt.start, 30)
 
 			askVolume(s, tt.want)
 			waitVolumeIdle(t, s)
 
-			if speaker, _, _, _ := f.state(); speaker != tt.end {
+			if speaker, _, _ := f.state(); speaker != tt.end {
 				t.Errorf("the speaker landed at %d, want %d", speaker, tt.end)
 			}
 		})
@@ -182,16 +170,15 @@ func TestAnUnreadableVolumeIsNotStepped(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 	f.v.SpeakerOK = false
 
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if _, _, ups, downs := f.state(); ups != 0 || downs != 0 {
-		t.Errorf("a level that could not be read was stepped %d up and %d down: a press "+
-			"from an unknown level lands somewhere nobody asked for", ups, downs)
+	if _, _, sets := f.state(); sets != 0 {
+		t.Errorf("a level that could not be read was set %d times: a level computed "+
+			"from an unknown one lands somewhere nobody asked for", sets)
 	}
 }
 
@@ -200,7 +187,6 @@ func TestTheVolumeFollowsTheRouteThatIsLive(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 	f.occupied = true
 	f.v.JackStep, f.v.JackOK = 9, true
@@ -209,10 +195,11 @@ func TestTheVolumeFollowsTheRouteThatIsLive(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	speaker, jack, ups, _ := f.state()
-	if jack != 15 || ups != 6 {
-		t.Errorf("with a plug in the socket the jack went to %d after %d presses, "+
-			"want 15 after 6: the speaker's own step is not the one that moves", jack, ups)
+	speaker, jack, sets := f.state()
+	if jack != 15 || sets != 1 {
+		t.Errorf("with a plug in the socket the jack went to %d after %d sets, "+
+			"want 15 from one set: the speaker's own step is not the one that moves",
+			jack, sets)
 	}
 	if speaker != 6 {
 		t.Errorf("the speaker's step moved to %d while the jack was the live route", speaker)
@@ -224,7 +211,6 @@ func TestStepsAskedForTogetherAreBothTaken(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	c := &conn{sock: fakeAddr{}}
@@ -234,27 +220,25 @@ func TestStepsAskedForTogetherAreBothTaken(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, ups, _ := f.state(); speaker != 8 || ups != 2 {
-		t.Errorf("two steps up left the speaker at %d after %d presses, want 8 after 2: "+
-			"a second press arriving before the first is served is not a replacement",
-			speaker, ups)
+	if speaker, _, _ := f.state(); speaker != 8 {
+		t.Errorf("two steps up left the speaker at %d, want 8: a second step arriving "+
+			"before the first is served is not a replacement", speaker)
 	}
 }
 
-func TestAKeyPressThatFailedIsNotReportedAsAVolume(t *testing.T) {
+func TestASetThatFailedIsNotReportedAsAVolume(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
-	f.err = errors.New("uinput: write: bad file descriptor")
+	f.err = errors.New("service call: transaction failed")
 
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if speaker, _, _, _ := f.state(); speaker != 6 {
-		t.Errorf("a failed press moved the speaker to %d", speaker)
+	if speaker, _, _ := f.state(); speaker != 6 {
+		t.Errorf("a failed set moved the speaker to %d", speaker)
 	}
 }
 
@@ -263,7 +247,6 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	c := &conn{sock: fakeAddr{}}
@@ -271,17 +254,16 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 		t.Fatalf("a media command for another key was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if _, _, ups, downs := f.state(); ups != 0 || downs != 0 {
-		t.Errorf("a command naming the speaker sensor stepped the volume %d up and %d down",
-			ups, downs)
+	if _, _, sets := f.state(); sets != 0 {
+		t.Errorf("a command naming the speaker sensor set the volume %d times", sets)
 	}
 
 	if err := s.handle(c, msgMediaPlayerCmd, volumeCommand(s.keySpeaker, 0.5)); err != nil {
 		t.Fatalf("a media command for the speaker was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, ups, _ := f.state(); speaker != 15 || ups != 9 {
-		t.Errorf("the speaker is at %d after %d presses, want 15 after 9", speaker, ups)
+	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+		t.Errorf("the speaker is at %d after %d sets, want 15 after 1", speaker, sets)
 	}
 }
 
@@ -298,7 +280,6 @@ func TestTheVolumeWakesThePollThatReadsIt(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	wireFakeVolume(s, 6, 30)
 
 	askVolume(s, volumeWant{steps: 1})
@@ -343,7 +324,7 @@ func TestActiveVolumeIsTheRouteInUse(t *testing.T) {
 
 func TestTheSpeakerIsListedAsAMediaPlayerThatOnlyDoesVolume(t *testing.T) {
 	s := testServer(t, testPSK(t))
-	s.UseVolumeKeys(func(bool, int) error { return nil })
+	s.UseVolumeSetter(func(int) error { return nil })
 	for _, entity := range listed(t, s) {
 		if entity[0].num != uint64(msgListMediaPlayer) {
 			continue
@@ -352,7 +333,7 @@ func TestTheSpeakerIsListedAsAMediaPlayerThatOnlyDoesVolume(t *testing.T) {
 			t.Errorf("the media player is object_id %q, want %q", got, "speaker")
 		}
 		if got := entity[11].num; got != featVolumeSet|featVolumeStep {
-			t.Errorf("feature_flags is %d, want %d: this server was given keys and no player, "+
+			t.Errorf("feature_flags is %d, want %d: this server was given a setter and no player, "+
 				"and a control that does nothing is worse than one that is absent",
 				got, featVolumeSet|featVolumeStep)
 		}
@@ -421,7 +402,6 @@ func TestAStepOnTopOfAPendingSetIsAddedToIt(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	c := &conn{sock: fakeAddr{}}
@@ -431,10 +411,9 @@ func TestAStepOnTopOfAPendingSetIsAddedToIt(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, ups, _ := f.state(); speaker != 16 || ups != 10 {
-		t.Errorf("a step arriving on a pending set left the speaker at %d after %d presses, "+
-			"want 16 after 10: the step belongs on top of the level asked for, not instead "+
-			"of it", speaker, ups)
+	if speaker, _, _ := f.state(); speaker != 16 {
+		t.Errorf("a step arriving on a pending set left the speaker at %d, want 16: the"+
+			" step belongs on top of the level asked for, not instead of it", speaker)
 	}
 }
 
@@ -464,7 +443,6 @@ func TestASetOnTopOfAPendingStepReplacesIt(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	c := &conn{sock: fakeAddr{}}
@@ -474,10 +452,10 @@ func TestASetOnTopOfAPendingStepReplacesIt(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, ups, _ := f.state(); speaker != 15 || ups != 9 {
-		t.Errorf("a set arriving on a pending step left the speaker at %d after %d presses, "+
-			"want 15 after 9: a set names where to be, so it answers the step rather than "+
-			"landing above it", speaker, ups)
+	if speaker, _, _ := f.state(); speaker != 15 {
+		t.Errorf("a set arriving on a pending step left the speaker at %d, want 15: a set"+
+			" names where to be, so it answers the step rather than landing above it",
+			speaker)
 	}
 }
 
@@ -486,7 +464,6 @@ func TestAnUnreadableRouteIsNotStepped(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 	f.occupied, f.jackKnown = true, false
 	f.v.JackStep, f.v.JackOK = 21, true
@@ -495,23 +472,23 @@ func TestAnUnreadableRouteIsNotStepped(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if _, jack, ups, downs := f.state(); ups != 0 || downs != 0 {
-		t.Errorf("a socket we could not read was stepped %d up and %d down, leaving the jack "+
-			"at %d: counting from the speaker with a cable in drives headphones to whatever "+
-			"the speaker's own distance happened to be", ups, downs, jack)
+	if _, jack, sets := f.state(); sets != 0 {
+		t.Errorf("a socket we could not read was set %d times, leaving the jack at %d:"+
+			" a level set from an unknown route lands somewhere nobody asked for",
+			sets, jack)
 	}
 }
 
 func TestEveryControlOfferedHasSomethingBehindIt(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	if got := s.mediaFeatures(); got != 0 {
-		t.Errorf("a server with neither keys nor a player offered feature_flags %d, want none: "+
+		t.Errorf("a server with neither a setter nor a player offered feature_flags %d, want none: "+
 			"a control that cannot act is worse than a card without one", got)
 	}
 
-	s.UseVolumeKeys(func(bool, int) error { return nil })
+	s.UseVolumeSetter(func(int) error { return nil })
 	if got := s.mediaFeatures(); got != featVolumeSet|featVolumeStep {
-		t.Errorf("with keys and no player feature_flags is %d, want the volume alone (%d)",
+		t.Errorf("with a setter and no player feature_flags is %d, want the volume alone (%d)",
 			got, featVolumeSet|featVolumeStep)
 	}
 
@@ -554,7 +531,6 @@ func TestAVolumeThatIsNotAFloatIsNotASet(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := testServer(t, testPSK(t))
-			s.volumeSettle = time.Millisecond
 			f := wireFakeVolume(s, 6, 30)
 
 			payload := append([]byte{}, tt.payload...)
@@ -567,8 +543,8 @@ func TestAVolumeThatIsNotAFloatIsNotASet(t *testing.T) {
 				t.Fatalf("the command was an error: %v", err)
 			}
 			waitVolumeIdle(t, s)
-			if speaker, _, ups, downs := f.state(); speaker != 6 || ups != 0 || downs != 0 {
-				t.Errorf("the speaker moved to %d after %d up and %d down", speaker, ups, downs)
+			if speaker, _, sets := f.state(); speaker != 6 || sets != 0 {
+				t.Errorf("the speaker moved to %d after %d sets", speaker, sets)
 			}
 		})
 	}
@@ -908,7 +884,7 @@ func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
 
 	psk := testPSK(t)
 	s := testServer(t, psk)
-	s.UseVolumeKeys(func(bool, int) error { return nil })
+	s.UseVolumeSetter(func(int) error { return nil })
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -950,7 +926,6 @@ func TestAVolumeCommandCarryingNoVolumeAtAllIsZero(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.volumeSettle = time.Millisecond
 	f := wireFakeVolume(s, 6, 30)
 
 	var bare pb
@@ -962,9 +937,72 @@ func TestAVolumeCommandCarryingNoVolumeAtAllIsZero(t *testing.T) {
 		t.Fatalf("a media command carrying no volume was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, _, downs := f.state(); speaker != 0 || downs == 0 {
-		t.Errorf("a command asking for volume 0 left the speaker at %d after %d presses"+
-			" down, want 0: proto3 leaves a zero-valued scalar off the wire, and"+
-			" has_volume is the presence flag that says one was meant", speaker, downs)
+	if speaker, _, sets := f.state(); speaker != 0 || sets == 0 {
+		t.Errorf("a command asking for volume 0 left the speaker at %d after %d sets,"+
+			" want 0: proto3 leaves a zero-valued scalar off the wire, and has_volume"+
+			" is the presence flag that says one was meant", speaker, sets)
+	}
+}
+
+func TestASetTheDeviceDidNotTakeIsReportedRatherThanRepeated(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	s.volumeSet = func(int) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.sets++
+		return nil
+	}
+
+	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
+	waitVolumeIdle(t, s)
+
+	if speaker, _, sets := f.state(); speaker != 6 || sets != 1 {
+		t.Errorf("a set the device ignored left the speaker at %d after %d sets, want 6"+
+			" after 1: a transaction number this build does not share must report"+
+			" rather than be tried again", speaker, sets)
+	}
+	if got := out.String(); !strings.Contains(got, "device is at 6") {
+		t.Errorf("the log says %q, and nothing in it names the level the device kept", got)
+	}
+}
+
+func TestTheVolumeCrossesToSendspinAsAPercentage(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+
+	if !s.CanSetVolume() {
+		t.Fatal("a server wired to set a level says it cannot, so sendspin offers no volume")
+	}
+	if got, ok := s.SpeakerVolume(); !ok || got != 20 {
+		t.Errorf("SpeakerVolume is %d (ok=%v), want 20: step 6 of 30 is what sendspin"+
+			" reports, and 0-100 is the only scale the protocol has", got, ok)
+	}
+
+	s.SetSpeakerVolume(50)
+	waitVolumeIdle(t, s)
+
+	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+		t.Errorf("a volume a server set left the speaker at %d after %d sets, want 15"+
+			" after 1", speaker, sets)
+	}
+}
+
+func TestAServerCannotSetALevelThereIsNothingToSetWith(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	s.volumeSet = nil
+
+	if s.CanSetVolume() {
+		t.Error("a server with nothing to set the level with says it can, so sendspin" +
+			" offers a volume command that reaches nothing")
+	}
+	s.SetSpeakerVolume(50)
+	waitVolumeIdle(t, s)
+	if speaker, _, _ := f.state(); speaker != 6 {
+		t.Errorf("the speaker moved to %d with nothing wired to move it", speaker)
 	}
 }

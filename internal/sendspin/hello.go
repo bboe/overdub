@@ -223,6 +223,17 @@ type Config struct {
 	MACAddress     string
 	UnpairedAccess bool
 	BufferCapacity int
+	Volume         func() (percent int, ok bool)
+	SetVolume      func(percent int)
+}
+
+func (c Config) setsVolume() bool { return c.Volume != nil && c.SetVolume != nil }
+
+func (c Config) playerCommands() []string {
+	if !c.setsVolume() {
+		return []string{}
+	}
+	return []string{commandVolume}
 }
 
 func offeredPairMethods() map[string]pairMethod { return map[string]pairMethod{} }
@@ -247,7 +258,7 @@ func (c Config) hello() clientHello {
 				BitDepth:   StreamBitDepth,
 			}},
 			BufferCapacity:    c.BufferCapacity,
-			SupportedCommands: []string{},
+			SupportedCommands: c.playerCommands(),
 		},
 		UnpairedAccess: unpairedAccess{Enabled: c.UnpairedAccess},
 	}

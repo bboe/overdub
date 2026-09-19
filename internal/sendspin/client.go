@@ -35,6 +35,7 @@ const (
 	goodbyeWait     = 2 * time.Second
 	provisionalWait = 30 * time.Second
 	pingAfter       = 60 * time.Second
+	volumeEvery     = 2500 * time.Millisecond
 	idleWait        = pingAfter * 5 / 2
 
 	typeClientState = "client/state"
@@ -77,6 +78,7 @@ func Advert(name string) mdns.Advert {
 }
 
 type playerState struct {
+	Volume             *int     `json:"volume,omitempty"`
 	StaticDelayMS      int      `json:"static_delay_ms"`
 	RequiredLeadTimeMS int      `json:"required_lead_time_ms"`
 	MinBufferMS        int      `json:"min_buffer_ms"`
@@ -108,6 +110,7 @@ type Client struct {
 	Player Player
 
 	delay      atomic.Int64
+	toldVolume atomic.Int64
 	onDisk     atomic.Int64
 	firstDelay sync.Once
 	keeping    atomic.Int64
@@ -121,6 +124,7 @@ type Client struct {
 	goodbyeAfter     time.Duration
 	timeEvery        time.Duration
 	reportEvery      time.Duration
+	volumeEvery      time.Duration
 	answerAfter      time.Duration
 
 	Peer *untrustedlog.Log
@@ -476,6 +480,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				}
 				go c.keepTime(session, nc, stop)
 				go c.reportDelays(session, nc, stop)
+				go c.watchVolume(stop)
 				stated = true
 			} else if regained {
 				c.tellServer()
@@ -553,6 +558,25 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				c.Play.Printf("sendspin: %q cleared what it had sent", name)
 			}
 		case typeServerComm:
+			percent, mine, err := session.Volume(payload)
+			if err != nil {
+				once("sendspin: %q sent a command this player will not take: %v", name, err)
+				continue
+			}
+			if mine {
+				if !c.Config.setsVolume() {
+					once("sendspin: %q sent a volume, and this player never offered one",
+						name)
+					continue
+				}
+				if held := HoldVolume(percent); held != percent {
+					once("sendspin: %q asked for a volume of %d, and the spec holds one to"+
+						" 0 through 100, so %d is what this player takes", name, percent, held)
+				}
+				c.Config.SetVolume(HoldVolume(percent))
+				once("sendspin: %q is setting this player's volume", name)
+				continue
+			}
 			want, asked, ours, err := session.StaticDelay(payload)
 			if err != nil {
 				once("sendspin: %q sent a command this player will not take: %v", name, err)
@@ -737,13 +761,49 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written 
 }
 
 func (c *Client) state(session *Session, available bool, delay time.Duration) error {
+	player := &playerState{
+		StaticDelayMS:      int(delay / time.Millisecond),
+		RequiredLeadTimeMS: c.RequiredLeadMS,
+		MinBufferMS:        c.MinBufferMS,
+		SupportedCommands:  []string{commandStaticDelay},
+	}
+	if percent, ok := c.volume(); ok {
+		player.Volume = &percent
+		c.toldVolume.Store(int64(percent) + 1)
+	}
 	return session.WriteJSON(typeClientState, clientState{
 		Available: available,
-		Player: &playerState{
-			StaticDelayMS:      int(delay / time.Millisecond),
-			RequiredLeadTimeMS: c.RequiredLeadMS,
-			MinBufferMS:        c.MinBufferMS,
-			SupportedCommands:  []string{commandStaticDelay},
-		},
+		Player:    player,
 	})
+}
+
+func (c *Client) volume() (int, bool) {
+	if !c.Config.setsVolume() {
+		return 0, false
+	}
+	percent, ok := c.Config.Volume()
+	if !ok {
+		return 0, false
+	}
+	return HoldVolume(percent), true
+}
+
+func (c *Client) watchVolume(stop <-chan struct{}) {
+	if !c.Config.setsVolume() {
+		return
+	}
+	tick := time.NewTicker(waitOr(c.volumeEvery, volumeEvery))
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+		percent, ok := c.volume()
+		if !ok || c.toldVolume.Load() == int64(percent)+1 {
+			continue
+		}
+		c.tellServer()
+	}
 }

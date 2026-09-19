@@ -523,8 +523,8 @@ calls took four seconds, about thirteen milliseconds each, against 546ms for one
 
 **The reading carries the step as well as the percentage**, and the maximum it
 was scaled by. A percentage is what Home Assistant is told. A step is what a
-volume *change* has to start from, because the only way to move this Dot's level
-is a key press, and a key press moves one step. Deriving the step back out of the
+volume *change* has to start from, because a relative step counts from it.
+Deriving the step back out of the
 percentage would work at this scale and is still the wrong way round: it puts a
 rounding between the number that was read and the number a change is counted
 against, and the maximum is already on the same read as the level.
@@ -536,7 +536,7 @@ evidence that there was a level to scale.
 
 **The mute does not reach the step.** A muted stream reports zero percent,
 because zero is what can be heard, and reports the step its `Current:` line
-names, because that is where a key press starts from. Reporting zero for both
+names, because that is where a change starts from. Reporting zero for both
 would have a muted Dot count its way up from a level it is not holding, and
 land as far below the level asked for as the mute was holding back.
 
@@ -609,53 +609,51 @@ be zero -- it is a peer saying something the message does not allow, and treatin
 it as zero would step the Dot to silence on a malformed frame. The clamp bounds
 what a nonsense fraction can do, but the clamp is a floor rather than the check.
 
-**A level is set by pressing keys, because API 22 has no setter to call.**
-`setStreamVolume` needs an APK or an `app_process` host, and the shell commands
-that reach it are a VM start each: measured on the Dot, four `input keyevent 24`
-calls took 2.28 seconds, about 570ms apiece, the same order as the `settings
-get` above. Thirty of those is seventeen seconds between Home Assistant asking
-for full volume and the Dot arriving there. A uinput device of our own costs
-30ms a step, so the same thirty steps take under a second.
+**A level is set outright, through the same door the mic mute reads.**
+`service call audio 4 i32 3 i32 <step> i32 0 s16 overdub` is
+`IAudioService.setStreamVolume`, and `/system/bin/service` is a native binary
+rather than a VM start. Measured on a Dot: 20 calls in 472ms against a 61ms
+baseline, about **20ms each**, read back current with no settle. `flags` is 0
+where the key handler passes `FLAG_PLAY_SOUND`, so it is silent, and
+`setStreamVolume` resolves the output device itself -- with a cable in, a set
+moved `headset` 17 to 20 and left `speaker` at 11.
 
-**Pressing keys is audible, and that is not a detail.** Android plays its own
-volume tick on each adjustment, so a set is heard once per step it moves: nine
-ticks to go from a fifth to a half, and a drag across the scale is heard the
-whole way. Heard on the Dot rather than measured. This is the same sound the
-physical buttons make, which is consistent with what the keys buy -- the level
-lands where a hand would have put it, and it sounds like a hand put it there --
-but a slider in Home Assistant does not look like something that makes a noise,
-and an automation that sets the volume at four in the morning will be heard.
+**It replaced pressing the volume keys**, which sounded Android's tick once per
+step -- a nine-step move heard nine times, an automation at four in the morning
+heard across the room -- and undershot: a set to 46% landed on step 7 of a
+target 14, because the presses outran the 400ms settle they were read back
+after. The uinput device, its stuck-key exit and the rule about counting presses
+from the live route are all gone with it. Reads still choose a route; writes no
+longer have to.
 
-A silent setter exists and is not reached from a shell: `setStreamVolume` takes
-a flags argument, and `FLAG_PLAY_SOUND` is what the key handler passes and a
-direct caller need not. Reaching it means a binder transaction on `IAudioService`
-by number, or a Java helper through `app_process`. Neither is in this tree, both
-are version-fragile in a way a keycode is not, and the keycode route works
-today; what it costs is this paragraph.
+**The transaction number is this build's, not stock Android's**, so it was
+measured rather than derived: `setStreamMute` sits at 8 where AOSP 5.1 has
+`isStreamMute`, so at least one method is inserted and the ordering cannot be
+read off upstream. Confirmed at 4 on all three Dots, all FireOS 5.5.5.4, and
+there is no fallback for a build that does not share it -- the same bargain
+`micMuteCall` already makes, on a device whose updater is deliberately blocked.
 
-**That device needs no borrowed identity.** The action button's clone has to be
-named `mtk-kpd` and carry the real node's ids, because Android resolves the
-keylayout from the name and the two devices have to look alike; docs/button.md
-says why. The volume device is the opposite case -- it invents keys rather than
-standing in for a node, and the volume keycodes are in the generic keylayout.
-Measured on a Dot, a device named `overdub-volume` with an all-zero `input_id`
-moved `volume_music_speaker` from 5 to 6 on one injected key, and from 6 to 3 on
-three more at 30ms apart, with `input keyevent` as the control in the other
-direction.
+What there is instead is a read back: a set whose level does not arrive is
+reported with the level the device kept, rather than assumed. docs/hardware.md
+carries why probing for that number is dangerous.
 
-**The step that moves is the live route's.** A volume key adjusts whatever
-output Android is routing to, so the level to count from is the socket's when
+Safe media volume does not bite, which was measured rather than assumed. The
+dump says `SAFE_MEDIA_VOLUME_ACTIVE` with `mSafeMediaVolumeIndex=270`, step 27
+of 30, and the active route was `headset` -- every precondition AOSP blocks on
+-- and a set to 30 landed anyway. What was not checked is whether the gain is
+capped downstream of the index.
+
+**The level that is read is the live route's.** A relative step is computed
+from wherever the device is, so the level to start from is the socket's when
 something is in it and the speaker's otherwise, which is what `JackOccupied`
-answers. Counting from the speaker with a cable in the jack sends the wrong
-number of presses and lands somewhere nobody asked for -- and lands it in
-somebody's headphones, which is the reason this one is not a matter of taste.
-When the live route has no readable level, **or when which route is live cannot
-be read at all**, nothing is pressed: a press from an unknown level is a guess,
-and the reading that follows makes it look deliberate. The switch this reads,
-`/sys/class/switch/h2w/state`, has never been seen to fail, and the jack sensor
-beside it goes missing when it does, so the two agree about what is unknown.
+answers. When the live route has no readable level, **or when which route is
+live cannot be read at all**, nothing is set: a level computed from an unknown
+one is a guess, and the reading that follows makes it look deliberate. The
+switch this reads, `/sys/class/switch/h2w/state`, has never been seen to fail,
+and the jack sensor beside it goes missing when it does, so the two agree about
+what is unknown.
 
-**A set is a press, a wait, and a read back**, in the shape the microphone
+**A set is a call and a read back**, in the shape the microphone
 switch already uses: one worker, one pending request, and `liveWake` at the end
 so the poll republishes rather than the worker inventing a state. Two requests
 arriving together coalesce, and two *relative* ones add rather than replace, so
@@ -665,13 +663,12 @@ same rule twice, and they are not meant to be: a step says which way to go from
 wherever you are, so it belongs on top of whatever is about to happen, while a
 set names where to be, so it answers a step rather than landing one above it.
 Half and then one more is 51.7%; one more and then half is half, which is what
-the second request asked for. The wait is 400ms: measured through Home Assistant's own client
-against the Dot, a nine-step move logged the level it had asked for rather than
-one still in flight.
+the second request asked for. There is no settle to wait out: the level reads
+back current in the same breath as the call.
 
 **The slider shows the step, and the mute is a flag beside it.** The two volume
 sensors report a muted stream as zero percent, because zero is what can be
-heard. The media player cannot: a set counts presses from the step, so a slider
+heard. The media player cannot: a step counts from that number, so a slider
 fed the zeroed percentage would sit at 0 while the level it counts from was 12
 of 30, and every set would land on the device and snap back in Home Assistant --
 then do nothing at all the second time, because the step is already where it was
@@ -768,11 +765,14 @@ that reports it goes through the rate-limited log rather than `log.Printf` in
 `serve.go`: a peer that can ask for a clip a second can otherwise write to
 `/data` a second, which is the hazard docs/pitfalls.md opens with.
 
-**No keys, no controls.** `NewVolumeKeys` is allowed to fail -- `/dev/uinput`
-may be missing, and the daemon still has a button to serve -- so the feature
-flags are computed rather than fixed: with no device behind them the entity is
-listed with none, and Home Assistant draws the level and no slider. The
-alternative is a slider that moves back every time. `PLAY_MEDIA` and
+**Nothing to set with, no control.** The feature flags are computed rather than
+fixed, and Sendspin reads the same answer through `CanSetVolume`, so the two
+surfaces cannot disagree about whether this Dot's level can be changed. The
+computation has one answer today: the setter is wired unconditionally, where
+the uinput device it replaced could fail on a missing `/dev/uinput` and leave
+the entity listed with no slider. What is lost with it is finding out at wiring
+time -- a `service` that cannot run now advertises a slider and reports the
+failure per set. `PLAY_MEDIA` and
 `MEDIA_ANNOUNCE` are computed the same way and for the same reason, so a daemon
 that cannot reach Alexa's synthesizer offers no play button rather than one that
 fails quietly.
@@ -804,14 +804,6 @@ into a log that is truncated at boot and every twentieth restart, and neither of
 those arrives while the daemon is happily running. A tail that ran for a while
 before it failed is a new fault rather than the one already reported, so that
 one is said again.
-
-**A stuck volume key exits the daemon.** `Step` goes through the same `press`
-the mute button uses, so a write that fails after the key-down comes back as
-`ErrKeyStuck`, and `serve.go` answers it the way it answers a stuck mute: log,
-withdraw, close, exit, and let the supervisor build a new device five seconds
-later. A volume key left down is worse than untidy -- docs/hardware.md has
-Alexa's advanced factory reset on mute and volume down held together for eight
-seconds, and the user's own hand supplies the other half.
 
 Both polls are started by one call, `Poll`, rather than by a `go` statement each
 in `serveAPI`. What goes wrong there is a sensor that is listed with nothing to

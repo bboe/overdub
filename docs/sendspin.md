@@ -1542,6 +1542,45 @@ re-asserting its own figure gets silence rather than a reply, which is what keep
 an `immediate_apply` control from being answered at every step of a drag.
 
 
+## The volume a server sets
+
+A player that names no `volume` command is **excluded from group volume
+outright**: the spec applies its delta only to players that support the command,
+so three Dots that stayed silent here were skipped by every group volume Music
+Assistant worked out.
+
+**Where the offer goes is aiosendspin's answer, not the spec's.** In 9.1.1 the
+two lists are different: `{volume, mute}` in `client/hello`'s player support,
+`{set_static_delay}` in `client/state`. The spec has since folded all three into
+`client/state`, and putting `volume` there is refused -- measured against the
+reference server, the handshake never completes. The interop test wires a volume
+so that placement is checked rather than read.
+
+**`mute` is offered by neither, because this Dot has no output mute to set.**
+docs/api.md has the measurements: `input keyevent 164` does nothing, "Alexa,
+mute" sets the level to 0, and `setStreamMute` over binder does produce a
+`Mute count` but destroys the level rather than holding it.
+
+**The level is read and set through the ESPHome server**, which already owns the
+route choice, the call and the read back; `serve.go` wires the two together, so
+neither package imports the other, and `CanSetVolume` is the one answer both
+surfaces use. A level that could not be read is absent rather than guessed, for
+the reason docs/api.md gives for the sensor.
+
+**The Dot's own buttons reach the server too.** A poll runs for the life of the
+connection and reports a level that differs from the one last put in a
+`client/state`, at the 2.5 s the ESPHome live tick already uses for this
+reading. Comparing against what was *reported* rather than against a baseline of
+its own is what keeps a level changed between the first state and the poll's
+first tick from being missed. It is a second `dumpsys audio` rather than a share
+of the first, because that one stops when Home Assistant unsubscribes.
+
+**A level reported back is not the level asked for**, and nothing suppresses the
+difference. The scale is 30 steps, so a server asking for 65 gets step 20 and is
+told 67 within the poll's 2.5 s. That is the device's real level rather than an
+echo, which is the answer a server wants; the delay path differs, where
+re-asserting a server's own figure gets silence.
+
 ## The same delay, set from Home Assistant
 
 The delay is one figure with two writers. `number.<name>_sendspin_output_delay`

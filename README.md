@@ -368,15 +368,18 @@ That is why a volume you have just turned appears within a few seconds, whether
 you turned it with the buttons, from an app, or by asking Alexa.
 
 Setting it from Home Assistant goes the other way down the same path: the daemon
-presses the volume keys for you, one press per step, so the level lands where
-Alexa and the buttons would have put it and every other reader of the volume
-agrees with it afterwards. It moves the route you are hearing, so with headphones
-in the socket the slider moves the socket's level and leaves the speaker's alone.
+asks Android for the level outright, so it lands exactly where you put the
+slider and every other reader of the volume agrees with it afterwards. It moves
+the route you are hearing, so with headphones in the socket the slider moves the
+socket's level and leaves the speaker's alone.
 
-**You will hear it.** Android ticks on every volume adjustment, the same as when
-you press the buttons on the Dot, so moving the slider is heard once per step it
-travels. Worth knowing before an automation sets the volume in a bedroom at four
-in the morning.
+It is silent, and it used to be heard: the daemon pressed the volume keys one
+per step, and Android ticks on every adjustment. An automation setting the
+volume at four in the morning no longer wakes the room.
+
+Music Assistant can set it too, over Sendspin, and the same is true there. A
+Dot that offers no volume is left out of the group volume a server works out,
+so these are now part of it.
 
 `volume` is the speaker's own level and `jack_volume` is the socket's. Android
 keeps a level per route and switches between them when you plug something in,

@@ -30,8 +30,11 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 
 	ln := listenLocal(t)
 	keys := testKeys(t)
+	volume := &fakeVolume{at: 40, ok: true}
+	cfg := testConfig()
+	cfg.Volume, cfg.SetVolume = volume.read, volume.set
 	client := &Client{
-		Config:      testConfig(),
+		Config:      cfg,
 		Keys:        keys,
 		PSKs:        PSKSet{Pairing: keys.PairingPSK},
 		MinBufferMS: 500,

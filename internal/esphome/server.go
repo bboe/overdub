@@ -184,12 +184,13 @@ type Server struct {
 	soundLastOn time.Time
 	soundSeen   time.Time
 
-	uptime  func() (float32, bool)
-	wifi    func() (float32, bool)
-	volumes func() device.MusicVolume
-	jack    func() (bool, bool)
-	sound   func() (bool, bool)
-	micMute func() (bool, bool)
+	uptime    func() (float32, bool)
+	wifi      func() (float32, bool)
+	volumes   func() device.MusicVolume
+	volumeSet func(step int) error
+	jack      func() (bool, bool)
+	sound     func() (bool, bool)
+	micMute   func() (bool, bool)
 
 	sendspinOn  func() bool
 	sendspinSet func(bool)
@@ -202,7 +203,6 @@ type Server struct {
 	alexa       func() (bool, bool)
 	memory      func() (float32, bool)
 
-	volumeKeys  func(up bool, n int) error
 	play        func(url string) error
 	command     func(text string) error
 	micPress    func() error
@@ -217,7 +217,6 @@ type Server struct {
 	wakeGap       time.Duration
 	adbSettle     time.Duration
 	micSettle     time.Duration
-	volumeSettle  time.Duration
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -280,7 +279,6 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		wakeGap:       minLiveReadGap,
 		adbSettle:     adbSettleFor,
 		micSettle:     micSettleFor,
-		volumeSettle:  volumeSettleFor,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},

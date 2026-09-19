@@ -41,12 +41,11 @@ internal/alexa     her synthesizer: the intent that hands it a clip, and the
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them; and the stream, which places a
                    server's audio on the frame the player says it belongs on
-internal/button    the exclusive grab, the clone, the read loop, whether the
-                   action key is ours or Alexa's, and the volume keys pressed
-                   on request
+internal/button    the exclusive grab, the clone, the read loop, and whether
+                   the action key is ours or Alexa's
 internal/device    the Dot itself: its network, the firewall rule, network
-                   adb, the microphone mute, and a setting that survives a
-                   reboot
+                   adb, the microphone mute, the music volume, and a setting
+                   that survives a reboot
 internal/esphome   the ESPHome API, its protobuf, the Noise transport, and
                    the advert Home Assistant finds the Dot by
 internal/evdev     evdev and uinput primitives
