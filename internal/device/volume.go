@@ -11,6 +11,7 @@ import (
 
 const (
 	setVolumeCall = "4"
+	setMuteCall   = "8"
 	streamMusic   = "3"
 	volumeCaller  = "overdub"
 )
@@ -20,6 +21,7 @@ var (
 	setVolumeWaitDelay = 100 * time.Millisecond
 
 	setVolumeArgv = []string{"/system/bin/service", "call", "audio", setVolumeCall}
+	muteArgv      = []string{"/system/bin/service", "call", "audio", setMuteCall}
 
 	setVolumeCommand = func(ctx context.Context, args []string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, setVolumeArgv[0], args[1:]...)
@@ -39,6 +41,24 @@ func SetMusicVolume(step int) error {
 	}
 	if !volumeTaken(string(out)) {
 		return fmt.Errorf("volume: step %d was answered with %q", step, firstLine(out))
+	}
+	return nil
+}
+
+func SetMusicMute(on bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), setVolumeTimeout)
+	defer cancel()
+	state := "0"
+	if on {
+		state = "1"
+	}
+	args := append(append([]string(nil), muteArgv...), "i32", streamMusic, "i32", state)
+	out, err := setVolumeCommand(ctx, args)
+	if err != nil {
+		return fmt.Errorf("volume: the mute was refused: %w", err)
+	}
+	if !volumeTaken(string(out)) {
+		return fmt.Errorf("volume: the mute was answered with %q", firstLine(out))
 	}
 	return nil
 }

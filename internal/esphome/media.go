@@ -14,6 +14,7 @@ import (
 // From aioesphomeapi's MediaPlayerEntityFeature.
 const (
 	featVolumeSet     = 1 << 2
+	featVolumeMute    = 1 << 3
 	featPlayMedia     = 1 << 9
 	featVolumeStep    = 1 << 10
 	featMediaAnnounce = 1 << 20
@@ -23,6 +24,8 @@ const (
 	mediaStateIdle    = 1
 	mediaStatePlaying = 2
 
+	mediaMute       = 3
+	mediaUnmute     = 4
 	mediaVolumeUp   = 6
 	mediaVolumeDown = 7
 )
@@ -73,6 +76,9 @@ func (s *Server) mediaFeatures() uint32 {
 	var flags uint32
 	if s.CanSetVolume() {
 		flags |= featVolumeSet | featVolumeStep
+	}
+	if s.CanMute() {
+		flags |= featVolumeMute
 	}
 	if s.play != nil {
 		flags |= featPlayMedia | featMediaAnnounce
@@ -260,6 +266,57 @@ func (s *Server) UseVolumeSetter(set func(step int) error) {
 	s.volumeSet = set
 }
 
+func (s *Server) UseMute(set func(on bool)) {
+	s.muteSet = set
+}
+
+func (s *Server) CanMute() bool { return s.muteSet != nil }
+
+func (s *Server) SetSpeakerMute(on bool) {
+	if !s.CanMute() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queueMuteLocked(on)
+}
+
+func (s *Server) setMuteLocked(conn *conn, on bool) {
+	s.queueMuteLocked(on)
+	conn.noted = fmt.Sprintf("esphome api: %s set the mute to %v",
+		conn.sock.RemoteAddr(), on)
+}
+
+func (s *Server) queueMuteLocked(on bool) {
+	s.muteWant, s.muteHasPending = on, true
+	if s.muteWorking {
+		return
+	}
+	s.muteWorking = true
+	go s.muteWorker()
+}
+
+func (s *Server) muteWorker() {
+	for {
+		s.mu.Lock()
+		if !s.muteHasPending {
+			s.muteWorking = false
+			s.mu.Unlock()
+			return
+		}
+		on := s.muteWant
+		s.muteHasPending = false
+		s.mu.Unlock()
+
+		s.muteSet(on)
+
+		select {
+		case s.liveWake <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (s *Server) setVolumeLocked(conn *conn, want volumeWant) {
 	s.queueVolumeLocked(want)
 	conn.noted = fmt.Sprintf("esphome api: %s set the volume to %s",
@@ -282,12 +339,12 @@ func (s *Server) queueVolumeLocked(want volumeWant) {
 
 func (s *Server) CanSetVolume() bool { return s.volumeSet != nil }
 
-func (s *Server) SpeakerVolume() (percent int, ok bool) {
-	step, max, ok := s.readVolumeStep()
+func (s *Server) SpeakerLevel() (percent int, muted, ok bool) {
+	step, max, muted, ok := s.readVolumeStep()
 	if !ok {
-		return 0, false
+		return 0, false, false
 	}
-	return int(math.Round(float64(step) * 100 / float64(max))), true
+	return int(math.Round(float64(step) * 100 / float64(max))), muted, true
 }
 
 func (s *Server) SetSpeakerVolume(percent int) {
@@ -325,10 +382,17 @@ func (s *Server) setVolume(want volumeWant) {
 }
 
 func (s *Server) applyVolume(want volumeWant) {
-	step, max, ok := s.readVolumeStep()
+	step, max, muted, ok := s.readVolumeStep()
 	if !ok {
 		s.untrustedLog.Printf("volume: asked for %s, and the level could not be read", want)
 		return
+	}
+	if muted && s.CanMute() {
+		s.muteSet(false)
+		if !want.absolute {
+			s.untrustedLog.Printf("volume: %s lifted the mute and moved nothing", want)
+			return
+		}
 	}
 	target := clampStep(want.target(step, max), max)
 	if target == step {
@@ -346,7 +410,7 @@ func (s *Server) setStep(target, max int, want volumeWant) {
 		s.untrustedLog.Printf("volume: %v", err)
 		return
 	}
-	switch at, _, ok := s.readVolumeStep(); {
+	switch at, _, _, ok := s.readVolumeStep(); {
 	case !ok:
 		s.untrustedLog.Printf("volume: asked for step %d of %d, and the level could not be"+
 			" read back", target, max)
@@ -365,14 +429,14 @@ func (w volumeWant) target(step, max int) int {
 	return base + w.steps
 }
 
-func (s *Server) readVolumeStep() (step, max int, ok bool) {
+func (s *Server) readVolumeStep() (step, max int, muted, ok bool) {
 	v := s.volumes()
 	occupied, jackKnown := s.jack()
 	step, _, ok = activeVolume(v, occupied, jackKnown)
 	if !ok || v.Max <= 0 {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	return step, v.Max, true
+	return step, v.Max, v.Muted, true
 }
 
 func clampStep(step, max int) int {

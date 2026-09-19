@@ -32,7 +32,7 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 	keys := testKeys(t)
 	volume := &fakeVolume{at: 40, ok: true}
 	cfg := testConfig()
-	cfg.Volume, cfg.SetVolume = volume.read, volume.set
+	cfg.Level, cfg.SetVolume, cfg.SetMute = volume.level, volume.set, volume.mute
 	client := &Client{
 		Config:      cfg,
 		Keys:        keys,

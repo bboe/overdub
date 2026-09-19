@@ -188,9 +188,14 @@ type Server struct {
 	wifi      func() (float32, bool)
 	volumes   func() device.MusicVolume
 	volumeSet func(step int) error
-	jack      func() (bool, bool)
-	sound     func() (bool, bool)
-	micMute   func() (bool, bool)
+	muteSet   func(on bool)
+
+	muteWant       bool
+	muteHasPending bool
+	muteWorking    bool
+	jack           func() (bool, bool)
+	sound          func() (bool, bool)
+	micMute        func() (bool, bool)
 
 	sendspinOn  func() bool
 	sendspinSet func(bool)
@@ -725,6 +730,10 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			s.playLocked(conn, url, announcement)
 		case hasVolume && volumeIsFloat && isFinite(volume):
 			s.setVolumeLocked(conn, volumeWant{fraction: volume, absolute: true})
+		case hasCommand && command == mediaMute:
+			s.setMuteLocked(conn, true)
+		case hasCommand && command == mediaUnmute:
+			s.setMuteLocked(conn, false)
 		case hasCommand && command == mediaVolumeUp:
 			s.setVolumeLocked(conn, volumeWant{steps: 1})
 		case hasCommand && command == mediaVolumeDown:

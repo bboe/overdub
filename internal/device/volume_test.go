@@ -60,3 +60,39 @@ func TestAVolumeTheServiceTookIsNotAnError(t *testing.T) {
 		t.Errorf("a reply carrying no exception was read as a failure: %v", err)
 	}
 }
+
+func TestAMuteIsSetOnTheStreamTheMusicPlaysOn(t *testing.T) {
+	was := setVolumeCommand
+	defer func() { setVolumeCommand = was }()
+
+	for on, want := range map[bool]string{
+		true:  "/system/bin/service call audio 8 i32 3 i32 1",
+		false: "/system/bin/service call audio 8 i32 3 i32 0",
+	} {
+		var got []string
+		setVolumeCommand = func(_ context.Context, args []string) ([]byte, error) {
+			got = args
+			return []byte("Result: Parcel(00000000    '....')\n"), nil
+		}
+		if err := SetMusicMute(on); err != nil {
+			t.Fatalf("SetMusicMute(%v): %v", on, err)
+		}
+		if line := strings.Join(got, " "); line != want {
+			t.Errorf("the call was %q, want %q: the transaction number is this build's"+
+				" rather than stock android's, and a wrong one writes something else"+
+				" in silence", line, want)
+		}
+	}
+}
+
+func TestAMuteTheServiceRefusedIsAnError(t *testing.T) {
+	was := setVolumeCommand
+	defer func() { setVolumeCommand = was }()
+	setVolumeCommand = func(context.Context, []string) ([]byte, error) {
+		return []byte("Result: Parcel(NULL)\n"), nil
+	}
+	if err := SetMusicMute(true); err == nil {
+		t.Error("a refused mute was taken as one that landed, so the volume keys are" +
+			" held for a mute that is not set")
+	}
+}

@@ -50,7 +50,9 @@ Taking the action button takes it from Alexa. Stopping a timer or an alarm with
 it, press-to-talk, and holding it to enter setup mode all stop working while the
 daemon holds it. The `Action button mode` select gives it back without stopping
 anything else, so the Dot keeps reporting and keeps its entities while Alexa
-has her button. Mute and the volume keys are untouched throughout.
+has her button. The microphone mute key is untouched throughout, and the volume
+keys are too except while the Dot is muted, when they are held so that a press
+lifts the mute.
 
 ## How this differs from EchoMuse, echolocal and EchoGo
 
@@ -105,7 +107,7 @@ The buttons on this hardware:
 | `/dev/input/event2` | `keys` (gpio-keys) | 115 volume up, 114 volume down |
 
 The daemon opens `event1` and takes keycode 138 from it, re-emitting the rest.
-`event2` is listed for orientation only: nothing here opens it. To check them on
+`event2` is opened only while the Dot is muted, to hold the volume keys. To check them on
 another device, FireOS already ships the tools:
 
 ```sh
@@ -340,7 +342,7 @@ Dot's own firewall.
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
 | `binary_sensor.<name>_alexa_registered` | diagnostic | whether the Dot holds an Amazon account, which is what setup gives it; a Dot that was never set up, or that deregistered itself, reads off while the button and the rest of this list go on working |
-| `media_player.<name>_speaker` | none | the volume, the control that changes it, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
+| `media_player.<name>_speaker` | none | the volume, the mute, the controls that change them, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
 | `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
 | `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
 | `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
@@ -380,6 +382,14 @@ volume at four in the morning no longer wakes the room.
 Music Assistant can set it too, over Sendspin, and the same is true there. A
 Dot that offers no volume is left out of the group volume a server works out,
 so these are now part of it.
+
+**Muting holds the volume keys.** Android does not lift its own mute when a
+volume key is pressed -- it leaves the mute set and quietly resets the level to
+one step -- so while the Dot is muted the daemon takes the keys, and the first
+press lifts the mute and moves nothing. A second press then moves the volume as
+usual. Two things follow: nothing else on the Dot sees a volume press while it
+is muted, and Alexa's advanced factory reset, which is mute and volume down held
+together, cannot complete until the mute is lifted.
 
 `volume` is the speaker's own level and `jack_volume` is the socket's. Android
 keeps a level per route and switches between them when you plug something in,

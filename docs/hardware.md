@@ -53,17 +53,25 @@ adb shell 'su -c "dumpsys audio"' | sed -n '/^- STREAM_MUSIC:/,/^- STREAM_ALARM:
 adb shell 'su -c "input keyevent 25"'    # volume down one step; 24 is up
 ```
 
-`Mute count` is 0 on this Dot and nothing found so far moves it. "Alexa, mute"
-sets the speaker's level to 0 and leaves every stream's count at 0, which is why
-the ordinary level path reports a muted Echo correctly and the parser's muted
-branch has never been seen to run. `input keyevent 164` does nothing at all,
-and stepping below zero clamps rather than muting -- both consistent with API
-22, where `ADJUST_TOGGLE_MUTE` does not yet exist. The dump's `mute affected
-streams = 0x2e` does include `STREAM_MUSIC`, so the state is real and an app
-calling `setStreamMute` would produce it; nothing on this device does.
+`Mute count` moves only when something calls `setStreamMute`, which is
+transaction 8 on `IAudioService`. Nothing on the device does it on its own:
+"Alexa, mute" sets the speaker's level to 0 and leaves every stream's count at
+0, `input keyevent 164` does nothing at all, and stepping below zero clamps
+rather than muting -- all consistent with API 22, where `ADJUST_TOGGLE_MUTE`
+does not yet exist. The dump's `mute affected streams = 0x2e` includes
+`STREAM_MUSIC`, which is why the call takes.
+
+**A volume key pressed while the stream is muted does not lift the mute, and
+destroys the level.** Measured: muted at step 5, one press left `Mute count` at
+1 and the stored level at **1**, because the muted index reads 0 and the press
+moves up from there. Unmuting then restores 1. This is why the daemon grabs
+`/dev/input/event2` for as long as it holds a mute; docs/sendspin.md carries
+the rest.
 
 A volume key pressed while Alexa-muted releases the mute and restores a level,
-so a probe that presses one is not a read-only observation of a muted Dot.
+so a probe that presses one is not a read-only observation of a muted Dot. That
+is Alexa's level-0 mute and not the stream mute above, which behaves the other
+way.
 
 **What a held key is worth.** Alexa's key handling is in
 `/system/priv-app/SpeechInteractionManager/SpeechInteractionManager.apk`, and two
