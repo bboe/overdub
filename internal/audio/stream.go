@@ -22,6 +22,13 @@ const (
 	anchorSlip = 50 * time.Millisecond
 	slipRuns   = 3
 
+	deadBand   = ChimeRate / 200
+	softStep   = 21 * ChimeRate / 1000000
+	easeApart  = 200
+	snapAbove  = ChimeRate / 20
+	smoothOver = 50
+	smoothBits = 10
+
 	observeEvery = 10
 	blindAfter   = 100
 
@@ -41,9 +48,38 @@ func frameTime(n int64) time.Duration {
 func frameCount(d time.Duration) int64 { return int64(d) * ChimeRate / int64(time.Second) }
 
 type queued struct {
-	at  time.Time
-	pcm []int16
-	off int
+	at    time.Time
+	pcm   []int16
+	off   int
+	eased bool
+	soft  bool
+	seam  bool
+	place int64
+}
+
+func blend(block []int16, from, to int16) {
+	n := int64(len(block)) + 1
+	for i := range block {
+		step := (int64(to) - int64(from)) * int64(i+1) / n
+		block[i] = int16(int64(from) + step)
+	}
+}
+
+func (s *Stream) smoothed(err int64) int64 {
+	s.smooth += ((err << smoothBits) - s.smooth) / smoothOver
+	return s.smooth >> smoothBits
+}
+
+func ease(err int64) int64 {
+	step := int64(max(1, softStep))
+	switch {
+	case err >= deadBand:
+		return min(err, step)
+	case err <= -deadBand:
+		return max(err, -step)
+	default:
+		return 0
+	}
 }
 
 type Stream struct {
@@ -75,7 +111,13 @@ type Stream struct {
 	placed  int64
 	silence int64
 	late    int64
+	eased   int64
 	slips   int
+
+	began   bool
+	lastOut int16
+	smooth  int64
+	easedAt int64
 }
 
 func (s *Stream) report(format string, args ...any) {
@@ -115,6 +157,9 @@ func (s *Stream) Write(at time.Time, pcm []byte) error {
 	i := len(s.queue)
 	for i > 0 && s.queue[i-1].at.After(at) && s.queue[i-1].off == 0 {
 		i--
+	}
+	if i < len(s.queue) {
+		s.queue[i].eased = false
 	}
 	s.queue = slices.Insert(s.queue, i, queued{at: at, pcm: decode(pcm)})
 	s.held += frames
@@ -160,6 +205,7 @@ func (s *Stream) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queue, s.held = nil, 0
+	s.began, s.smooth, s.easedAt = false, 0, 0
 }
 
 func (s *Stream) Close() {
@@ -169,14 +215,16 @@ func (s *Stream) Close() {
 		return
 	}
 	s.closed = true
-	placed, silence, late, slips := s.placed, s.silence, s.late, s.slips
+	placed, silence, late := s.placed, s.silence, s.late
+	eased, slips := s.eased, s.slips
 	anchored, held := s.anchored, s.held
 	s.mu.Unlock()
 
 	if anchored {
 		s.report("audio: the stream placed %s of audio against %s of silence, dropped %s"+
-			" that arrived late, and was placed again %d times", frameTime(placed),
-			frameTime(silence), frameTime(late), slips)
+			" that arrived late, eased %s onto the server's clock, and was placed again"+
+			" %d times", frameTime(placed), frameTime(silence), frameTime(late),
+			frameTime(eased), slips)
 	} else {
 		s.report("audio: the stream never learned where the player had reached, so it"+
 			" played %s of silence and threw away the %s it was holding",
@@ -202,32 +250,70 @@ func (s *Stream) read(block []int16) (int, bool) {
 	}
 	clear(block)
 	filled := 0
+	blended, trimmed := 0, 0
 	if s.anchored {
-		filled = s.fill(block)
+		filled, blended, trimmed = s.fill(block)
 	}
 	s.placed += int64(filled)
-	s.silence += int64(len(block) - filled)
+	s.silence += int64(len(block) - filled - blended)
+	s.eased += int64(blended + trimmed)
 	s.index += int64(len(block))
 	s.blocks++
 	return len(block), true
 }
 
-func (s *Stream) fill(block []int16) int {
-	pos, filled := 0, 0
+func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
+	pos := 0
 	for pos < len(block) && len(s.queue) > 0 {
 		c := &s.queue[0]
-		start := s.frameAt(c.at) + int64(c.off)
-		left := int64(len(c.pcm) - c.off)
+		if len(c.pcm) == 0 {
+			s.queue = s.queue[1:]
+			continue
+		}
 		want := s.index + int64(pos)
+		if !c.eased {
+			err := s.frameAt(c.at) - want
+			step := int64(0)
+			if held := s.smoothed(err); s.index-s.easedAt >= easeApart {
+				step = ease(held)
+			}
+			if step != 0 {
+				s.easedAt = s.index
+			}
+			if !s.began || err > snapAbove || err < -snapAbove {
+				step, s.smooth = err, 0
+			}
+			c.eased = true
+			c.soft = step != err
+			c.place = want + step
+		}
+		start := c.place + int64(c.off)
+		left := int64(len(c.pcm) - c.off)
 		switch {
 		case start+left <= want:
 			s.drop(left)
 		case start < want:
+			c.seam = true
+			if c.soft {
+				trimmed += int(want - start)
+				s.trim(want - start)
+				break
+			}
 			s.skip(want - start)
 		case start > want:
-			pos += int(min(start-want, int64(len(block)-pos)))
+			n := min(start-want, int64(len(block)-pos))
+			if c.soft {
+				blend(block[pos:pos+int(n)], s.lastOut, c.pcm[c.off])
+				blended += int(n)
+			}
+			pos += int(n)
 		default:
 			n := copy(block[pos:], c.pcm[c.off:])
+			if c.soft && c.seam && n > 0 {
+				c.seam = false
+				block[pos] = int16((int64(s.lastOut) + int64(block[pos])) / 2)
+			}
+			s.lastOut, s.began = block[pos+n-1], true
 			c.off += n
 			s.held -= int64(n)
 			pos, filled = pos+n, filled+n
@@ -236,13 +322,21 @@ func (s *Stream) fill(block []int16) int {
 			}
 		}
 	}
-	return filled
+	if pos < len(block) {
+		s.lastOut = 0
+	}
+	return filled, blended, trimmed
 }
 
 func (s *Stream) drop(frames int64) {
 	s.late += frames
 	s.held -= frames
 	s.queue = s.queue[1:]
+}
+
+func (s *Stream) trim(frames int64) {
+	s.queue[0].off += int(frames)
+	s.held -= frames
 }
 
 func (s *Stream) skip(frames int64) {
@@ -319,6 +413,11 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 		return 0, 0, false
 	}
 	s.origin, s.originIndex = due, s.index
+	for i := range s.queue {
+		if s.queue[i].off == 0 {
+			s.queue[i].eased = false
+		}
+	}
 	s.outside, s.slips = 0, s.slips+1
 	return 0, slip, true
 }

@@ -737,6 +737,20 @@ not condemn it -- it produced no evidence either way, which is what a guard
 against a rare failure should produce. It stays because what it guards against is
 silent and its own line is cheap.
 
+**Two numbers in the per-chunk correction were measured rather than derived.**
+`softStep`, `easeApart` and `snapAbove` come from the spec's suggested strategy
+and from `sendspin-go`'s window -- `easeApart` is its 0.5% figure applied to how
+often a frame may move, rather than to how far one chunk may be moved, so a
+server sending short chunks is still corrected. These two do not.
+
+- `deadBand` is **5 ms**, where the spec suggests ~100 us. The clock estimate
+  wobbles by milliseconds, so at 100 us the correction chased the instrument:
+  613 edits in 30 seconds, 303 of them undoing the other 303. At 5 ms the same
+  run made 168, all one direction -- the real crystal difference.
+- `smoothOver` is **50 chunks**, about a second. At 400 the average lagged far
+  enough to overshoot each crossing and oscillate: 1163 edits in 30 seconds,
+  nearly one per chunk.
+
 **The queue is ordered by when audio is due, not by when it arrived.** Only the
 head is ever examined, so one chunk stamped far ahead of the rest would sit there
 and hold everything behind it: no audio placed, nothing counted late, nothing

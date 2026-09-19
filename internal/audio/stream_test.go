@@ -348,11 +348,13 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 		t.Fatalf("a stream that ended said %d things; the only place the silence it"+
 			" inserted and the audio it dropped are readable is this line", len(lines))
 	}
-	want := []any{frameTime(BlockFrames), frameTime(BlockFrames), frameTime(240), 0}
+	want := []any{frameTime(BlockFrames), frameTime(BlockFrames), frameTime(240),
+		frameTime(0), 0}
 	for i, got := range lines[0] {
 		if got != want[i] {
 			t.Errorf("the line reports %v at position %d, want %v: one block of audio"+
-				" played, one of silence after it, and a chunk a second late dropped",
+				" played, one of silence after it, a chunk a second late dropped, and"+
+				" nothing eased",
 				got, i, want[i])
 		}
 	}
@@ -753,5 +755,192 @@ func TestAStreamThatWasNeverPlacedSaysWhatItThrewAway(t *testing.T) {
 		t.Errorf("closing said %q, which never names the %s it was still holding, so a"+
 			" stream that was never placed reports nothing it lost", said[0],
 			frameTime(1200))
+	}
+}
+
+func TestATimingErrorIsCorrectedOneFrameAtATime(t *testing.T) {
+	for _, c := range []struct {
+		err  int64
+		want int64
+	}{
+		{deadBand - 1, 0},
+		{-(deadBand - 1), 0},
+		{deadBand, 1},
+		{-deadBand, -1},
+		{ChimeRate, 1},
+		{-ChimeRate, -1},
+	} {
+		if got := ease(c.err); got != c.want {
+			t.Errorf("an error of %s was corrected by %d frames, want %d: chasing the"+
+				" whole error is what makes every clock revision audible",
+				frameTime(c.err), got, c.want)
+		}
+	}
+}
+
+func TestAnInsertedFrameRampsBetweenItsNeighbours(t *testing.T) {
+	block := make([]int16, 3)
+	blend(block, 0, 400)
+	for i, want := range []int16{100, 200, 300} {
+		if block[i] != want {
+			t.Errorf("inserted frame %d is %d, want %d: a repeated or silent frame is a"+
+				" step in the waveform, which is what a pure tone clicks on",
+				i, block[i], want)
+		}
+	}
+}
+
+func TestOneRevisionOfTheClockDoesNotMoveTheAudio(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	at := now
+	block := make([]int16, BlockFrames)
+	for i := range 8 {
+		if i == 4 {
+			at = at.Add(-3 * time.Millisecond)
+		}
+		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(BlockFrames))
+		s.read(block)
+	}
+	if s.late > 1 {
+		t.Errorf("a single 3ms revision cost %s of audio; one revision is the"+
+			" instrument moving, not the audio being late", frameTime(s.late))
+	}
+}
+
+func TestAnEmptyChunkIsNotPlacedRatherThanIndexed(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	s.began = true
+	s.smooth = int64(2*deadBand) << smoothBits
+	if err := s.Write(now.Add(2*time.Millisecond), nil); err != nil {
+		t.Fatalf("Write of an empty chunk: %v", err)
+	}
+	block := make([]int16, BlockFrames)
+	for range 10 {
+		s.read(block)
+	}
+	if len(s.queue) != 0 {
+		t.Errorf("the empty chunk is still queued, so it is still in front of whatever"+
+			" arrives next: %d entries", len(s.queue))
+	}
+	if s.placed != 0 || s.eased != 0 {
+		t.Errorf("a chunk carrying no audio placed %s and eased %s",
+			frameTime(s.placed), frameTime(s.eased))
+	}
+}
+
+func TestFramesEasedOntoTheClockAreNotCountedLate(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	at := now
+	block := make([]int16, BlockFrames)
+	for range 200 {
+		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(BlockFrames) - 200*time.Microsecond)
+		s.read(block)
+	}
+	if s.eased == 0 {
+		t.Fatal("a stream tracking a drifting clock eased nothing, so this says nothing")
+	}
+	if s.late != 0 {
+		t.Errorf("%s was counted late, and it was eased on purpose: the count is what"+
+			" separates a starved stream from a healthy one", frameTime(s.late))
+	}
+}
+
+func TestAReanchorLeavesAPartPlayedChunkWhereItIs(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	at := now
+	block := make([]int16, BlockFrames)
+	for range 3 {
+		if err := s.Write(at, level(2*BlockFrames, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(2 * BlockFrames))
+	}
+	s.read(block)
+	for range slipRuns {
+		s.place(Point{At: time.Now().Add(-60 * time.Millisecond)})
+	}
+	if filled, _, _ := s.fill(block); filled == 0 {
+		t.Error("a whole block after a re-anchor carried no audio: a chunk the mixer is" +
+			" partway through is placed against its own frame 0, so re-deciding it" +
+			" moves it by everything already played")
+	}
+}
+
+func TestFramesTrimmedToCatchUpAreNotSubtractedFromSilence(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	at := now
+	block := make([]int16, BlockFrames)
+	for range 3 {
+		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(BlockFrames))
+	}
+	for range 300 {
+		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(BlockFrames) - 200*time.Microsecond)
+		s.read(block)
+	}
+	if s.eased == 0 {
+		t.Fatal("nothing was eased, so this says nothing")
+	}
+	if s.silence < 0 {
+		t.Errorf("silence is %s: a frame dropped from the queue never reached a block,"+
+			" so it cannot stand in for one", frameTime(s.silence))
+	}
+}
+
+func TestABlockThatRanOutLeavesNothingToRampFrom(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	if err := s.Write(now, level(BlockFrames/2, 3000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	s.read(make([]int16, BlockFrames))
+	if s.lastOut != 0 {
+		t.Errorf("the stream ramps from %d after a block that ended in silence; the"+
+			" frames actually handed over were zeros, so an inserted frame would step"+
+			" half way out of nothing", s.lastOut)
+	}
+}
+
+func TestAShortChunkIsStillCorrected(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	at := now
+	short := BlockFrames / 8
+	block := make([]int16, BlockFrames)
+	for range 2000 {
+		if err := s.Write(at, level(short, 3000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		at = at.Add(frameTime(int64(short)) - 40*time.Microsecond)
+		if len(s.queue) >= 8 {
+			s.read(block)
+		}
+	}
+	if s.eased == 0 {
+		t.Error("a server sending short chunks got no correction at all, so the error" +
+			" runs until it passes snapAbove and the stream jumps 50 ms")
 	}
 }
