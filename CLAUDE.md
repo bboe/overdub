@@ -41,8 +41,9 @@ internal/alexa     her synthesizer: the intent that hands it a clip, and the
 internal/audio     the chime: the tones it is made of, and the OpenSL ES
                    player that sounds them; and the stream, which places a
                    server's audio on the frame the player says it belongs on
-internal/button    the exclusive grab, the clone, the read loop, and whether
-                   the action key is ours or Alexa's
+internal/button    the exclusive grab, the clone, the read loop, whether the
+                   action key is ours or Alexa's, and the volume keys held
+                   while the dot is muted
 internal/device    the Dot itself: its network, the firewall rule, network
                    adb, the microphone mute, the music volume, and a setting
                    that survives a reboot
@@ -96,6 +97,7 @@ evening.
 | before you | read |
 |---|---|
 | change what a key press does -- the grab, the clone, the modes, the gestures | `docs/button.md` |
+| touch the volume keys, or the grab the mute holds them with | `docs/api.md` |
 | add or change an entity, or touch the polls, the deadlines, or the key | `docs/api.md` |
 | touch the mDNS responder, or what a service advertises | `docs/mdns.md` |
 | turn on network adb, touch the microphone mute, or persist a setting | `docs/device.md` |

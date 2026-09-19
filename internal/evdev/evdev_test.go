@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"syscall"
@@ -227,5 +228,30 @@ func TestUserDevTruncatesALongName(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint16(buf[80:]); got != 0x0019 {
 		t.Errorf("a long name overwrote bustype: 0x%04x", got)
+	}
+}
+
+func TestAFailedIoctlIsReportedRatherThanReadAsZero(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	id, err := DeviceID(r)
+	if err == nil {
+		t.Fatalf("DeviceID on a pipe reported no error and returned %+v", id)
+	}
+	if id != (InputID{}) {
+		t.Errorf("DeviceID returned %+v alongside its error", id)
+	}
+
+	keys, err := DeviceKeys(r)
+	if err == nil {
+		t.Fatalf("DeviceKeys on a pipe reported no error and returned %v", keys)
+	}
+	if err := Grab(r, true); err == nil {
+		t.Fatal("Grab on a pipe reported no error")
 	}
 }

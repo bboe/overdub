@@ -977,9 +977,10 @@ func TestTheVolumeCrossesToSendspinAsAPercentage(t *testing.T) {
 	if !s.CanSetVolume() {
 		t.Fatal("a server wired to set a level says it cannot, so sendspin offers no volume")
 	}
-	if got, ok := s.SpeakerVolume(); !ok || got != 20 {
-		t.Errorf("SpeakerVolume is %d (ok=%v), want 20: step 6 of 30 is what sendspin"+
-			" reports, and 0-100 is the only scale the protocol has", got, ok)
+	if got, muted, ok := s.SpeakerLevel(); !ok || got != 20 || muted {
+		t.Errorf("SpeakerLevel is %d muted=%v (ok=%v), want 20 unmuted: step 6 of 30 is"+
+			" what sendspin reports, and 0-100 is the only scale the protocol has",
+			got, muted, ok)
 	}
 
 	s.SetSpeakerVolume(50)
@@ -1004,5 +1005,224 @@ func TestAServerCannotSetALevelThereIsNothingToSetWith(t *testing.T) {
 	waitVolumeIdle(t, s)
 	if speaker, _, _ := f.state(); speaker != 6 {
 		t.Errorf("the speaker moved to %d with nothing wired to move it", speaker)
+	}
+}
+
+func wireFakeMute(s *Server, f *fakeVolume) *int {
+	calls := 0
+	s.muteSet = func(on bool) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		calls++
+		f.v.Muted = on
+	}
+	return &calls
+}
+
+func waitMuteIdle(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		busy := s.muteWorking || s.muteHasPending
+		s.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the mute worker never went idle")
+}
+
+func TestTheMuteIsOfferedOnlyWhenThereIsAMuteToSet(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	wireFakeVolume(s, 6, 30)
+	if got := s.mediaFeatures(); got&featVolumeMute != 0 {
+		t.Errorf("feature_flags %d offers a mute with nothing behind it; home assistant"+
+			" draws a control that cannot act", got)
+	}
+	wireFakeMute(s, &fakeVolume{})
+	if got := s.mediaFeatures(); got&featVolumeMute == 0 {
+		t.Errorf("feature_flags %d offers no mute on a dot that can mute", got)
+	}
+}
+
+func muteWireCommand(key uint32, command uint64) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(2, true)
+	p.u32(3, uint32(command))
+	return p.b
+}
+
+func TestAMuteCommandOffTheWireReachesTheDevice(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command uint64
+		want    bool
+	}{
+		{"mute", mediaMute, true},
+		{"unmute", mediaUnmute, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := testServer(t, testPSK(t))
+			f := wireFakeVolume(s, 6, 30)
+			wireFakeMute(s, f)
+			f.v.Muted = !tt.want
+
+			c := &conn{sock: fakeAddr{}}
+			if err := s.handle(c, msgMediaPlayerCmd, muteWireCommand(s.keySpeaker, tt.command)); err != nil {
+				t.Fatalf("a %s command was an error: %v", tt.name, err)
+			}
+			waitMuteIdle(t, s)
+
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.v.Muted != tt.want {
+				t.Errorf("the device is muted=%v after a %s command off the wire, want %v",
+					f.v.Muted, tt.name, tt.want)
+			}
+		})
+	}
+}
+
+func TestAMuteCommandReachesTheDevice(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command uint64
+		want    bool
+	}{
+		{"mute", mediaMute, true},
+		{"unmute", mediaUnmute, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := testServer(t, testPSK(t))
+			f := wireFakeVolume(s, 6, 30)
+			calls := wireFakeMute(s, f)
+			f.v.Muted = !tt.want
+
+			c := &conn{sock: fakeAddr{}}
+			s.mu.Lock()
+			s.setMuteLocked(c, tt.want)
+			s.mu.Unlock()
+			waitMuteIdle(t, s)
+
+			f.mu.Lock()
+			got := f.v.Muted
+			f.mu.Unlock()
+			if got != tt.want || *calls != 1 {
+				t.Errorf("the device is muted=%v after %d calls, want %v after 1",
+					got, *calls, tt.want)
+			}
+		})
+	}
+}
+
+func TestTwoMutesArrivingTogetherLeaveTheLastOne(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	wireFakeMute(s, f)
+
+	c := &conn{sock: fakeAddr{}}
+	s.mu.Lock()
+	s.setMuteLocked(c, true)
+	s.setMuteLocked(c, false)
+	s.mu.Unlock()
+	waitMuteIdle(t, s)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.v.Muted {
+		t.Error("a mute and an unmute arriving together left the dot muted; the second" +
+			" names where to be, so it answers the first rather than queueing behind it")
+	}
+}
+
+func TestTheMuteCrossesOnTheSameReadAsTheLevel(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	reads := 0
+	inner := s.volumes
+	s.volumes = func() device.MusicVolume {
+		reads++
+		return inner()
+	}
+	f.v.Muted = true
+
+	percent, muted, ok := s.SpeakerLevel()
+	if !ok || !muted || percent != 20 {
+		t.Errorf("SpeakerLevel is %d muted=%v (ok=%v), want 20 muted", percent, muted, ok)
+	}
+	if reads != 1 {
+		t.Errorf("the level and the mute cost %d reads of the dump, want 1: each one"+
+			" forks dumpsys, and the poll that asks for both runs on a tick shorter"+
+			" than two of them", reads)
+	}
+
+	f.v.SpeakerOK, f.v.JackOK = false, false
+	if _, _, ok := s.SpeakerLevel(); ok {
+		t.Error("a dump with no readable route still answered, so sendspin reports a guess")
+	}
+}
+
+func TestAVolumeSetWhileMutedLandsAndStaysMuted(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	wireFakeMute(s, f)
+	f.v.Muted = true
+
+	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
+	waitVolumeIdle(t, s)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.v.Muted {
+		t.Error("a level set from home assistant lifted the mute; only the keys on the" +
+			" dot do that, and a slider that unmutes makes the mute unholdable")
+	}
+	if f.v.SpeakerStep != 15 {
+		t.Errorf("the level landed on %d, want 15: the dump keeps the step a mute is"+
+			" holding, so a set while muted counts from the right number", f.v.SpeakerStep)
+	}
+}
+
+func TestAVolumeStepWhileMutedCountsFromTheLevelTheMuteHolds(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+	wireFakeMute(s, f)
+	f.v.Muted = true
+
+	askVolume(s, volumeWant{steps: 1})
+	waitVolumeIdle(t, s)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.v.Muted {
+		t.Error("a step from home assistant lifted the mute")
+	}
+	if f.v.SpeakerStep != 7 {
+		t.Errorf("a step while muted left the level at %d, want 7: the mute zeroes the"+
+			" percentage and not the step, so a step counts from 6 rather than 0",
+			f.v.SpeakerStep)
+	}
+}
+
+func TestAMuteOffTheWireWithNothingToSetItDoesNotPanic(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	wireFakeVolume(s, 6, 30)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, muteWireCommand(s.keySpeaker, mediaMute)); err != nil {
+		t.Fatalf("a mute command with no mute wired was an error: %v", err)
+	}
+	waitMuteIdle(t, s)
+
+	if !strings.Contains(c.noted, "nothing") {
+		t.Errorf("the line says %q, and nothing in it says the mute reached nothing:"+
+			" a peer holding the key can send command 3 whatever the feature flags"+
+			" say, and the worker would call a setter that is not there", c.noted)
 	}
 }

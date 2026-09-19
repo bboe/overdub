@@ -78,6 +78,26 @@ func Unmarshal(b []byte) Event {
 	}
 }
 
+func control(f *os.File, call func(fd uintptr) error) error {
+	conn, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	inner := error(nil)
+	if err := conn.Control(func(fd uintptr) { inner = call(fd) }); err != nil {
+		return err
+	}
+	return inner
+}
+
+func ioctlPtr(fd uintptr, req uint, p unsafe.Pointer) error {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(req), uintptr(p))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 func ioctl(fd uintptr, req uint, arg uintptr) error {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(req), arg)
 	if errno != 0 {
@@ -95,7 +115,9 @@ type InputID struct {
 
 func DeviceID(f *os.File) (InputID, error) {
 	buf := make([]byte, idBytes)
-	if err := ioctl(f.Fd(), eviocgid, uintptr(unsafe.Pointer(&buf[0]))); err != nil {
+	if err := control(f, func(fd uintptr) error {
+		return ioctlPtr(fd, eviocgid, unsafe.Pointer(&buf[0]))
+	}); err != nil {
 		return InputID{}, fmt.Errorf("EVIOCGID: %w", err)
 	}
 	return idFromBytes(buf), nil
@@ -112,7 +134,9 @@ func idFromBytes(buf []byte) InputID {
 
 func DeviceKeys(f *os.File) ([]uint16, error) {
 	buf := make([]byte, keyBytes)
-	if err := ioctl(f.Fd(), eviocgbitKey, uintptr(unsafe.Pointer(&buf[0]))); err != nil {
+	if err := control(f, func(fd uintptr) error {
+		return ioctlPtr(fd, eviocgbitKey, unsafe.Pointer(&buf[0]))
+	}); err != nil {
 		return nil, fmt.Errorf("EVIOCGBIT(EvKey): %w", err)
 	}
 	return keysFromBitmap(buf), nil
@@ -133,7 +157,7 @@ func Grab(f *os.File, on bool) error {
 	if on {
 		v = 1
 	}
-	if err := ioctl(f.Fd(), eviocgrab, v); err != nil {
+	if err := control(f, func(fd uintptr) error { return ioctl(fd, eviocgrab, v) }); err != nil {
 		return fmt.Errorf("eviocgrab(%v): %w", on, err)
 	}
 	return nil

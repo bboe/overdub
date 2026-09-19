@@ -318,6 +318,32 @@ brings it back five seconds later with the button ungrabbed each time, so one
 peer repeating one empty frame is a reboot loop. Each guard has a test that
 panics without it, rather than one that reads the code back.
 
+**`os.File.Fd()` takes the descriptor out of Go's poller, and nothing says
+so.** It calls `pfd.SetBlocking()`, after which `Close()` can no longer interrupt
+a `Read` blocked on that file: the reader waits for a byte that may never come,
+holding a goroutine, a thread and the fd, and a reader stranded that way later
+acts on an event meant for whoever replaced it. Measured on `linux/arm/v7`:
+through `Fd()` a blocked read survives `Close`; through `SyscallConn().Control`
+the same read returns `file already closed`. So every ioctl in `internal/evdev`
+goes through `Control`.
+
+That is the package's rule rather than any one call's, because it has been
+arrived at twice. `Grab` was fixed on its own first, and a keycode check added
+two commits later reintroduced it through `DeviceKeys`, on the same descriptor,
+with the earlier fix still in place beside it. `/dev/uinput` still uses `Fd()`
+and is not the same case: nothing ever reads it.
+
+**A pointer converted to `uintptr` for a syscall has to be converted in that
+syscall's own argument list.** Anywhere else the compiler stops tracking it as a
+pointer, so a stack copy moves the object and leaves the integer naming memory
+that has been handed back. The conversion and `syscall.Syscall` sharing a
+*source line* is not enough -- they must share a *frame*, which a helper in
+between quietly ends: `go build -gcflags=-m` reported `cannot inline control:
+cost 150 exceeds budget 80` while the buffers it was handed stayed on the stack.
+`ioctlPtr` therefore takes an `unsafe.Pointer` and converts it in the call, which
+is the one shape the rule names. `go vet`'s `unsafeptr` check does not look at
+this: it flags the reverse conversion only.
+
 **There is still no peer allowlist**, because ESPHome has no such concept. The
 key is the whole of the access control, and it guards what a peer can reach
 rather than whether it gets in: anything that can route to the Dot on `wlan0`

@@ -223,17 +223,24 @@ type Config struct {
 	MACAddress     string
 	UnpairedAccess bool
 	BufferCapacity int
-	Volume         func() (percent int, ok bool)
+	Level          func() (percent int, muted, ok bool)
 	SetVolume      func(percent int)
+	SetMute        func(on bool)
 }
 
-func (c Config) setsVolume() bool { return c.Volume != nil && c.SetVolume != nil }
+func (c Config) setsVolume() bool { return c.Level != nil && c.SetVolume != nil }
+
+func (c Config) setsMute() bool { return c.Level != nil && c.SetMute != nil }
 
 func (c Config) playerCommands() []string {
-	if !c.setsVolume() {
-		return []string{}
+	out := []string{}
+	if c.setsVolume() {
+		out = append(out, commandVolume)
 	}
-	return []string{commandVolume}
+	if c.setsMute() {
+		out = append(out, commandMute)
+	}
+	return out
 }
 
 func offeredPairMethods() map[string]pairMethod { return map[string]pairMethod{} }

@@ -7,8 +7,9 @@
 | `/dev/input/event1` | `mtk-kpd` | **138 = action ("dot")**, 113 = mute |
 | `/dev/input/event2` | `keys` (gpio-keys) | 115 volume up, 114 volume down |
 
-138 and 113 are the codes this project acts on; `event2` is listed for
-orientation, and nothing here opens it. The clone advertises every keycode
+138 and 113 are the codes this project acts on; `event2` is opened and grabbed
+only while the Dot is muted, so a press lifts the mute rather than moving a
+level nobody can hear. The clone advertises every keycode
 `event1` declares, because the input core drops events for a keycode it has not
 claimed. It declares `EV_KEY` alone, so events of any other type are dropped
 rather than re-emitted.
@@ -53,17 +54,31 @@ adb shell 'su -c "dumpsys audio"' | sed -n '/^- STREAM_MUSIC:/,/^- STREAM_ALARM:
 adb shell 'su -c "input keyevent 25"'    # volume down one step; 24 is up
 ```
 
-`Mute count` is 0 on this Dot and nothing found so far moves it. "Alexa, mute"
-sets the speaker's level to 0 and leaves every stream's count at 0, which is why
-the ordinary level path reports a muted Echo correctly and the parser's muted
-branch has never been seen to run. `input keyevent 164` does nothing at all,
-and stepping below zero clamps rather than muting -- both consistent with API
-22, where `ADJUST_TOGGLE_MUTE` does not yet exist. The dump's `mute affected
-streams = 0x2e` does include `STREAM_MUSIC`, so the state is real and an app
-calling `setStreamMute` would produce it; nothing on this device does.
+`Mute count` moves only when something calls `setStreamMute`, which is
+transaction 8 on `IAudioService`. Nothing on the device does it on its own:
+"Alexa, mute" sets the speaker's level to 0 and leaves every stream's count at
+0, `input keyevent 164` does nothing at all, and stepping below zero clamps
+rather than muting -- all consistent with API 22, where `ADJUST_TOGGLE_MUTE`
+does not yet exist. The dump's `mute affected streams = 0x2e` includes
+`STREAM_MUSIC`, which is why the call takes.
+
+The mute is the stream's and not a route's: `dumpsys` prints one `Mute count`
+per stream against one index per device, and muting leaves every index where it
+was -- measured, `speaker: 7, headset: 13, headphone: 21` unchanged under
+`Mute count: 1`. So it holds across the jack, confirmed by plugging one in while
+muted. The level does not: the speaker and the headset keep separate indices, so
+unmuting returns to whichever route is live.
+
+**A volume key pressed while the stream is muted does not lift the mute, and
+destroys the level.** Measured: muted at step 5, one press left `Mute count` at
+1 and the stored level at **1**, because the muted index reads 0 and the press
+moves up from there. Unmuting then restores 1. This is why the daemon grabs
+`/dev/input/event2` for as long as it holds a mute; docs/api.md carries the rest.
 
 A volume key pressed while Alexa-muted releases the mute and restores a level,
-so a probe that presses one is not a read-only observation of a muted Dot.
+so a probe that presses one is not a read-only observation of a muted Dot. That
+is Alexa's level-0 mute and not the stream mute above, which behaves the other
+way.
 
 **What a held key is worth.** Alexa's key handling is in
 `/system/priv-app/SpeechInteractionManager/SpeechInteractionManager.apk`, and two
@@ -95,8 +110,10 @@ from there rather than from wall-clock around the test:
 | `STATE_EXTREME_LONG` | 20.0s |
 
 - A stranded action button wipes the Dot 20s later.
-- A stranded mute is half the advanced-reset combo from 8s, and this daemon does
-  not grab `event2`, so the volume half comes from the user's own hand.
+- A stranded mute is half the advanced-reset combo from 8s. The volume half
+  comes from the user's own hand while the Dot is unmuted; while it is muted the
+  daemon holds `event2`, so the combo cannot complete at all until the mute is
+  lifted.
 - Mute alone is inert here and safe to hold: `MuteButtonHandler.onButtonPress`
   has no reset path, and its one long-hold branch is behind
   `hasSystemFeature("com.amazon.edge.enable_toggle_offline")`, which this Dot

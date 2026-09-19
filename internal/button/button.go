@@ -1,6 +1,7 @@
 // Package button owns the exclusive grab on the action button, the uinput device
-// that stands in for the real one while it is held, and a second uinput device
-// that stands in for nothing: the volume keys pressed on request.
+// that stands in for the real one while it is held, and a second grab: the
+// volume keys, held only while the Dot is muted so that a press lifts the mute
+// instead of moving a level nobody can hear.
 package button
 
 import (

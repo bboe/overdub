@@ -551,3 +551,20 @@ func TestWaitForIPv4StopsAtItsDeadlineAndOnItsChannel(t *testing.T) {
 			" sit behind the whole address wait", took)
 	}
 }
+
+func TestAMuteZeroesThePercentageAndNotTheStep(t *testing.T) {
+	v := parseMusicVolumes("- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n" +
+		"   Current: 2 (speaker): 15, 4 (headset): 9\n")
+	if !v.Muted {
+		t.Fatal("a stream with a mute count did not read as muted")
+	}
+	if v.Speaker != 0 || v.Jack != 0 {
+		t.Errorf("a muted stream reported %v%% and %v%%, want zero on both: zero is what"+
+			" can be heard", v.Speaker, v.Jack)
+	}
+	if v.SpeakerStep != 15 || v.JackStep != 9 {
+		t.Errorf("a muted stream reported steps %d and %d, want 15 and 9: the level a"+
+			" mute is holding is where a change counts from, so zeroing it makes every"+
+			" volume set while muted land at the bottom", v.SpeakerStep, v.JackStep)
+	}
+}

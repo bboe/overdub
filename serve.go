@@ -26,6 +26,7 @@ import (
 
 const (
 	inputNode  = "/dev/input/event1"
+	volumeNode = "/dev/input/event2"
 	actionKey  = 138
 	muteKey    = 113
 	uinputName = "mtk-kpd"
@@ -41,6 +42,7 @@ const (
 	sendspinLead   = 350
 
 	nodeWait    = 60 * time.Second
+	guardWait   = 2 * time.Second
 	addressWait = 5 * time.Minute
 	macWait     = 60 * time.Second
 	macRetry    = 30 * time.Second
@@ -238,6 +240,9 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	})
 
 	server.UseVolumeSetter(device.SetMusicVolume)
+	server.UseMute(setSpeakerMute)
+	useMuteLevel(server.SpeakerLevel)
+	go holdKeysIfMuted()
 
 	switch jar, registered, known := commandState(); {
 	case commandReady(jar, registered, known):
@@ -872,12 +877,166 @@ func keptDelay() (ms int, known bool) {
 	return sendspin.HoldDelayMS(delay), true
 }
 
-func speakerVolume() (int, bool) {
+type volumeGuard interface {
+	Wait() error
+	Close()
+}
+
+const volumeGuardTries = 3
+
+var muted struct {
+	mu    sync.Mutex
+	guard volumeGuard
+	lost  int
+}
+
+var (
+	mutePeer   = &untrustedlog.Log{Subject: "volume"}
+	muteSetter = device.SetMusicMute
+	muteLevel  func() (percent int, muted, ok bool)
+
+	muteGuard = func() (volumeGuard, error) { return button.GuardVolume(volumeNode, guardWait) }
+)
+
+func useMuteLevel(level func() (percent int, muted, ok bool)) {
+	muted.mu.Lock()
+	defer muted.mu.Unlock()
+	muteLevel = level
+}
+
+func setSpeakerMute(on bool) {
+	muted.mu.Lock()
+	defer muted.mu.Unlock()
+	setMuteLocked(on)
+}
+
+func setMuteLocked(on bool) {
+	if muteLevel == nil {
+		mutePeer.Printf("volume: a mute arrived before the level could be read, so" +
+			" there is nothing to hold the keys against")
+		return
+	}
+	_, was, known := muteLevel()
+	if on {
+		if !known || !was {
+			if err := muteSetter(true); err != nil {
+				mutePeer.Printf("volume: %v", err)
+				return
+			}
+		}
+		holdVolumeKeys()
+		return
+	}
+	if known && !was {
+		releaseVolumeGuard()
+		return
+	}
+	if err := muteSetter(false); err != nil {
+		mutePeer.Printf("volume: %v", err)
+		return
+	}
+	if _, still, ok := muteLevel(); ok && still {
+		mutePeer.Printf("volume: the mute did not lift, so the volume keys stay held")
+		return
+	}
+	releaseVolumeGuard()
+}
+
+func holdKeysIfMuted() {
+	muted.mu.Lock()
+	defer muted.mu.Unlock()
+	if muteLevel == nil {
+		log.Print("volume: the level is not wired yet, so a dot that came up muted" +
+			" holds none of its keys")
+		return
+	}
+	if _, on, ok := muteLevel(); !ok || !on {
+		return
+	}
+	log.Printf("volume: this dot came up muted, so the volume keys are held until" +
+		" something lifts it")
+	holdVolumeKeys()
+}
+
+func holdVolumeKeys() {
+	if muted.guard != nil {
+		return
+	}
+	guard, err := muteGuard()
+	if err != nil {
+		mutePeer.Printf("volume: the volume keys could not be held while muted, so a"+
+			" press moves a level nobody can hear: %v", err)
+		return
+	}
+	muted.guard = guard
+	go watchVolumeKeys(guard)
+}
+
+func watchVolumeKeys(guard volumeGuard) {
+	for {
+		if err := guard.Wait(); err != nil {
+			forgetVolumeGuard(guard)
+			return
+		}
+		muted.mu.Lock()
+		if muted.guard != guard {
+			muted.mu.Unlock()
+			return
+		}
+		setMuteLocked(false)
+		held := muted.guard == guard
+		muted.mu.Unlock()
+		if !held {
+			return
+		}
+	}
+}
+
+func forgetVolumeGuard(guard volumeGuard) {
+	muted.mu.Lock()
+	defer muted.mu.Unlock()
+	guard.Close()
+	if muted.guard != guard {
+		return
+	}
+	muted.guard = nil
+	if muteLevel == nil {
+		return
+	}
+	_, on, ok := muteLevel()
+	if !ok {
+		mutePeer.Printf("volume: the volume keys went away and the level could not be" +
+			" read, so they are left alone")
+		return
+	}
+	if !on {
+		return
+	}
+	muted.lost++
+	if muted.lost > volumeGuardTries {
+		mutePeer.Printf("volume: the volume keys went away %d times while muted, so"+
+			" they are left alone until the mute lifts", muted.lost)
+		return
+	}
+	mutePeer.Printf("volume: the volume keys were lost while muted, so they are held again")
+	holdVolumeKeys()
+}
+
+func releaseVolumeGuard() {
+	muted.lost = 0
+	if muted.guard == nil {
+		return
+	}
+	muted.guard.Close()
+	muted.guard = nil
+}
+
+func speakerLevel() (percent int, muted, ok bool) {
 	server := api.Load()
 	if server == nil {
-		return 0, false
+		return 0, false, false
 	}
-	return server.SpeakerVolume()
+	return server.SpeakerLevel()
 }
 
 func setSpeakerVolume(percent int) {
@@ -898,7 +1057,10 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 		BufferCapacity: sendspin.BufferCapacity,
 	}
 	if server := api.Load(); server != nil && server.CanSetVolume() {
-		config.Volume, config.SetVolume = speakerVolume, setSpeakerVolume
+		config.Level, config.SetVolume = speakerLevel, setSpeakerVolume
+		if server.CanMute() {
+			config.SetMute = server.SetSpeakerMute
+		}
 	}
 	return &sendspin.Client{
 		Config:         config,
