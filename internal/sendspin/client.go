@@ -132,6 +132,8 @@ type Client struct {
 	Peer *untrustedlog.Log
 	Play *untrustedlog.Log
 
+	stating sync.Mutex
+
 	mu        sync.Mutex
 	held      *Session
 	heldReady bool
@@ -477,7 +479,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if !stated {
 				ws.setIdle(idleWait)
 				go c.keepalive(ws, nc, stop, waitOr(c.pingEvery, pingAfter))
-				if err := c.state(session, available, c.heldDelay()); err != nil {
+				if err := c.state(session, available); err != nil {
 					return err
 				}
 				go c.keepTime(session, nc, stop)
@@ -510,7 +512,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 					available = c.Player != nil
 					c.holdReady(session, available)
 					c.Peer.Printf("sendspin: clock agreed with %q to within %d us", name, spread)
-					if err := c.state(session, available, c.heldDelay()); err != nil {
+					if err := c.state(session, available); err != nil {
 						return err
 					}
 				}
@@ -613,7 +615,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			c.keep()
 			once("sendspin: %q is setting this player's output delay, and every summary"+
 				" below says what it currently is", name)
-			if err := c.state(session, available, c.heldDelay()); err != nil {
+			if err := c.state(session, available); err != nil {
 				return err
 			}
 		case typeServerState:
@@ -691,7 +693,7 @@ func (c *Client) reportDelays(session *Session, nc net.Conn, stop <-chan struct{
 		if held != session {
 			continue
 		}
-		if err := c.state(session, available, c.heldDelay()); err != nil {
+		if err := c.state(session, available); err != nil {
 			c.Peer.Printf("sendspin: this player's output delay could not be reported,"+
 				" so its connection goes: %v", err)
 			nc.Close()
@@ -776,9 +778,11 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written 
 	}
 }
 
-func (c *Client) state(session *Session, available bool, delay time.Duration) error {
+func (c *Client) state(session *Session, available bool) error {
+	c.stating.Lock()
+	defer c.stating.Unlock()
 	player := &playerState{
-		StaticDelayMS:      int(delay / time.Millisecond),
+		StaticDelayMS:      int(c.heldDelay() / time.Millisecond),
 		RequiredLeadTimeMS: c.RequiredLeadMS,
 		MinBufferMS:        c.MinBufferMS,
 		SupportedCommands:  []string{commandStaticDelay},

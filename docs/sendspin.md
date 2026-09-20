@@ -1463,6 +1463,23 @@ docs/device.md carries the sweep. Within a run
 it outlives a connection as well, so a reconnect does not start from zero. The
 value that goes back out in `client/state` is whatever is currently applied.
 
+**Two writers send that summary, so the figure is read under the same lock that
+writes it.** The run loop answers a server's own command; a reporter goroutine
+answers Home Assistant's. Each used to read the delay, build the summary, and
+only then take the session's write lock, so two that overlap could reach the
+server in the order opposite to the one they read in. What that leaves is the
+older figure standing as the last thing reported, with nothing to correct it: the
+client believes it has answered, and every lead the server computes is for a delay
+this player no longer has. Reading the figure inside the lock makes the last write
+the last read. It costs one summary waiting on another for the length of a level
+read and a socket write. The write is a wait both already spent on the session's
+own lock; the level read is new, because it used to happen before that lock was
+taken. On this dot that read is the `dumpsys` exec docs/api.md measures at 18 ms,
+bounded by the one-second read timeout, and the two writers meet only when a
+server's own command arrives while Home Assistant or the volume poll is reporting.
+Caching the level to shorten a wait that rare is machinery bought for the
+uncommon case.
+
 **A change costs the log nothing, which took a second attempt.** The obvious line
 -- one per change, saying what the delay is now -- is a peer-driven write to
 `/data`, and Music Assistant's control is `immediate_apply`, so it sends a value

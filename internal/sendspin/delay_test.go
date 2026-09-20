@@ -6,6 +6,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -639,6 +640,52 @@ func sendCipher(t *testing.T) *noise.CipherState {
 		t.Fatal(err)
 	}
 	return mine
+}
+
+func TestTwoStateWritersLeaveTheServerWithTheFigureReadLast(t *testing.T) {
+	ln := listenLocal(t)
+	c, _ := playingClient(t)
+
+	building := make(chan struct{})
+	release := make(chan struct{})
+	var freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	var arm atomic.Bool
+	c.Config.Level = func() (int, bool, bool) {
+		if arm.CompareAndSwap(true, false) {
+			close(building)
+			<-release
+		}
+		return 50, false, true
+	}
+
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	arm.Store(true)
+	c.SetDelay(100)
+	<-building
+
+	asked := 200
+	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
+	waitFor(t, "the server's own delay to be taken", func() bool { return c.Delay() == 200 })
+
+	if !noStateWithin(t, peer, server, 300*time.Millisecond) {
+		t.Fatal("a summary went out while another writer still held a figure it had" +
+			" read and not yet written, so the two can reach the server in the order" +
+			" opposite to the one they were read in")
+	}
+	free()
+
+	if first := delaySet(t, peer, server); first != 100 {
+		t.Errorf("the first summary carried %d ms, want the 100 its writer read", first)
+	}
+	if second := delaySet(t, peer, server); second != 200 {
+		t.Errorf("the server was left holding %d ms, want the 200 it asked for: a"+
+			" summary written after a newer one leaves the server scheduling audio for"+
+			" a delay this player no longer has", second)
+	}
 }
 
 func TestADelayReportThisPlayerCannotWriteEndsTheConnection(t *testing.T) {
