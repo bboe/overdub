@@ -649,9 +649,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			case 1:
 				key = uint32(f.num)
 			case 2:
-				sawState = true
-				if f.wire == wireFixed32 {
-					want, isFloat = math.Float32frombits(uint32(f.num)), true
+				sawState, isFloat = true, f.wire == wireFixed32
+				if isFloat {
+					want = math.Float32frombits(uint32(f.num))
 				}
 			}
 		}); err != nil {
@@ -705,9 +705,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			case 4:
 				hasVolume = f.num != 0
 			case 5:
-				sawVolume = true
-				if f.wire == wireFixed32 {
-					volume, volumeIsFloat = math.Float32frombits(uint32(f.num)), true
+				sawVolume, volumeIsFloat = true, f.wire == wireFixed32
+				if volumeIsFloat {
+					volume = math.Float32frombits(uint32(f.num))
 				}
 			case 6:
 				hasURL = f.num != 0

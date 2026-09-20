@@ -267,6 +267,46 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 	}
 }
 
+func TestAVolumeCommandEndingInAVarintIsNotReadAsTheFloatBeforeIt(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	f := wireFakeVolume(s, 6, 30)
+
+	var last pb
+	last.fixed32(1, s.keySpeaker)
+	last.boolean(4, true)
+	last.float(5, 0.5)
+	last.u32(5, 1)
+
+	c := &conn{sock: fakeAddr{}}
+	if err := s.handle(c, msgMediaPlayerCmd, last.b); err != nil {
+		t.Fatalf("a media command carrying field 5 twice was an error: %v", err)
+	}
+	waitVolumeIdle(t, s)
+	if speaker, _, sets := f.state(); speaker != 6 || sets != 0 {
+		t.Errorf("a frame whose last field 5 is a varint left the speaker at %d after %d"+
+			" sets, want 6 after none: proto3 is last-occurrence-wins, so the float"+
+			" before it is the occurrence discarded", speaker, sets)
+	}
+
+	var first pb
+	first.fixed32(1, s.keySpeaker)
+	first.boolean(4, true)
+	first.u32(5, 1)
+	first.float(5, 0.5)
+
+	if err := s.handle(c, msgMediaPlayerCmd, first.b); err != nil {
+		t.Fatalf("a media command carrying field 5 twice was an error: %v", err)
+	}
+	waitVolumeIdle(t, s)
+	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+		t.Errorf("a frame whose last field 5 is a float left the speaker at %d after %d"+
+			" sets, want 15 after 1", speaker, sets)
+	}
+}
+
 func volumeCommand(key uint32, volume float32) []byte {
 	var p pb
 	p.fixed32(1, key)

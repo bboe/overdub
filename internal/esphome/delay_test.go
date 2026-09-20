@@ -122,6 +122,40 @@ func TestADelayCommandIsOnlyReadAsAFloat(t *testing.T) {
 	}
 }
 
+func TestADelayCommandEndingInAVarintIsNotReadAsTheFloatBeforeIt(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	var told []int
+	s.UseSendspinDelay(5000, func() int { return 900 }, func(ms int) { told = append(told, ms) })
+
+	var last pb
+	last.fixed32(1, s.keyDelay)
+	last.float(2, 1200)
+	last.u32(2, 1200)
+
+	c := &conn{out: make(chan frame, 32), sock: fakeAddr{}}
+	if err := s.handle(c, msgNumberCommand, last.b); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(told) != 0 {
+		t.Errorf("the delay was set to %v by a frame whose last field 2 is a varint:"+
+			" proto3 is last-occurrence-wins, so a float followed by a varint is the"+
+			" varint, which is not a figure this entity can be sent", told)
+	}
+
+	var first pb
+	first.fixed32(1, s.keyDelay)
+	first.u32(2, 1200)
+	first.float(2, 1200)
+
+	if err := s.handle(c, msgNumberCommand, first.b); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(told) != 1 || told[0] != 1200 {
+		t.Errorf("a frame whose last field 2 is a float set the delay to %v, want one"+
+			" 1200: the varint before it is the occurrence proto3 discards", told)
+	}
+}
+
 func TestADelayCommandIsHeldToWhatTheEntityOffers(t *testing.T) {
 	const maxMS = 5000
 	for _, tt := range []struct {

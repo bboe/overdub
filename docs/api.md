@@ -609,6 +609,13 @@ be zero -- it is a peer saying something the message does not allow, and treatin
 it as zero would step the Dot to silence on a malformed frame. The clamp bounds
 what a nonsense fraction can do, but the clamp is a floor rather than the check.
 
+A field sent twice is the **last** occurrence, which is how proto3 reads one and
+is not what asking whether a `fixed32` ever arrived answers. A frame carrying
+field 5 as a `fixed32` and then as a varint is the varint, and is refused the way
+a single varint is; the earlier float is an occurrence proto3 discards, and
+keeping it would set the volume from a field the peer went on to overwrite with
+something the message does not allow.
+
 **A level is set outright, through the same door the mic mute reads.**
 `service call audio 4 i32 3 i32 <step> i32 0 s16 overdub` is
 `IAudioService.setStreamVolume`, and `/system/bin/service` is a native binary
@@ -1079,7 +1086,9 @@ client rather than from being told.
 not a float that happens to be zero, and neither is a `NaN`: taking either as
 zero would move a playing stream by whatever the delay was, on a malformed frame.
 The figure is rounded and held to 0 through the maximum before it goes anywhere,
-because the range is Sendspin's own and one outside it is refused there.
+because the range is Sendspin's own and one outside it is refused there. Field 2
+sent twice is the last of the two, the same rule the media player's field 5
+carries and for the same reason.
 
 **A field that is absent is not that case, and reading it as one made 0
 unsendable.** proto3 leaves a zero-valued scalar off the wire, so a command for 0
