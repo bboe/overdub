@@ -1698,6 +1698,14 @@ go, so a figure moved in that window is reported when the role returns -- and
 only then, since a repeated activation that never lost the role costs neither a
 state nor a keepalive.
 
+A wake still in flight when the hold moves is dropped where it is read. The wake
+is posted to whatever held at the moment it was sent, so a release in between
+leaves a token addressed to a session that no longer answers for this player; the
+reporter reads the hold again after each wake and drops the token rather than
+writing. Only that race reaches it, so the test puts the client in the state the
+race produces -- holding one session, waking another -- rather than waiting for
+the two to collide.
+
 A write this player cannot make ends the connection, and that is not a choice
 about tidiness. `seal` advances the Noise nonce before the bytes reach the
 socket, so a write that fails leaves the sender at *n+1* and the peer expecting

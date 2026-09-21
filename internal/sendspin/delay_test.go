@@ -688,6 +688,55 @@ func TestTwoStateWritersLeaveTheServerWithTheFigureReadLast(t *testing.T) {
 	}
 }
 
+func TestADelayReportForASessionThisClientNoLongerHoldsIsDropped(t *testing.T) {
+	dead, far := net.Pipe()
+	far.Close()
+	t.Cleanup(func() { dead.Close() })
+
+	watched, other := net.Pipe()
+	t.Cleanup(func() { other.Close() })
+	spy := &closeSpy{Conn: watched}
+
+	c := testClient(t)
+	c.Peer = &untrustedlog.Log{Subject: "sendspin"}
+	session := &Session{
+		ws:     &Conn{c: dead},
+		send:   sendCipher(t),
+		clock:  newClock(),
+		report: make(chan struct{}, 1),
+	}
+	next := &Session{clock: newClock(), report: make(chan struct{}, 1)}
+	if err := c.hold(next, true); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.reportDelays(session, spy, stop)
+
+	takes := func(what string) {
+		t.Helper()
+		session.report <- struct{}{}
+		waitFor(t, what, func() bool {
+			if spy.isClosed() {
+				t.Fatal("a wake posted for a session this client no longer holds was" +
+					" written anyway, so a connection the next session had taken over" +
+					" from was told this player's state by the one it replaced")
+			}
+			return len(session.report) == 0
+		})
+	}
+	takes("the reporter to take a wake for a session this client no longer holds")
+	takes("the reporter to be waiting on another wake rather than gone")
+
+	c.release(next)
+	if err := c.hold(session, true); err != nil {
+		t.Fatal(err)
+	}
+	session.report <- struct{}{}
+	waitFor(t, "the report to be written once this session holds again", spy.isClosed)
+}
+
 func TestADelayReportThisPlayerCannotWriteEndsTheConnection(t *testing.T) {
 	dead, far := net.Pipe()
 	far.Close()
