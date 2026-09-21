@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -398,6 +399,73 @@ func TestADragIsKeptWhenItSettlesRatherThanAtEveryStep(t *testing.T) {
 			" meant to cost one: a write is a measured 40 ms of setprop here, and every"+
 			" value but the one somebody stops on is a write nothing will ever read",
 			steps, len(got))
+	}
+}
+
+func TestAFigureTakenAsTheKeeperStopsIsNotOverwrittenByItsLastWrite(t *testing.T) {
+	ln := listenLocal(t)
+	c, _ := playingClient(t)
+	c.keepEvery = time.Hour
+	writing := make(chan struct{})
+	release := make(chan struct{})
+	var freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	var mu sync.Mutex
+	var saved []int
+	var arm atomic.Bool
+	arm.Store(true)
+	c.SaveDelay = func(ms int) error {
+		if arm.CompareAndSwap(true, false) {
+			close(writing)
+			<-release
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		saved = append(saved, ms)
+		return nil
+	}
+	kept := func() []int {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(saved)
+	}
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = c.Serve(ln)
+	}()
+	waitFor(t, "the keeper to be running", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.keepWake != nil
+	})
+
+	c.SetDelay(700)
+	ln.Close()
+	<-writing
+
+	set := make(chan struct{})
+	go func() {
+		defer close(set)
+		c.SetDelay(900)
+	}()
+	waitFor(t, "the newer figure to be the one this client holds",
+		func() bool { return c.Delay() == 900 })
+	free()
+	<-set
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("this client was still serving five seconds after its listener closed")
+	}
+
+	got := kept()
+	if len(got) == 0 || got[len(got)-1] != 900 {
+		t.Errorf("the property was written %v, and the last write is what a reboot"+
+			" reads: a figure taken while the keeper is stopping raced its last write"+
+			" and lost, so flash holds a delay this player had already moved off", got)
 	}
 }
 

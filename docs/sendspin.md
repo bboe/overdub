@@ -1455,6 +1455,32 @@ already held and reported, and only flash is behind. The unreadable case above i
 the one that cannot wait, because there the client does not know what flash
 holds.
 
+**Two writers reach the property, so they take turns and the later one reads
+later.** The keeper owns the window, and a figure taken while it is stopping goes
+straight to flash instead: `Serve`'s defer clears the wake before the keeper has
+drained, which is what leaves the direct write as the only one that can still
+keep that figure. Both then wrote at once, and the order was nobody's to say.
+Measured in a test: the direct write put 900 on the property and the keeper's own
+last write put 700 over it, so flash held a figure this player had already moved
+off and the next boot would have played it. One mutex over both, with each reading
+the figure inside it, makes the last write the last read. The keeper then finds
+the property already holding what it was about to write and skips it, so a change
+caught in that window costs one write rather than two -- which is what the window
+exists to bound.
+
+There is no second copy of the figure to go stale, either: both read
+`delay` itself inside the mutex rather than a snapshot taken outside it.
+A snapshot is what makes two callers of `keep` -- the switch worker and the
+session's own read loop, on different goroutines -- able to store their reads
+back in the opposite order, and the skip above would then hold that stale figure
+in place rather than correcting it on the next write.
+
+What one mutex does **not** cover is the switch's own writer. It keeps the figure
+while no client is running, and `keepOwed` re-tries a write that failed, so a
+`setprop` refused just before a client starts can leave that re-try running
+against the client's keeper. It needs a failed write first, and both write the
+same property with nothing ordering them.
+
 The figure is kept in `persist.overdub.sendspin_delay`, beside the switch flag and
 for the same reason, and `uninstall.sh` clears both. The name is
 short because it has to be: 31 characters is all this device takes, and the first

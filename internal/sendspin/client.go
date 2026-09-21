@@ -115,7 +115,6 @@ type Client struct {
 	toldMute   atomic.Int64
 	onDisk     atomic.Int64
 	firstDelay sync.Once
-	keeping    atomic.Int64
 	keepWake   chan struct{}
 	keepEvery  time.Duration
 
@@ -133,6 +132,7 @@ type Client struct {
 	Play *untrustedlog.Log
 
 	stating sync.Mutex
+	saving  sync.Mutex
 
 	mu        sync.Mutex
 	held      *Session
@@ -188,7 +188,6 @@ func (c *Client) Serve(ln net.Listener) error {
 		c.Play = &untrustedlog.Log{Subject: "sendspin playback"}
 	}
 	c.firstDelay.Do(c.takeKeptDelay)
-	c.keeping.Store(c.delay.Load())
 	stored := HoldDelayMS(c.DelayMS)
 	if put := c.onDisk.Load(); put > 0 {
 		stored = int(put - 1)
@@ -703,13 +702,11 @@ func (c *Client) reportDelays(session *Session, nc net.Conn, stop <-chan struct{
 }
 
 func (c *Client) keep() {
-	ms := int(c.delay.Load())
-	c.keeping.Store(int64(ms))
 	c.mu.Lock()
 	wake := c.keepWake
 	c.mu.Unlock()
 	if wake == nil {
-		c.keepNow(ms)
+		c.keepNow()
 		return
 	}
 	select {
@@ -718,8 +715,14 @@ func (c *Client) keep() {
 	}
 }
 
-func (c *Client) keepNow(ms int) {
+func (c *Client) keepNow() {
 	if c.SaveDelay == nil {
+		return
+	}
+	c.saving.Lock()
+	defer c.saving.Unlock()
+	ms := c.Delay()
+	if c.onDisk.Load() == int64(ms)+1 {
 		return
 	}
 	if err := c.SaveDelay(ms); err != nil {
@@ -736,8 +739,14 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written 
 	apart := waitOr(c.keepEvery, KeepApart)
 	unknown, attempted, tries := c.DelayUnknown, written, 0
 	settled := func() bool {
-		ms := int(c.keeping.Load())
+		c.saving.Lock()
+		defer c.saving.Unlock()
+		ms := c.Delay()
 		if !unknown && ms == written {
+			return true
+		}
+		if c.onDisk.Load() == int64(ms)+1 {
+			written, unknown = ms, false
 			return true
 		}
 		if ms != attempted {
