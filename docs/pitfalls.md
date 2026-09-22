@@ -191,3 +191,18 @@ A warm restart hides all of this.
   connect and the label is cosmetic, so a derived name turns a cosmetic edit
   into a breaking change. Slugifying is also lossy: "Alexa's Dot" and "Alexas
   Dot" both become `alexas-dot`.
+
+## The master mute
+
+- `volume_master_mute` in `AudioService` silences every stream and route, and
+  `dumpsys audio` still reads as working: `Mute count: 0`, levels and routes
+  unchanged.
+- `tinymix` shows the amp on, Alexa logs earcons finishing, and an `AudioTrack`
+  drains. `tinyplay` to a PCM device is audible: the flag sits above the amp.
+- It persists across power cycles, in
+  `/data/data/com.android.providers.settings/databases/settings.db`. FireOS
+  5.1's `settings` has no `list`; diff that database against a working Dot's.
+- Clear it with `IAudioService.setMasterMute` through `app_process`, not in the
+  database, and read `isMasterMute()` back.
+- `service call audio 3` sets it: 3 is `adjustMasterVolume`, next to
+  `adjustStreamVolume` at 2. docs/api.md has the mapping.
