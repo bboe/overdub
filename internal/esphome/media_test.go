@@ -330,10 +330,55 @@ func TestTheVolumeWakesThePollThatReadsIt(t *testing.T) {
 	}
 }
 
+func withBluetooth(v device.MusicVolume, step int, percent float32) device.MusicVolume {
+	v.BluetoothStep, v.Bluetooth, v.BluetoothOK = step, percent, true
+	v.BluetoothRoute, v.BluetoothRouteOK = true, true
+	return v
+}
+
+func TestActiveRouteNamesWhatIsPlaying(t *testing.T) {
+	full := device.MusicVolume{
+		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+		Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true,
+	}
+	for _, tt := range []struct {
+		name      string
+		v         device.MusicVolume
+		occupied  bool
+		jackKnown bool
+		route     string
+		ok        bool
+	}{
+		{"nothing in the socket", full, false, true, routeSpeaker, true},
+		{"something in the socket", full, true, true, routeJack, true},
+		{"a speaker paired over bluetooth", withBluetooth(full, 24, 80), false, true, routeBluetooth, true},
+		{"bluetooth with a cable in as well",
+			withBluetooth(full, 24, 80), true, true, routeBluetooth, true},
+		{"a socket we cannot read", full, false, false, "", false},
+		{"a routes block we could not read is no route at all",
+			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+				Jack: 70, JackStep: 21, JackOK: true},
+			false, true, "", false},
+		{"a socket we cannot read, with bluetooth connected",
+			withBluetooth(full, 24, 80), false, false, routeBluetooth, true},
+		{"a bluetooth route with no level of its own is still the route",
+			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+				BluetoothRoute: true, BluetoothRouteOK: true},
+			false, true, routeBluetooth, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			route, ok := activeRoute(tt.v, tt.occupied, tt.jackKnown)
+			if route != tt.route || ok != tt.ok {
+				t.Errorf("route = %q, %v; want %q, %v", route, ok, tt.route, tt.ok)
+			}
+		})
+	}
+}
+
 func TestActiveVolumeIsTheRouteInUse(t *testing.T) {
 	full := device.MusicVolume{
 		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-		Jack: 70, JackStep: 21, JackOK: true,
+		Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true,
 	}
 	for _, tt := range []struct {
 		name      string
@@ -349,8 +394,23 @@ func TestActiveVolumeIsTheRouteInUse(t *testing.T) {
 		{"a socket we cannot read is not a route we can count from", full, true, false, 0, 0, false},
 		{"a socket we cannot read, with nothing plugged in either", full, false, false, 0, 0, false},
 		{"the live route has no level",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true},
+			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+				BluetoothRouteOK: true},
 			true, true, 0, 0, false},
+		{"a speaker paired over bluetooth takes the route",
+			withBluetooth(full, 24, 80), false, true, 24, 80, true},
+		{"bluetooth takes it from the socket as well",
+			withBluetooth(full, 24, 80), true, true, 24, 80, true},
+		{"a bluetooth route we cannot read a level for",
+			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+				Jack: 70, JackStep: 21, JackOK: true,
+				BluetoothRoute: true, BluetoothRouteOK: true},
+			false, true, 0, 0, false},
+		{"a level with no route to play it falls back to the socket",
+			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+				Jack: 70, JackStep: 21, JackOK: true,
+				Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true},
+			true, true, 21, 70, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			step, percent, ok := activeVolume(tt.v, tt.occupied, tt.jackKnown)
@@ -1264,5 +1324,89 @@ func TestAMuteOffTheWireWithNothingToSetItDoesNotPanic(t *testing.T) {
 		t.Errorf("the line says %q, and nothing in it says the mute reached nothing:"+
 			" a peer holding the key can send command 3 whatever the feature flags"+
 			" say, and the worker would call a setter that is not there", c.noted)
+	}
+}
+
+func TestTheRouteIsPublishedAsTheStringHomeAssistantShows(t *testing.T) {
+	if routeSpeaker != "speaker" || routeJack != "jack" || routeBluetooth != "bluetooth" {
+		t.Fatalf("the routes are %q, %q and %q; README.md promises speaker, jack and bluetooth",
+			routeSpeaker, routeJack, routeBluetooth)
+	}
+	base := device.MusicVolume{
+		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+		Jack: 70, JackStep: 21, JackOK: true,
+		Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true,
+	}
+	paired := base
+	paired.BluetoothRoute = true
+
+	for _, tt := range []struct {
+		name     string
+		v        device.MusicVolume
+		occupied bool
+		want     string
+	}{
+		{"speaker", base, false, "speaker"},
+		{"jack", base, true, "jack"},
+		{"bluetooth", paired, false, "bluetooth"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := testServer(t, testPSK(t))
+			stubSensors(s)
+			s.volumes = func() device.MusicVolume { return tt.v }
+			s.jack = func() (bool, bool) { return tt.occupied, true }
+
+			var got string
+			found := false
+			for _, r := range s.readLive() {
+				if r.key != s.keyOutput {
+					continue
+				}
+				found = true
+				if r.kind != kindTextSensor {
+					t.Errorf("output_device was read as kind %d, want a text sensor", r.kind)
+				}
+				if !r.ok {
+					t.Error("output_device was read as missing with a route to name")
+				}
+				fields := map[int]pbField{}
+				if err := pbWalk(textState(r.key, r.text, !r.ok), func(f pbField) {
+					fields[f.field] = f
+				}); err != nil {
+					t.Fatalf("the state did not parse: %v", err)
+				}
+				got = string(fields[2].data)
+			}
+			if !found {
+				t.Fatal("no output_device reading was published at all")
+			}
+			if got != tt.want {
+				t.Errorf("output_device went out as %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestARouteWeCannotReadStillLeavesTheVolumeWorking(t *testing.T) {
+	unreadable := device.MusicVolume{
+		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+		Jack: 70, JackStep: 21, JackOK: true, Muted: true,
+	}
+	if _, known := activeRoute(unreadable, false, true); known {
+		t.Error("a route that could not be read was named anyway")
+	}
+	step, percent, ok := activeVolume(unreadable, false, true)
+	if !ok || step != 12 || percent != 40 {
+		t.Errorf("active = %d, %v, %v; want the speaker at 12, 40: a route nobody could read"+
+			" must not take the volume keys away", step, percent, ok)
+	}
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	s.volumes = func() device.MusicVolume { return unreadable }
+	s.jack = func() (bool, bool) { return false, true }
+	if _, muted, ok := s.SpeakerLevel(); !ok || !muted {
+		t.Errorf("SpeakerLevel answered %v, %v; the mute guard reads this, and a dot that came"+
+			" up muted holds none of its keys when it is not known", muted, ok)
 	}
 }

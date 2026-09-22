@@ -62,7 +62,32 @@ func mediaStateFor(playing bool) uint32 {
 	return mediaStateIdle
 }
 
+const (
+	routeSpeaker   = "speaker"
+	routeJack      = "jack"
+	routeBluetooth = "bluetooth"
+)
+
+func activeRoute(v device.MusicVolume, occupied, jackKnown bool) (string, bool) {
+	if !v.BluetoothRouteOK {
+		return "", false
+	}
+	if v.BluetoothRoute {
+		return routeBluetooth, true
+	}
+	if !jackKnown {
+		return "", false
+	}
+	if occupied {
+		return routeJack, true
+	}
+	return routeSpeaker, true
+}
+
 func activeVolume(v device.MusicVolume, occupied, jackKnown bool) (step int, percent float32, ok bool) {
+	if route, known := activeRoute(v, occupied, jackKnown); known && route == routeBluetooth {
+		return v.BluetoothStep, v.Bluetooth, v.BluetoothOK
+	}
 	if !jackKnown {
 		return 0, 0, false
 	}

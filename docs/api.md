@@ -302,6 +302,15 @@ the device's entities it is. So `action_button_mode` carries
 not the same number either, 5 on a sensor and a switch, 8 on a binary sensor,
 which is the field-numbers-are-per-message rule once more.
 
+**The message number an entity is listed under decides its kind, and getting it
+wrong draws a different entity rather than failing.** The first text sensor here
+was listed under 15, on the assumption that the list messages ran in the same
+order as the state ones. They do not: 15 is `ListEntitiesLightResponse`, and the
+text sensor is 18. Home Assistant drew a **light**, with a bulb icon and a
+toggle, and nothing reported a problem -- the state went out under 27, which is
+correct for a text sensor, and Home Assistant had no use for it on a light. The
+two numbers are separate lookups.
+
 Whether the speaker is playing is two signals, and needs both. ALSA says whether
 a PCM substream is open -- `state: RUNNING` in
 `/proc/asound/card*/pcm*p/sub*/status`, always `pcm23p` here, the same device
@@ -543,9 +552,26 @@ AVRCP. It is a compile-time absence in this bluedroid build. So the Dot
 attenuates before encoding, the two volumes sit in series, and the speaker's own
 buttons report nothing back.
 
-Which route the *media player* counts from is a separate question and is not
-answered here: it still starts from the socket or the speaker, so a Dot playing
-to a paired speaker has a slider that counts from a level nobody is hearing.
+**Which route is live is free.** `dumpsys audio` ends with an `Audio routes:`
+block, and on this build `mBluetoothName` is one of two literals: `Device
+Connected` and `Device NOT Connected`, measured both ways. AOSP puts the paired
+device's alias there instead, so anything else is published as no reading rather
+than as a connection -- a name guessed into a boolean is the `p2p0` argument
+again. It is the same dump the level already pays for, so `output_device` --
+`bluetooth`, `jack` or `speaker` -- costs a second scan and no fork, on the live
+tick beside the level it belongs with.
+
+`activeVolume` asks `activeRoute` the same question and answers an unreadable
+one differently: the sensor publishes nothing, the volume falls back to the
+socket and the speaker. That asymmetry is deliberate. `readVolumeStep` is the
+one place the level is read, so `SpeakerLevel` goes through it, and the mute
+guard asks `SpeakerLevel` before it holds the volume keys -- gating that on a
+line in an unrelated block of the dump would let one unfamiliar `mBluetoothName`
+take the keys away from a Dot that came up muted.
+
+The route counts only what carries audio out of the Dot. `HidService`, the
+registered GATT clients and the sink direction are all real Bluetooth
+connections that are not a route it plays out of.
 
 `settings get system volume_music_speaker` gives the same number and was the
 first attempt. It is a shell script that starts a VM, and it puts the two
@@ -684,14 +710,35 @@ of 30, and the active route was `headset` -- every precondition AOSP blocks on
 capped downstream of the index.
 
 **The level that is read is the live route's.** A relative step is computed
-from wherever the device is, so the level to start from is the socket's when
-something is in it and the speaker's otherwise, which is what `JackOccupied`
-answers. When the live route has no readable level, **or when which route is
-live cannot be read at all**, nothing is set: a level computed from an unknown
-one is a guess, and the reading that follows makes it look deliberate. The
+from wherever the device is, so the level to start from is a paired speaker's
+when Bluetooth is routed, the socket's when something is in it, and the
+speaker's otherwise -- which is what `parseBluetoothRoute` and `JackOccupied`
+answer between them. When the live route has no readable level, **or when which
+route is live cannot be read at all**, nothing is set: a level computed from an
+unknown one is a guess, and the reading that follows makes it look deliberate. The
 switch this reads, `/sys/class/switch/h2w/state`, has never been seen to fail,
 and the jack sensor beside it goes missing when it does, so the two agree about
 what is unknown.
+
+`activeRoute` prefers Bluetooth to the socket, which is the order
+`AudioPolicyManager` applies. Measured with both present -- `jack=1`,
+`mMainType=0x1` and `mBluetoothName=Device Connected` at once -- a
+`setStreamVolume` of 18 landed on `bt_a2dp`, 20 to 18, while `headset` stayed at
+11 and `speaker` at 13.
+
+The preference is right rather than lucky, because the other case cannot arise:
+**a cable disconnects the speaker**, three times out of three.
+`A2dpStateMachine` went Connected to Disconnected within half a second of the
+jack switch flipping, and the A2DP device left the policy's outputs altogether.
+Pulling the cable out does not bring it back. So a Dot with both present is
+always one whose speaker arrived second.
+
+**A link that is lost rather than dropped is a different shape in the same
+dump.** A commanded disconnect goes `Connected` to `Pending` on `what=2` and
+only then to `Disconnected`; a lost one goes straight to `Disconnected` on a
+bare `what=101`. Measured by carrying the speaker out of range: it paged its way
+back 33 seconds later. An `output_device` that returns to `speaker` with nothing
+else happening is usually this.
 
 **A set is a call and a read back**, in the shape the microphone
 switch already uses: one worker, one pending request, and `liveWake` at the end

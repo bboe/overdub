@@ -341,6 +341,7 @@ Dot's own firewall.
 | `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
 | `sensor.<name>_bluetooth_volume` | diagnostic | percent, for a speaker paired over bluetooth; the Dot's own level for that route rather than the speaker's volume, and a muted stream reads as zero here too |
 | `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
+| `sensor.<name>_output_device` | diagnostic | where the sound is going: `speaker`, `jack` or `bluetooth`; bluetooth that carries no audio, such as the Alexa app over BLE, does not count as a route |
 | `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
 | `binary_sensor.<name>_alexa_registered` | diagnostic | whether the Dot holds an Amazon account, which is what setup gives it; a Dot that was never set up, or that deregistered itself, reads off while the button and the rest of this list go on working |
 | `media_player.<name>_speaker` | none | the volume, the mute, the controls that change them, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
@@ -396,15 +397,19 @@ volume down held together, cannot complete until the mute is lifted.
 
 `volume` is the speaker's own level, `jack_volume` is the socket's, and
 `bluetooth_volume` is a paired speaker's. Android keeps a level per route and
-switches between them when you plug something in, so between the first two, the
-one you are hearing is whichever `audio_jack` says. All three are reported
+switches between them when you plug something in or connect a speaker, so the
+one you are hearing is the one `output_device` names. All three are reported
 whatever is connected, because all three are real levels the device would return
 to. Mute is not per route, so muting reads as zero on all of them at once.
 
+Plugging a cable in disconnects a paired speaker, and it does not come back when
+you pull the cable out. The other order works: connect a speaker with a cable
+already in and the Dot holds both, playing to the speaker.
+
 `bluetooth_volume` is not the paired speaker's own volume. The Dot attenuates
 before it sends the audio, so the two sit in series and turning the speaker
-itself down is invisible here. The media player's slider still counts from the
-socket or the speaker rather than from this route.
+itself down is invisible here. The media player's slider follows
+`output_device`, so it is this level whenever a speaker is connected.
 
 ### Playing something on it
 

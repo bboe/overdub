@@ -73,7 +73,7 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	for _, entity := range listed(t, s) {
 		switch entity[0].num {
 		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent),
-			uint64(msgListSwitch), uint64(msgListMediaPlayer):
+			uint64(msgListSwitch), uint64(msgListMediaPlayer), uint64(msgListTextSensor):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
@@ -189,6 +189,8 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		{"NumberCommandRequest", msgNumberCommand, 51},
 		{"NUMBER_MODE_BOX", numberModeBox, 1},
 		{"ListEntitiesSwitchResponse", msgListSwitch, 17},
+		{"ListEntitiesTextSensorResponse", msgListTextSensor, 18},
+		{"TextSensorStateResponse", msgTextSensorState, 27},
 		{"SwitchStateResponse", msgSwitchState, 26},
 		{"SwitchCommandRequest", msgSwitchCommand, 33},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
@@ -201,6 +203,43 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		if tt.got != tt.want {
 			t.Errorf("%s is %d, want %d", tt.what, tt.got, tt.want)
 		}
+	}
+}
+
+func TestTheOutputDeviceIsListedAsATextSensor(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+
+	found := 0
+	for _, entity := range listed(t, s) {
+		if entity[0].num != uint64(msgListTextSensor) {
+			continue
+		}
+		found++
+		if got := string(entity[1].data); got != "output_device" {
+			t.Errorf("the text sensor listed is %q, want \"output_device\"", got)
+		}
+		if uint32(entity[2].num) != s.keyOutput {
+			t.Errorf("output_device has key %d, want %d", entity[2].num, s.keyOutput)
+		}
+		if entity[2].wire != wireFixed32 {
+			t.Errorf("output_device sent its key as wire type %d, want fixed32 (%d)",
+				entity[2].wire, wireFixed32)
+		}
+		if got := string(entity[3].data); got != "Output device" {
+			t.Errorf("output_device is named %q, want \"Output device\"", got)
+		}
+		if got := string(entity[5].data); got != speakerIcon {
+			t.Errorf("output_device carries icon %q, want %q", got, speakerIcon)
+		}
+		if entity[6].num != 0 {
+			t.Error("output_device is disabled_by_default; it would not appear until somebody enabled it")
+		}
+		if entity[7].num != entityCategoryDiagnostic {
+			t.Error("output_device is not diagnostic; it would sit among the device's controls")
+		}
+	}
+	if found != 1 {
+		t.Errorf("%d text sensors were listed, want 1: output_device", found)
 	}
 }
 

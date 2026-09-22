@@ -609,3 +609,40 @@ func TestAMuteZeroesThePercentageAndNotTheStep(t *testing.T) {
 			" volume set while muted land at the bottom", v.SpeakerStep, v.JackStep)
 	}
 }
+
+const routesDump = `Audio routes:
+  mMainType=0x0
+  mBluetoothName=Device Connected
+
+Other state:
+  mVolumeController=VolumeController(android.os.BinderProxy@3a1fcea0,mVisible=false)
+`
+
+func TestParseBluetoothRoute(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		dump      string
+		connected bool
+		ok        bool
+	}{
+		{"a speaker is connected", routesDump, true, true},
+		{"nothing is connected",
+			"Audio routes:\n  mMainType=0x0\n  mBluetoothName=Device NOT Connected\n", false, true},
+		{"a build that names the device instead",
+			"Audio routes:\n  mMainType=0x0\n  mBluetoothName=JBL Go 3\n", false, false},
+		{"no routes block at all",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12\n", false, false},
+		{"the block carries no bluetooth line",
+			"Audio routes:\n  mMainType=0x0\n\nOther state:\n  mMcc=0\n", false, false},
+		{"a later block carries one instead",
+			"Audio routes:\n  mMainType=0x0\nOther state:\n  mBluetoothName=Device Connected\n",
+			false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			connected, ok := parseBluetoothRoute(tt.dump)
+			if connected != tt.connected || ok != tt.ok {
+				t.Errorf("route = %v, %v; want %v, %v", connected, ok, tt.connected, tt.ok)
+			}
+		})
+	}
+}

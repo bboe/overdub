@@ -168,17 +168,19 @@ var (
 func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
 
 type MusicVolume struct {
-	Max           int
-	Muted         bool
-	Speaker       float32
-	SpeakerStep   int
-	SpeakerOK     bool
-	Jack          float32
-	JackStep      int
-	JackOK        bool
-	Bluetooth     float32
-	BluetoothStep int
-	BluetoothOK   bool
+	Max              int
+	Muted            bool
+	Speaker          float32
+	SpeakerStep      int
+	SpeakerOK        bool
+	Jack             float32
+	JackStep         int
+	JackOK           bool
+	Bluetooth        float32
+	BluetoothStep    int
+	BluetoothOK      bool
+	BluetoothRoute   bool
+	BluetoothRouteOK bool
 }
 
 func (v MusicVolume) sawRoute() bool { return v.SpeakerOK || v.JackOK || v.BluetoothOK }
@@ -190,7 +192,10 @@ func MusicVolumes() MusicVolume {
 	if err != nil {
 		return MusicVolume{}
 	}
-	return parseMusicVolumes(string(out))
+	dump := string(out)
+	found := parseMusicVolumes(dump)
+	found.BluetoothRoute, found.BluetoothRouteOK = parseBluetoothRoute(dump)
+	return found
 }
 
 func parseMusicVolumes(dump string) MusicVolume {
@@ -276,6 +281,35 @@ func parseMusicVolumes(dump string) MusicVolume {
 		return MusicVolume{}
 	}
 	return done()
+}
+
+func parseBluetoothRoute(dump string) (connected, known bool) {
+	inRoutes := false
+	for _, line := range strings.Split(dump, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "Audio routes:" {
+			inRoutes = true
+			continue
+		}
+		if !inRoutes {
+			continue
+		}
+		value, ok := strings.CutPrefix(trimmed, "mBluetoothName=")
+		if !ok {
+			if trimmed != "" && line == strings.TrimLeft(line, " \t") {
+				return false, false
+			}
+			continue
+		}
+		switch strings.TrimSpace(value) {
+		case "Device Connected":
+			return true, true
+		case "Device NOT Connected":
+			return false, true
+		}
+		return false, false
+	}
+	return false, false
 }
 
 func deviceStep(current string, max int, name string) (int, bool) {

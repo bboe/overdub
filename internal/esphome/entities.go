@@ -246,6 +246,17 @@ func (s *Server) listEntities(conn *conn) error {
 		return err
 	}
 
+	var route pb
+	route.str(1, "output_device")
+	route.fixed32(2, s.keyOutput)
+	route.str(3, "Output device")
+	route.str(5, speakerIcon)
+	route.boolean(6, false) // disabled_by_default
+	route.u32(7, entityCategoryDiagnostic)
+	if err := s.send(conn, msgListTextSensor, route.b); err != nil {
+		return err
+	}
+
 	if s.hasCommand() {
 		var command pb
 		command.str(1, "alexa_command")

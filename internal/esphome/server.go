@@ -58,11 +58,13 @@ const (
 	msgListBinarySensor  = 12
 	msgListSensor        = 16
 	msgListSwitch        = 17
+	msgListTextSensor    = 18
 	msgListEntitiesDone  = 19
 	msgSubscribeStates   = 20
 	msgBinarySensorState = 21
 	msgSensorState       = 25
 	msgSwitchState       = 26
+	msgTextSensorState   = 27
 	msgSubscribeLogs     = 28
 	msgSwitchCommand     = 33
 	msgSubscribeHAServ   = 34
@@ -138,6 +140,7 @@ type Server struct {
 	keyJack     uint32
 	keyJackOn   uint32
 	keyBT       uint32
+	keyOutput   uint32
 	keySound    uint32
 	keySpeaker  uint32
 	keyMicMute  uint32
@@ -253,6 +256,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyMemory:    entityKey("memory_available"),
 		keyJack:      entityKey("jack_volume"),
 		keyBT:        entityKey("bluetooth_volume"),
+		keyOutput:    entityKey("output_device"),
 		keyJackOn:    entityKey("audio_jack"),
 		keySound:     entityKey("speaker_playing"),
 		keySpeaker:   entityKey("speaker"),

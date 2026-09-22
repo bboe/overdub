@@ -14,6 +14,7 @@ const (
 	kindSwitch
 	kindMedia
 	kindText
+	kindTextSensor
 	kindNumber
 )
 
@@ -106,6 +107,8 @@ func (s *Server) readLive() []reading {
 		{key: s.keyBT, value: volumes.Bluetooth, ok: volumes.BluetoothOK},
 		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
+	route, routeKnown := activeRoute(volumes, occupied, jackOK)
+	out = append(out, reading{key: s.keyOutput, text: route, ok: routeKnown, kind: kindTextSensor})
 	if step, _, ok := activeVolume(volumes, occupied, jackOK); ok && volumes.Max > 0 {
 		out = append(out, reading{
 			key:   s.keySpeaker,
@@ -157,7 +160,9 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 		case kindMedia:
 			msgType, payload = msgMediaPlayerState, mediaState(r.key, r.state, r.value, r.muted)
 		case kindText:
-			msgType, payload = msgTextState, textState(r.key, r.text)
+			msgType, payload = msgTextState, textState(r.key, r.text, false)
+		case kindTextSensor:
+			msgType, payload = msgTextSensorState, textState(r.key, r.text, !r.ok)
 		case kindNumber:
 			msgType, payload = msgNumberState, floatState(r.key, r.value, !r.ok)
 		}
@@ -168,11 +173,11 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 	return nil
 }
 
-func textState(key uint32, text string) []byte {
+func textState(key uint32, text string, missing bool) []byte {
 	var p pb
 	p.fixed32(1, key)
 	p.str(2, text)
-	p.boolean(3, false) // missing_state
+	p.boolean(3, missing)
 	return p.b
 }
 
