@@ -206,3 +206,18 @@ A warm restart hides all of this.
   database, and read `isMasterMute()` back.
 - `service call audio 3` sets it: 3 is `adjustMasterVolume`, next to
   `adjustStreamVolume` at 2. docs/api.md has the mapping.
+
+## A2DP with a zero SBC configuration
+
+- A speaker can pair, read `Device Connected`, follow the volume keys, show
+  `bluetooth` in `output_device`, and play nothing: SBC negotiated to zero.
+  `dumpsys audio` reads as working.
+- The tell is in logcat only: at connect, then several times a second.
+
+```
+W/bt-btif: btif_media_task get sbc rate = 0 kps
+E/bt-btif: ERROR btif_get_num_aa_frame Unsupported transcoding format 0x0
+```
+
+- Reconnecting does not clear it; a reboot does (`sbc rate = 328 kps`). Grep a
+  connect for `sbc rate` to tell this from a Dot that cannot do A2DP.
