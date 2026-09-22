@@ -4,111 +4,78 @@ Take over the **action button** on a rooted Echo Dot (2nd Generation) and
 present the Dot to Home Assistant as an **ESPHome device**, while stock Alexa
 keeps running.
 
-Home Assistant adopts it with its own first-party ESPHome integration: no custom
-component, no MQTT, and no Home Assistant credential on the Dot. The Dot reports
-a press and a hold of the action button to Home Assistant, reports what it can
-read about itself over the same connection, takes the button back from Home
-Assistant and hands it over again, and chimes on the device itself for every
-press it takes.
+- Home Assistant adopts it with its own ESPHome integration: no custom
+  component, no MQTT, no Home Assistant credential on the Dot.
+- The Dot reports presses and holds of its buttons, reports what it can read
+  about itself, and chimes on every press it takes.
+- It also joins Music Assistant as a Sendspin player.
 
 ## Scope
 
-This runs on a device you own and have already rooted. Nothing here is supported
-by anyone, and a FireOS update can invalidate any of it. Rooting voided Amazon's
-warranty, and the flashing that gets you there can brick the Dot; both are
-behind you before anything here runs.
-
-**Alexa commands are optional, and what they risk is the account, not the Dot.**
-They reach an undocumented endpoint with a credential that carries the whole
-Amazon account, and that endpoint is the Alexa app's own rather than an
-interface Amazon offers, so driving it may sit outside Amazon's terms. Read
-[Alexa commands](#alexa-commands) before building MapDump. Without the jar the
-daemon never offers them.
-
-**The Dot also announces itself to Music Assistant, and plays.** It advertises
-`_sendspin._tcp.local.` on tcp/8928, joins a group as a `player@v1`, keeps its
-clock against the server's and plays the audio it is sent on the frame that
-audio's own timestamp names. It reports `available: false` until that clock has
-converged, which takes about a fifth of a second, and stays false on a Dot whose
-speaker could not be opened at all. Anything that can reach the Dot on `wlan0`
-can take that session, because the pairing flow is not implemented and the
-fallback key is a published constant; what is behind it is playback and nothing
-that reads off the device, but see [SECURITY.md](SECURITY.md) for what it does
-hold. `switch.<name>_sendspin` turns the whole thing off -- the advert, the port
-and any session -- and the setting survives a reboot.
-`number.<name>_sendspin_output_delay` is the output delay, the one figure a music
-server can also set: the last end to set it wins, and the number shows what is
-applied whichever did.
-
-What has not been settled is whether the Dot is in step with a *second* speaker
-to better than a few milliseconds. One Dot can measure everything but that, so
-grouping it with another Sendspin player and listening is the check that is left;
-`docs/sendspin.md` says why and Music Assistant's own per-player delay is the dial
-for whatever is left over.
-
-Taking the action button takes it from Alexa. Stopping a timer or an alarm with
-it, press-to-talk, and holding it to enter setup mode all stop working while the
-daemon holds it. The `Action button mode` select gives it back without stopping
-anything else, so the Dot keeps reporting and keeps its entities while Alexa
-has her button. The microphone mute key is untouched throughout, and the volume
-keys are too except while the Dot is muted, when they are held so that a press
-lifts the mute.
+- This runs on a Dot you own and have already rooted. Nobody supports it, and a
+  FireOS update can break any of it.
+- **Alexa commands are optional, and they risk the account, not the Dot.** They
+  reach an undocumented Alexa app endpoint with a credential that carries the
+  whole Amazon account, which may sit outside Amazon's terms. Read
+  [Alexa commands](#alexa-commands) before you build MapDump. Without the jar,
+  the daemon does not offer them.
+- **Sendspin has no pairing.** The pairing flow is not implemented and the
+  fallback key is a published constant, so anything that reaches the Dot on
+  `wlan0` can take the session. The session gives playback only; see
+  [SECURITY.md](SECURITY.md) for what it holds.
+- Taking the action button takes it from Alexa. While the daemon holds it, the
+  button does not stop timers or alarms, talk, or enter setup mode. The
+  `Action button mode` select gives it back without stopping anything else.
+- Alexa still gets the mute key by default. The volume keys are untouched,
+  except while the Dot is muted (see
+  [Muting](#muting-holds-the-volume-keys)).
 
 ## How this differs from EchoMuse, echolocal and EchoGo
 
-The other projects on this hardware all replace Alexa. This one does not.
+The other projects on this hardware replace Alexa. This one adds to her. It
+takes only the action button, and the button goes back to her if the daemon
+dies.
 
-[**EchoMuse**](https://github.com/wilbowes/EchoMuse) gives the Dot "a second
-life as a fully local, open-source voice assistant and media player for Home
-Assistant", replacing the Alexa firmware with a Go server. It is also the
-practical route to a rooted Dot, because its docs cover the amonet-biscuit
-unlock.
+- [**EchoMuse**](https://github.com/wilbowes/EchoMuse): replaces the Alexa
+  firmware with a local voice assistant and media player for Home Assistant.
+  Its docs cover the amonet-biscuit unlock, the practical route to root.
+- [**echolocal**](https://github.com/ygelfand/echolocal): the same Dot, also
+  Go and the ESPHome API, with local wake word, LED ring, media player and a
+  Bluetooth proxy.
+- [**EchoGo**](https://github.com/Binozo/EchoGo): a Go SDK for the LEDs,
+  microphone, speaker and buttons, for writing the device software yourself.
 
-[**echolocal**](https://github.com/ygelfand/echolocal) is the closest neighbour:
-the same Dot, also Go, also speaking the ESPHome native API, with local wake word
-detection, LED ring control, a media player and a Bluetooth proxy.
-
-[**EchoGo**](https://github.com/Binozo/EchoGo) sits lowest: "A Go SDK for your
-Echo Dot 2. Gen", giving programmatic control of the LEDs, microphone, speaker
-and buttons. If you want to write the device's software yourself, that is the
-toolkit.
-
-**overdub keeps stock Alexa running and adds to her.** The action button is the
-only thing taken, and if the daemon dies it goes straight back to her.
-
-For a local voice satellite with Amazon out of the picture, use one of those. To
-keep the Echo you have, with her voice, her music, her timers and the mute
-button, and add a Home Assistant button and a handful of entities, use this
-one.
+Use one of those for a local voice satellite without Amazon. Use this one to
+keep Alexa and add a Home Assistant button and some entities.
 
 ## Requirements
 
-* an Echo Dot (2nd Generation) you have rooted, with Magisk. Model **RS03QR**,
-  codename biscuit, FireOS 5.5.5.4. The model number is printed on the
-  underside, and everything here was measured on that one
-* **Magisk 17.3**, or another that keeps `service.d` inside `magisk.img` at
-  `/sbin/.core/img/.core/service.d`. That is the only path `install.sh` writes
-  the boot script to, and it fails there rather than guessing. A Magisk that
-  uses `/data/adb/service.d` needs that path changed first
-* `adb`, on a development machine. A [release](#install-from-a-release) needs
-  nothing else
-* to build it yourself instead: Go 1.25 or later, and an **Android NDK** for the
-  chime. It is played through OpenSL ES, so the daemon is cgo and `build.sh`
-  will not run without one. `brew install --cask android-ndk` on macOS, or a
-  release from [developer.android.com/ndk](https://developer.android.com/ndk)
-  elsewhere, with `ANDROID_NDK_HOME` pointing at it
-* Home Assistant on the same subnet as the Dot
+- An Echo Dot (2nd Generation), model **RS03QR** (printed on the underside),
+  codename biscuit, FireOS 5.5.5.4, rooted, with Magisk. Everything here was
+  measured on that model.
+- **Magisk 17.3**, or another that keeps `service.d` at
+  `/sbin/.core/img/.core/service.d`. `install.sh` writes the boot script only
+  there, and fails if it cannot. A Magisk that uses `/data/adb/service.d`
+  needs the path changed first.
+- `adb` on a development machine. A [release](#install-from-a-release) needs
+  nothing else.
+- To build it yourself: Go 1.25 or later, and an **Android NDK**
+  (`brew install --cask android-ndk` on macOS, or
+  [developer.android.com/ndk](https://developer.android.com/ndk)).
+  Set `ANDROID_NDK_HOME` to it.
+- Home Assistant on the same subnet as the Dot.
 
-The buttons on this hardware:
+The buttons:
 
 | Node | Name | Keycodes |
 |---|---|---|
 | `/dev/input/event1` | `mtk-kpd` | **138 action ("dot")**, 113 mute |
 | `/dev/input/event2` | `keys` (gpio-keys) | 115 volume up, 114 volume down |
 
-The daemon opens `event1` and takes keycode 138 from it, re-emitting the rest.
-`event2` is opened only while the Dot is muted, to hold the volume keys. To
-check them on another device, FireOS already ships the tools:
+- The daemon grabs `event1` and re-emits its keys through a clone named
+  `mtk-kpd`, except those a button's mode keeps from Alexa.
+- It opens `event2` only while the Dot is muted.
+- To inspect the nodes on the device:
 
 ```sh
 adb shell su -c 'cat /proc/bus/input/devices'   # names, handlers, key bitmaps
@@ -117,85 +84,74 @@ adb shell su -c getevent                        # events, without grabbing
 
 ## Coming from EchoMuse
 
-EchoMuse's debloat step suppresses the Alexa stack this runs beside, so a Dot
-rooted through it needs that undone first. Nothing was uninstalled, so nothing
-needs reinstalling:
+EchoMuse's debloat step suppresses the Alexa stack this runs beside. Undo it
+first; nothing was uninstalled, so nothing needs reinstalling:
 
 ```sh
 deploy/restore-amazon.sh   # then reboot
 ```
 
-Everything comes back except `com.amazon.device.software.ota`, left hidden on
-purpose: an OTA rewrites `boot.img`, removing Magisk and taking root and overdub
-with it. EchoMuse's own payload is moved to `/data/local/echomuse-disabled/`
-rather than deleted, except the `service.d` debloat hook, which is removed: it
-is what suppresses the stack again on every boot.
-
-Skip this if the Dot never had EchoMuse. It restores every package that is
-currently hidden or disabled, not just EchoMuse's, so running it on a Dot where
-you have suppressed things yourself will undo that too.
+- It restores every hidden or disabled package, not only EchoMuse's. Things
+  you suppressed yourself come back too.
+- `com.amazon.device.software.ota` stays hidden. An OTA rewrites `boot.img`
+  and removes Magisk, root and overdub.
+- EchoMuse's payload moves to `/data/local/echomuse-disabled/`. Its
+  `service.d` debloat hook is deleted.
+- Skip this if the Dot never had EchoMuse.
+- docs/deployment.md says how the script decides what to restore.
 
 ## Install from a release
 
 Each [release](https://github.com/bboe/overdub/releases) carries one tarball
-holding the scripts, the binary and `mapdump.jar`, already built. Unpack it and
-install from it; the rest of this file applies unchanged from there:
+with the scripts, the binary and `mapdump.jar`, already built:
 
 ```sh
 tar xf overdub-v1.0.0.tar.gz
 overdub-v1.0.0/deploy/install.sh kitchen
 ```
 
-`SHA256SUMS` sits beside the tarball, and the build is attested, so GitHub can
-be asked which workflow run and which commit produced the file you have:
+`SHA256SUMS` sits beside the tarball, and the build is attested:
 
 ```sh
-shasum -a 256 -c SHA256SUMS      # sha256sum -c, where you have that instead
+shasum -a 256 -c SHA256SUMS      # or sha256sum -c
 gh attestation verify overdub-v1.0.0.tar.gz --repo bboe/overdub
 ```
 
-A released binary says what it is, which one built here does not:
+A released binary reports its version. A local build prints
+`overdub (unversioned build)`:
 
 ```sh
 adb shell 'su -c "/data/local/bin/overdub -version"'
 ```
 
-The Dot's linker prints four `WARNING: linker:` lines of its own first, and adb
-merges them into the same stream. The version is the last line:
+The Dot's linker prints 4 `WARNING: linker:` lines first, merged into the same
+stream. The version is the last line:
 
 ```
 overdub v1.0.0
 ```
 
-Build it yourself instead for anything you want to change, or if you would
-rather not run a binary somebody else compiled. The tarball carries no
-`build.sh`, and `install.sh` builds when it finds one and installs what is in
-`build/overdub` when it does not.
+- The tarball carries no `build.sh`. `install.sh` builds when it finds
+  `build.sh`, and otherwise installs `build/overdub` as it stands.
+- Build it yourself to change anything, or to run only a binary you compiled.
 
 ## Build
 
-This section needs the repository. The release tarball carries neither
-`build.sh` nor `deploy/mapdump/build.sh`, because it carries what they produce.
+This needs the repository, not the tarball.
 
 ```sh
 ./build.sh
 ```
 
-`GOARCH=arm` is not optional, and `build.sh` pins it. A build for any other word
-size fails to compile rather than producing a daemon that misreads every input
-event: `internal/evdev` asserts the 32-bit `timeval` this device has.
+- `build.sh` sets `GOOS=android GOARCH=arm GOARM=7`, finds the NDK compiler,
+  and makes the empty `libpthread` and `librt` stubs cgo needs. Neither target
+  setting is optional; [docs/constraints.md](docs/constraints.md) says why.
+- If it cannot find the NDK, it says so. Set `ANDROID_NDK_HOME`.
 
-`GOOS=android` is not optional either, and is the less obvious of the two: the
-chime is cgo against OpenSL ES, and Go's linux runtime hangs before `main`
-against Bionic rather than failing. `build.sh` sets it, finds the NDK compiler,
-and makes the empty `libpthread` stub Bionic needs and cgo asks for. Set
-`ANDROID_NDK_HOME` if the NDK is not where it looks; it says so if it cannot
-find one.
-
-Alexa commands additionally need `mapdump.jar`, which is not in the repository
-and is not built by `build.sh`. Skip this if you do not want them. `$SDK` is your
-Android SDK root, and `deploy/mapdump/build.sh` names both jars, where to
-download them, and the JDK it needs:
+Alexa commands also need `mapdump.jar`, which `build.sh` does not build. Skip
+this if you do not want them. `$SDK` is your Android SDK root;
+`deploy/mapdump/build.sh` names both jars, where to get them, and the JDK it
+needs:
 
 ```sh
 ANDROID_JAR=$SDK/platforms/android-22/android.jar \
@@ -208,67 +164,57 @@ R8_JAR=$SDK/build-tools/34.0.0/lib/d8.jar deploy/mapdump/build.sh
 deploy/install.sh kitchen                          # binary, boot script, key
 ```
 
-`install.sh` picks the jar up from `deploy/mapdump/mapdump.jar` if it is there
-and says so either way; nothing else about the install changes.
-
-Installing under a **different** name needs a reboot to finish. The boot script
-is read once at boot, so the loop that respawns the daemon keeps the old name
-until then; the install prints `REBOOT REQUIRED` when it sees that.
-
-More than one Dot on `adb` means telling it which. `install.sh` uses plain
-`adb`, so `ANDROID_SERIAL` picks the target:
+- `install.sh` installs `deploy/mapdump/mapdump.jar` if it is there, and says
+  which.
+- With more than one Dot on `adb`, set `ANDROID_SERIAL`:
 
 ```sh
 adb devices                                   # serials
 ANDROID_SERIAL=<serial> deploy/install.sh kitchen
 ```
 
-| File | Where |
-|---|---|
-| `overdub` | `/data/local/bin/` |
-| `overdub.sh` | Magisk `service.d`, inside `magisk.img` on Magisk 17.3 |
-| `.overdub-noise-key` | `/data/local/bin/`, mode 600, generated if absent |
-| `adb_keys` | `/data/local/bin/`, from `~/.android/adbkey.pub` or `$ADBKEY`; enables [`Secure`](#network-adb), and removed if there is no key to push |
+What goes where:
 
-**The name is required, and must be unique on your network.** Every entity id
-Home Assistant creates is prefixed with it, so a duplicate collides there, and
-adding a second Dot under a name already in use stops the flow with a conflict
-menu rather than completing. Lowercase letters, digits, `-` and `_`, at most 63
-characters, and not starting or ending with `-`. Those are ESPHome's own naming
-rules, and `install.sh` rejects anything else.
+- `overdub`: `/data/local/bin/`
+- `overdub.sh` (the boot script): Magisk `service.d`, inside `magisk.img`
+- `.overdub-noise-key`: `/data/local/bin/`, mode 600, generated if absent
+- `mapdump.jar`: `/data/local/map/`, if it was built
+- `adb_keys`: `/data/local/bin/`, from `~/.android/adbkey.pub` or `$ADBKEY`.
+  It enables [`Secure`](#network-adb). Removed if there is no key to push.
 
-Changing it later is allowed. Home Assistant identifies the device by its MAC
-rather than its name, so a rename is accepted on the next connection and the
-stored name is updated in place; the entity ids keep the prefix they were
-created with. The display name is separate, and you set it in Home Assistant
-afterwards.
+The name:
 
-`<name>` below is therefore the name **Home Assistant** knows the device by,
-which is this one until somebody changes it there. Renaming the device in Home
-Assistant offers to rename its entity ids to match, so a Dot installed as
-`kitchen` and renamed afterwards answers to the new name in every id in the
-table and to neither name in the daemon's own log, which goes on saying what
-`-name` was given.
+- **Required, and unique on your network.** Home Assistant prefixes every
+  entity id with it. A second Dot under a name in use stops at a conflict menu.
+- Lowercase letters, digits, `-` and `_`; at most 63 characters; not starting
+  or ending with `-`. These are ESPHome's rules, and `install.sh` enforces them.
+- Home Assistant identifies the device by its MAC, so a rename is accepted on
+  the next connection. Entity ids keep the prefix they were created with.
+- A rename needs a reboot. The supervisor reads the boot script once at boot,
+  so it respawns the old name until then. `install.sh` prints
+  `REBOOT REQUIRED` when it sees this.
+- `<name>` below is the name **Home Assistant** knows the device by. If you
+  rename the device there, the entity ids can follow, while the daemon log
+  keeps the `-name` it was given.
 
-Reboot to start the daemon. It is supervised, and failure is fail-open: if it
-dies the grab is released and the action button goes back to Alexa.
+Reboot to start the daemon. It is supervised. If it dies, the grab is released
+and the action button goes back to Alexa.
 
 ## Usage
 
-The boot script runs the daemon. To run it by hand, as root and by full path,
-because `/data/local/bin` is on nobody's `PATH`:
+The boot script runs the daemon. To run it by hand, as root, by full path:
 
 ```sh
 adb shell 'su -c "/data/local/bin/overdub -name kitchen"'
 ```
 
-| Flag | | |
-|---|---|---|
-| `-name` | **required** | unique device name Home Assistant identifies the Dot by |
+| Flag | |
+|---|---|
+| `-name` | **required**: the unique device name Home Assistant knows |
+| `-version` | print the version and exit |
 
-Everything else is fixed in the binary, none of it having a second sensible
-value here: `event1` and keycode 138, `mtk-kpd` for the clone, `wlan0` and
-tcp/6053.
+Everything else is fixed in the binary: `event1`, keycodes 138 and 113,
+`mtk-kpd` for the clone, `wlan0`, tcp/6053 and tcp/8928.
 
 ## Uninstall
 
@@ -276,160 +222,143 @@ tcp/6053.
 deploy/uninstall.sh
 ```
 
-The order matters if you interrupt it: the boot script goes first, so a reboot
-part way through leaves a Dot with nothing running rather than a supervisor
-respawning a half-deleted install. The daemon gets `SIGTERM` rather than being
-killed outright, so it gives the button back and destroys its uinput clones on
-the way out.
-
-Everything goes: the boot script, the binary, the API key, the Sendspin identity,
-`mapdump.jar` and the directory it sits in, the log the boot script writes, and
-the two properties that remember whether Sendspin was switched off and the
-output delay it was left at -- so installing
-again starts with it on rather than inheriting a decision nothing on the device
-explains.
-`/data/local/bin` goes with them if nothing else is left in it. Removing the jar
-revokes nothing: see [Alexa commands](#alexa-commands). The Sendspin identity
-matters as much as the API key does -- the pairing token is derived from it, so a
-copy left behind stays valid for a Dot that no longer runs this.
-
-The tcp/6053 and tcp/8928 rules the daemon opened go too, once the daemon is
-confirmed gone, so no reboot is needed. An uninstall that reports trouble stops
-before that step and leaves them in the chain.
-
-Amazon's stack is untouched, because installing never touched it. Home Assistant
-will show the device as unavailable; delete it there when you are done.
+- It removes the boot script first. A reboot part way through leaves nothing
+  running, not a supervisor respawning a half-deleted install.
+- The daemon gets `SIGTERM`, so it releases the button and destroys its uinput
+  clones.
+- It removes the boot script, the binary, the API key, the Sendspin identity,
+  `/data/local/map`, the log, and every `persist.overdub.*` property. A new
+  install starts with Sendspin on and no output delay.
+- `/data/local/bin` goes too if it is then empty.
+- The tcp/6053 and tcp/8928 rules go once the daemon is confirmed gone, so no
+  reboot is needed. An uninstall that reports trouble stops before this step.
+- Removing the jar revokes nothing; see [Alexa commands](#alexa-commands).
+- The Sendspin identity matters as much as the API key: the pairing token
+  derives from it, so a copy left behind stays valid.
+- Amazon's stack is untouched. Delete the device in Home Assistant when done.
 
 ## Home Assistant
 
-The Dot announces itself, so Home Assistant discovers it: it appears under
-**Settings -> Devices & Services** as an ESPHome device named after `-name`,
-and adding it asks only for the encryption key the installer printed.
-
-If it does not appear, add it by hand at **Add integration -> ESPHome** with the
-Dot's address and port `6053`; `adb shell ip -4 addr show wlan0` gives the
-address. Discovery is multicast and does not cross subnets, so a Home Assistant
-on a different network segment needs the address either way.
+- The Dot announces itself over mDNS. It appears under
+  **Settings -> Devices & Services**, named after `-name`. Adding it asks only
+  for the encryption key the installer printed.
+- If it does not appear, use **Add integration -> ESPHome** with the Dot's
+  address and port `6053`. `adb shell ip -4 addr show wlan0` gives the address.
+  Discovery does not cross subnets.
+- Set a DHCP reservation. Home Assistant re-finds a moved device by name only
+  while discovery reaches it.
+- The Dot is the server; Home Assistant dials in to tcp/6053. The daemon opens
+  that port on the Dot's firewall.
 
 > **The key is the whole of the access control.** ESPHome has no peer
-> allowlist, so anything that can route to the Dot may open a connection. What
-> the key guards is what that connection reaches, not whether it is made: a peer
-> without the key learns the device name and holds one of eight slots for ten
-> seconds, and eight of them can keep Home Assistant off the Dot for as long as
-> they care to. The firewall rule matches the interface rather than a source
-> range, so that reach is wider than the local subnet, and a VPN client on
-> another one is inside it. SECURITY.md has the measurement.
-
-**A DHCP reservation is still worth setting.** Home Assistant stores the address
-it found, and re-finds the device by name after a change, but only while
-discovery reaches it.
-
-The device is the server and Home Assistant dials in, the reverse of most
-integrations. It needs inbound reach to tcp/6053, which the daemon opens on the
-Dot's own firewall.
+> allowlist, so anything that can route to the Dot may connect. A peer without
+> the key learns the device name and holds 1 of 8 slots for 10 seconds; 8 of
+> them keep Home Assistant off the Dot for as long as they like. The firewall
+> rule matches the interface, not a source range, so a VPN client on another
+> subnet is inside it. SECURITY.md has the measurement.
 
 ### What it exposes
 
-| Entity | Kind | Notes |
+Each entity id is `<domain>.<name>_<suffix>`.
+
+| domain | suffix | category | value |
+|---|---|---|---|
+| event | `action_button` | control | a gesture (1) |
+| event | `mute_button` | control | a gesture (1) |
+| media_player | `speaker` | control | volume, mute, playback (2) |
+| switch | `microphone_muted` | control | on: muted (3) |
+| sensor | `uptime` | diagnostic | seconds since boot |
+| sensor | `wifi_signal` | diagnostic | dBm (4) |
+| sensor | `volume` | diagnostic | % of the speaker's 30 steps |
+| sensor | `jack_volume` | diagnostic | % for the 3.5 mm output |
+| sensor | `bluetooth_volume` | diagnostic | % for a paired speaker |
+| sensor | `cpu_temperature` | diagnostic | °C, the SoC's thermal zone |
+| sensor | `memory_available` | diagnostic | MiB an allocation could get |
+| binary_sensor | `audio_jack` | diagnostic | on: a plug in the socket |
+| sensor | `output_device` | diagnostic | `speaker`, `jack`, `bluetooth` (5) |
+| binary_sensor | `speaker_playing` | diagnostic | on: wired audio out (6) |
+| binary_sensor | `alexa_registered` | diagnostic | on: has an account (7) |
+| select | `action_button_mode` | config | starts `intercept` (8) |
+| select | `mute_button_mode` | config | starts `monitor` (8) |
+| select | `network_adb` | config | `Off`, `Insecure`, `Secure` (9) |
+| text | `alexa_command` | config | run as though spoken (10) |
+| switch | `sendspin` | config | on: Sendspin is up (11) |
+| number | `sendspin_output_delay` | config | 0 to 5,000 ms (12) |
+
+1. See [The action button](#the-action-button).
+2. Volume and mute of the live route, and playback of an mp3 URL through
+   Alexa's synthesizer.
+3. Setting it presses the mute key, ring included.
+4. A reading that is not a signal is missing, not zero.
+5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
+   count.
+6. Sound shorter than about 1.5 seconds is not reported. Bluetooth is not seen.
+7. Off on a Dot never set up, or deregistered; everything else still works.
+8. `intercept`, `monitor` or `pass through`.
+9. `Secure` only when a key was installed.
+10. Listed only with `mapdump.jar` installed and the Dot registered.
+11. Off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule
+    and ends any session. Survives a reboot.
+12. How far ahead of a chunk's timestamp the Dot plays. A music server can set
+    it too; the last write wins, and the number shows what is applied.
+    Survives a reboot and works with the switch off.
+
+The Sendspin entities are listed only when the Dot could read or create its
+Sendspin identity.
+
+### How often it reads
+
+| every | reads | when |
 |---|---|---|
-| `event.<name>_action_button` | none | Home Assistant's standard button types: `press_end`, `multi_press_end`, `long_press_start`, `long_press_end`; an event, so it has no state between presses |
-| `sensor.<name>_uptime` | diagnostic | seconds since boot |
-| `sensor.<name>_wifi_signal` | diagnostic | dBm; a reading that is not a signal is reported as missing rather than as zero |
-| `sensor.<name>_volume` | diagnostic | percent of the speaker's own scale, which is 30 steps here; a muted stream reads as zero |
-| `sensor.<name>_cpu_temperature` | diagnostic | °C, from the SoC's own thermal zone |
-| `sensor.<name>_memory_available` | diagnostic | MiB the kernel says an allocation could get, which is not the same as free |
-| `sensor.<name>_jack_volume` | diagnostic | percent, for the 3.5mm output rather than the speaker; a muted stream reads as zero here too |
-| `sensor.<name>_bluetooth_volume` | diagnostic | percent, for a speaker paired over bluetooth; the Dot's own level for that route rather than the speaker's volume, and a muted stream reads as zero here too |
-| `binary_sensor.<name>_audio_jack` | diagnostic | whether anything is in the 3.5mm socket |
-| `sensor.<name>_output_device` | diagnostic | where the sound is going: `speaker`, `jack` or `bluetooth`; bluetooth that carries no audio, such as the Alexa app over BLE, does not count as a route |
-| `binary_sensor.<name>_speaker_playing` | diagnostic | whether audio is coming out, by either wired route; sound shorter than about a second and a half is not reported, and bluetooth is not seen at all |
-| `binary_sensor.<name>_alexa_registered` | diagnostic | whether the Dot holds an Amazon account, which is what setup gives it; a Dot that was never set up, or that deregistered itself, reads off while the button and the rest of this list go on working |
-| `media_player.<name>_speaker` | none | the volume, the mute, the controls that change them, and playback: it sets the level of whichever route is live, and plays an mp3 you give it by handing the URL to Alexa's own synthesizer |
-| `switch.<name>_microphone_muted` | none | whether the microphone is muted, and the control that changes it; muting from here presses the mute key, so it is the mute the button performs, ring included |
-| `event.<name>_mute_button` | none | the microphone mute key, reported the same way the action button is |
-| `select.<name>_mute_button_mode` | config | what the daemon does with the mute key; ships in `monitor` |
-| `select.<name>_action_button_mode` | config | what the daemon does with the action button: intercept, monitor or pass through |
-| `text.<name>_alexa_command` | config | a box that runs what you type on the Echo as though it had been spoken; listed only where `mapdump.jar` is installed and the Dot is registered |
-| `select.<name>_network_adb` | config | adb over the network on tcp/5555: `Off`, `Insecure`, and `Secure` when a key was installed |
-| `switch.<name>_sendspin` | config | whether the Dot offers Sendspin at all: off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule and ends any session in progress. Survives a reboot. Listed only where the Dot could read its Sendspin identity |
-| `number.<name>_sendspin_output_delay` | config | milliseconds the Dot plays a server's audio ahead of the moment it was stamped for, 0 to 5,000. A music server can set the same figure and the last one set wins; whichever did, this is what is applied. Survives a reboot, works with the switch off, and is listed under the same condition |
+| 60 seconds | uptime, signal | always |
+| 60 seconds | registration | subscribed |
+| 2.5 seconds | 3 volumes, jack, route, temperature, memory, mic | subscribed |
+| 500 ms | whether the speaker is playing | subscribed |
 
-Uptime, signal and the registration are read once a minute, and again when Home
-Assistant subscribes. Both volumes, the jack, the temperature, the memory and the
-microphone are read every two and a half seconds, whether the speaker is playing
-every half second, and all of it only while something is subscribed -- except
-uptime and signal, which are cheap enough to read either way. So the
-registration has no state to show on the first connect after a restart, until
-that subscriber's own reading arrives a moment later.
+- The first subscriber wakes both polls. The registration has no state on the
+  first connect after a restart until that reading arrives.
+- A value is sent only when it changes.
 
-The microphone switch carries one caution: unmuting needs only the API key, not
-a hand on the Dot, so anything holding that key can turn the microphone back on.
-Everything is sent only when it changes, so the uptime arrives every minute,
-the others when they move, and a quiet short tick costs the reads and no
-traffic at all.
+### Volume
 
-That is why a volume you have just turned appears within a few seconds, whether
-you turned it with the buttons, from an app, or by asking Alexa.
+- A volume change appears within a few seconds, whether it came from the keys,
+  an app or Alexa.
+- Setting it from Home Assistant sets the level of the route in
+  `output_device` exactly. It is silent: no key press, so no tick.
+- Music Assistant can set it over Sendspin too.
+- Android keeps a level per route: `volume` for the speaker, `jack_volume` for
+  the socket, `bluetooth_volume` for a paired speaker. All 3 are reported
+  whatever is connected.
+- Mute is not per route. Muted, all 3 read 0.
+- `bluetooth_volume` is the Dot's attenuation, in series with the speaker's own
+  volume. Turning the speaker itself down is invisible here.
+- Plugging in a cable disconnects a paired speaker, and it does not reconnect
+  when you pull the cable. Connecting a speaker with a cable already in works:
+  the Dot plays to the speaker.
 
-Setting it from Home Assistant goes the other way down the same path: the daemon
-asks Android for the level outright, so it lands exactly where you put the
-slider and every other reader of the volume agrees with it afterwards. It moves
-the route you are hearing, so with headphones in the socket the slider moves the
-socket's level and leaves the speaker's alone.
+#### Muting holds the volume keys
 
-It is silent, and it used to be heard: the daemon pressed the volume keys one
-per step, and Android ticks on every adjustment. An automation setting the
-volume at four in the morning no longer wakes the room.
-
-Music Assistant can set it too, over Sendspin, and the same is true there. A
-Dot that offers no volume is left out of the group volume a server works out,
-so these are now part of it.
-
-**Muting holds the volume keys.** Android does not lift its own mute when a
-volume key is pressed -- it leaves the mute set and quietly resets the level to
-one step -- so while the Dot is muted the daemon takes the keys, and the first
-press lifts the mute and moves nothing. A second press then moves the volume as
-usual. Only the keys on the Dot do this: a slider moved in Home Assistant while
-muted sets the level and leaves the mute alone, so it takes effect when you
-unmute. Two things follow from the grab: nothing else on the Dot sees a volume
-press while it is muted, and Alexa's advanced factory reset, which is mute and
-volume down held together, cannot complete until the mute is lifted.
-
-`volume` is the speaker's own level, `jack_volume` is the socket's, and
-`bluetooth_volume` is a paired speaker's. Android keeps a level per route and
-switches between them when you plug something in or connect a speaker, so the
-one you are hearing is the one `output_device` names. All three are reported
-whatever is connected, because all three are real levels the device would return
-to. Mute is not per route, so muting reads as zero on all of them at once.
-
-Plugging a cable in disconnects a paired speaker, and it does not come back when
-you pull the cable out. The other order works: connect a speaker with a cable
-already in and the Dot holds both, playing to the speaker.
-
-`bluetooth_volume` is not the paired speaker's own volume. The Dot attenuates
-before it sends the audio, so the two sit in series and turning the speaker
-itself down is invisible here. The media player's slider follows
-`output_device`, so it is this level whenever a speaker is connected.
+- Android does not lift its mute on a volume key; it resets the level to 1 step
+  instead. So while the Dot is muted, the daemon grabs the volume keys.
+- The first key press lifts the mute and moves nothing. The next moves the
+  volume.
+- A Home Assistant slider moved while muted sets the level and leaves the mute
+  on.
+- While muted, nothing else on the Dot sees a volume key. Alexa's advanced
+  factory reset (mute and volume down held) cannot complete.
 
 ### Playing something on it
 
-`media_player.play_media` hands the URL to Alexa's synthesizer, which fetches and
-plays it the way she plays her own speech -- mixed and ducked against whatever
-else is going on, rather than fighting it. Two rules come from her rather than
-from here:
+`media_player.play_media` hands the URL to Alexa's synthesizer. She fetches it
+and plays it like her own speech, mixed and ducked. Her rules:
 
-* **The clip must be CBR mp3 at 48 kbps, 24 kHz, mono.** Anything variable is
-  refused by her demuxer, and the refusal reads exactly like a file that is not
-  there. Home Assistant's `tts.speak` takes `preferred_bitrate: 48` from 2026.9,
-  which is the whole of the setup on newer versions.
-* **The URL must be `http://`, with no comma or double quote in it.** The intent
-  that carries it is a comma-separated array and hand-built JSON, so those two
-  characters end it early. `https` is not refused by Alexa so much as unverified
-  here.
-
-The Dot fetches the clip itself, so whatever serves it has to be reachable *from
-the Dot*, which is the opposite direction from the one Home Assistant uses to
-reach the Dot. A `/local/` file served by Home Assistant is the ordinary case.
+- **CBR mp3, 48 kbps, 24 kHz, mono.** She refuses variable bitrate, and the
+  refusal looks like a missing file. Home Assistant's `tts.speak` takes
+  `preferred_bitrate: 48` from 2026.9.
+- **`http://` only, with no comma or double quote in the URL.** Those two
+  characters end the intent early. `https` is unverified.
+- **The Dot fetches the clip itself**, so the server must be reachable *from
+  the Dot*. A `/local/` file served by Home Assistant is the ordinary case.
 
 ```yaml
 action: tts.speak
@@ -437,48 +366,40 @@ target:
   entity_id: tts.home_assistant_cloud
 data:
   media_player_entity_id: media_player.kitchen_speaker
-  message: "The back door has been open for ten minutes"
+  message: "The back door has been open for 10 minutes"
   options:
     preferred_bitrate: 48
 ```
 
-The entity reports `playing` while Alexa is actually playing rather than from
-the moment you ask, because the daemon learns it from her playback log; expect
-roughly two thirds of a second before it moves. If she never plays it at all,
-the entity gives up and goes back to idle rather than sticking.
+- The entity reads `playing` only while Alexa plays, from her playback log.
+  Expect about 0.7 seconds before it moves.
+- If she never starts, it goes back to idle after 30 seconds.
 
-**When nothing plays, the daemon's log is the wrong place to look.** It records
-what was asked for and nothing else, because everything after that is hers: she
-fetches the clip, she decodes it, and she is where it fails. Her log is where
-the reason is:
+**When nothing plays, read her log, not the daemon's.** The daemon logs only
+the request:
 
 ```sh
 adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'
 ```
 
-Three failures look alike from Home Assistant and are easy to tell apart there:
+- `cannot estimate length of the next mp3 frame`: variable bitrate.
+- `Playback ended: ... FAILED` with nothing before it: usually the fetch, a 404
+  or a URL the Dot cannot route to.
+- **No lines at all**: the request never reached her.
 
-* `cannot estimate length of the next mp3 frame` is the encoding -- a variable
-  bitrate her demuxer will not take.
-* `Playback ended: ... FAILED` with nothing before it is usually the fetch: a
-  404, or a URL the Dot cannot route to.
-* **No lines at all** means the request never reached her.
-
-The routing one catches people out, because it fails in complete silence. The
-Dot fetches the clip itself, and a Dot on an IoT network often cannot open a
-connection to the machine serving it even though that machine reaches the Dot
-perfectly well. Ask the Dot rather than assuming:
+A Dot on an IoT network often cannot reach the server even though the server
+reaches the Dot. Ask the Dot:
 
 ```sh
-adb shell 'su -c "curl -sS -m 5 -o /dev/null -w %{http_code} http://<host>:8123/"'
+url=http://<host>:8123/
+adb shell "su -c 'curl -sS -m 5 -o /dev/null -w %{http_code} $url'"
 ```
 
-`200` means the route is open. A curl error and `000` is the answer: open that
-one route, and everything else already works.
+`200` means the route is open. A curl error and `000` means it is not.
 
-The mode selects are the only entities Home Assistant writes to. There is one
-per button -- the action button and the microphone mute -- and each has three
-settings:
+### The button modes
+
+Each button has a mode select with 3 settings:
 
 | mode | Alexa | Home Assistant |
 |---|---|---|
@@ -486,88 +407,53 @@ settings:
 | `monitor` | answers the press as usual | events |
 | `pass through` | answers the press as usual | nothing |
 
-The action button ships in `intercept`, which is what the daemon is for. **Mute
-ships in `monitor`**: taking it by default would leave a Dot that cannot be
-muted by the button that says mute on it, and monitor is additive -- Alexa still
-mutes, and your automation still fires. `pass through` gives the
-button back -- press-to-talk is measured, and timers and setup mode follow the
-same key path -- while the daemon keeps running and keeps reporting everything
-else. `monitor` is both at once: press-to-talk still works and your automation
-fires too. Only an intercepted press chimes, because in monitor Alexa answers it
-herself and two acknowledgements for one press is worse than none.
+- The action button starts in `intercept`. Mute starts in `monitor`, so the
+  mute button still mutes.
+- `pass through` gives Alexa the button back; the daemon keeps reporting
+  everything else.
+- Only an intercepted action button press chimes. In `monitor`, Alexa answers
+  the press herself, so silence there is correct.
+- A change needs no reboot. A press belongs to the mode set when its key went
+  down.
+- Modes are not remembered: after a restart each button is back in its
+  starting mode. Restore it with an automation on `homeassistant_start` or on
+  the device becoming available.
 
-Changing it takes no reboot and no reinstall. A press arriving mid-change
-belongs to whichever mode was set when the key went down, so nothing is ever
-half-delivered.
+### The action button
 
-The daemon starts in `intercept`, and the mode is not remembered across a
-restart: a Dot that reboots comes back holding its button whatever was set
-before. Home Assistant will restore it if you ask it to, with an
-automation on `homeassistant_start` or on the device becoming available.
+It reports Home Assistant's standard button event types, so an automation for
+any other button works here.
 
-`audio_jack` is on whenever the socket is occupied and nothing more. The
-detection is electrical and stops at the contacts: a bare cable with nothing on
-the far end reads the same as headphones, and unplugging the far end of a
-connected cable is invisible to it.
+- Quick presses form a run. `multi_press_end` fires with the count 350 ms after
+  the last release.
+- A single press fires `press_end`, after the same 350 ms wait.
+- A hold past 600 ms (Alexa's long-press threshold) fires `long_press_start`
+  **while you still hold**. Release fires `long_press_end`. A hold ends any run
+  before it, and that run is reported first.
+- If the daemon notices the threshold late, it sends both hold events at
+  release. It never reports a hold early.
+- The chime sounds on key-down, once per press: 4 presses are 4 chimes and one
+  `multi_press_end`.
+- `long_press_start` and `long_press_end` are not a guaranteed pair. If Home
+  Assistant misses the release, whatever the hold started keeps running. Give
+  such an automation its own timeout.
+- It is an event, so it has no state, and a press made while Home Assistant was
+  disconnected is lost.
 
-`action_button` is the button itself. It reports Home Assistant's standard
-button gestures rather than names of its own, so an automation written for any
-other button works here.
+Each gesture also fires `esphome.overdub_pressed` on Home Assistant's bus:
 
-Quick presses are collected into a run, which fires `multi_press_end` once with
-its count about a third of a second after you stop pressing. A single press
-fires `press_end`, and waits out that same third of a second first: nothing
-knows a press was single until it has.
-
-Holding past six hundred milliseconds, Alexa's own threshold for a long press,
-fires `long_press_start` **while you are still holding**, so an automation can
-run for as long as the button is down. Letting go fires `long_press_end`. A hold
-ends any run in front of it, and that run is reported first.
-
-If the daemon is busy enough to notice the threshold late, it falls back to the
-duration the release carries and sends both at once. The hold is still reported;
-it is not reported early.
-
-The chime does not wait. It sounds as the button goes down, once per press, so
-four presses are four chimes and one `multi_press_end`.
-
-An `EventResponse` carries a type and nothing else, so the numbers arrive beside
-it as an `esphome.overdub_pressed` event on Home Assistant's bus. It always
-carries `event_type`, `device` and `button` -- every button fires the same bus
-event, so `button` is what tells them apart and an automation wants it in its
-trigger. `multi_press_count` comes with `multi_press_end`, `held_ms` with
-`long_press_end`. Both are integers, so
-`{{ trigger.event.data.multi_press_count == 7 }}` works without a cast. The
-blueprint in `ha/` wires the gestures up.
-
-**Every button fires the same bus event**, so an automation that filters only on
-`device_id` runs for all of them: with mute in `monitor`, a press of the mute key
-would run an action meant for the action button. Filter on `button` as well. The
-blueprint in `ha/` does, but **Home Assistant does not update a blueprint you
-have already imported** -- re-import it after upgrading, or the mute key will run
-your single-press action.
-
-`long_press_start` and `long_press_end` are not a guaranteed pair. Events carry
-no state, so if Home Assistant misses the release -- a restart, a reconnect --
-whatever the hold started keeps running. Give such an automation its own timeout.
-
-It is an event rather than a sensor, so it has no state to read: an automation
-triggers on it, and the dashboard shows no value between presses. A Home
-Assistant that was not connected does not learn about a press afterwards.
-
-Only a press the daemon reports does any of this. In `pass through` the button
-is Alexa's and a press is unreported. The chime tells intercept from the other
-two rather than telling you the daemon is alive: `monitor` reports the press
-without chiming, so silence there is the mode working as asked.
-
-The mode selects are still the only entities Home Assistant writes to. Everything
-else reports, the button included, and together they are the connection proved
-end to end in both directions.
+- Always: `event_type`, `device` and `button`.
+- `multi_press_count` with `multi_press_end`; `held_ms` with `long_press_end`.
+  Both are integers: `{{ trigger.event.data.multi_press_count == 7 }}` works.
+- **Every button fires this event.** Filter on `button` as well as
+  `device_id`, or a mute press in `monitor` runs your action button's action.
+- The blueprint in `ha/` filters on `button`. **Home Assistant does not update
+  an imported blueprint**: re-import it after upgrading.
 
 ### Alexa commands
 
-With `mapdump.jar` installed, the Dot gains a text box on its device page and a
-matching action. Either runs text on the Echo as though somebody had said it:
+With `mapdump.jar` installed, the Dot gets a text box and a matching action.
+Either runs text on the Echo as though spoken:
 
 ```yaml
 action: esphome.kitchen_send_command
@@ -575,120 +461,76 @@ data:
   text: play dance party music on Amazon Music
 ```
 
-Two things have to be true: the jar has to be installed, and the Dot has to be
-registered to an Amazon account. If either is missing, neither the box nor the
-action is advertised at all, rather than being offered and failing on every
-call, and the daemon log says which one it was. The one exception is a Dot that
-cannot be asked -- if the registration reading itself fails, the box is offered
-rather than hidden, because the jar is the switch somebody chose and a reading
-that did not happen is not an answer. The
-box shows the last command it was given, so an automation that sent one can be
-seen to have sent it.
+- Both appear only when the jar is installed and the Dot is registered to an
+  Amazon account. Otherwise neither is listed, and the daemon log says why.
+- If the registration cannot be read, the box is offered.
+- The box shows the last command it was given.
+- The daemon checks again every 5 minutes, so the box appears without a restart
+  once both are true.
+- **Registration is the credential.** `binary_sensor.<name>_alexa_registered`
+  reports it. A factory-reset or restored Dot is usually not registered.
 
-**Registration is the credential**, which is why it gates the feature.
-`binary_sensor.<name>_alexa_registered` reports it, and a Dot that was factory
-reset, or rooted and restored, usually is not registered.
+To register a Dot:
 
-Registering one is Alexa's own process, and the daemon's only part in it is to
-get out of the way:
-
-1. Set `Action button mode` to `pass through`, which gives Alexa her button
-   back without stopping anything else here.
-2. Hold the action button until the ring turns orange. That is Alexa's own long
-   press, and it is what the daemon was intercepting.
-3. Add the device in the Alexa app. The Dot brings up its own Wi-Fi network to
-   finish, so it leaves your LAN and Home Assistant shows it as unavailable
-   until setup ends. `adb` over USB is unaffected; `adb` over the network goes
-   with the LAN.
+1. Set `Action button mode` to `pass through`.
+2. Hold the action button until the ring turns orange.
+3. Add the device in the Alexa app. The Dot brings up its own Wi-Fi network
+   for setup, so it leaves your LAN and Home Assistant shows it unavailable
+   until setup ends. `adb` over USB still works; network `adb` does not.
 4. Set the button mode back to `intercept`.
 
-The daemon needs nothing else: it asks again every five minutes, so the command
-box appears on its own once the Dot is registered, with no restart and no
-reinstall.
-
 > **This is an unofficial endpoint, reached with an account-level credential.**
-> `/api/behaviors/preview` is undocumented and its request shape has drifted
-> before.
+> `/api/behaviors/preview` is undocumented, and its request shape can change.
 >
-> What MapDump reads is the OAuth refresh token this Echo was registered with,
-> and the daemon trades it for cookies scoped to `.amazon.com` rather than to an
-> Alexa subdomain. Measured, what comes back is `at-main`, `sess-at-main`,
-> `session-id`, `session-token`, `ubid-main` and `x-main` -- the set a browser
-> signed in to amazon.com carries. So while the daemon runs it holds a signed-in
-> session on the retail account, order history and addresses included: the
+> MapDump reads the OAuth refresh token this Echo was registered with. The
+> daemon trades it for cookies scoped to `.amazon.com`: `at-main`,
+> `sess-at-main`, `session-id`, `session-token`, `ubid-main` and `x-main`. That
+> is a signed-in retail session, order history and addresses included, the same
 > breadth [alexa_media_player](https://github.com/alandtse/alexa_media_player)
-> gets by asking you to log in, arrived at from the other end. Not AWS, which is
-> a separate sign-in. The token and the cookies are kept in memory and never
-> written to disk, and the only lock on the port that reaches them is the API
-> key.
+> gets from a login. It is not AWS. The token and cookies stay in memory, and
+> the API key is the only lock on the port that reaches them.
 >
-> The failure mode to watch for is not an error from the daemon but the Dot
-> quietly deregistering. To revoke what it holds, deregister the Dot in the
-> Alexa app or under Manage Your Content and Devices; uninstalling removes the
-> jar but revokes nothing already extracted.
+> Watch for the Dot quietly deregistering, not for an error. To revoke,
+> deregister the Dot in the Alexa app or under Manage Your Content and Devices.
+> Uninstalling revokes nothing already extracted.
 
 ### Network ADB
 
-`Network ADB` turns adb on over the network, on tcp/5555, so the Dot can be
-worked on without a cable. It has three positions, and a reboot always returns
-it to the first:
+`Network ADB` turns on adb over tcp/5555. A reboot returns it to `Off`.
 
 | Position | What it does |
 |---|---|
-| `Off` | adbd stops listening on the network, and tcp/5555 is closed again |
-| `Insecure` | adb is open to the local network, and **anyone on it may connect** |
-| `Secure` | adb is open, but only a client holding the installed key may connect |
+| `Off` | adbd stops listening on the network; tcp/5555 closes |
+| `Insecure` | open to the network: **anyone on it may connect** |
+| `Secure` | open only to a client holding the installed key |
 
-Connect with `adb connect <address>:5555`. `ANDROID_SERIAL` then picks that
-target for `install.sh` as readily as a cable does.
-
-**`Off` and `Insecure` are the network only.** Neither touches adb over USB, so
-`Off` is not a way to lock the Dot down against someone holding it: it closes
-tcp/5555 and nothing else.
-
-**`Secure` reaches the cable as well.** `ro.adb.secure` is a setting on `adbd`
-rather than on one transport, so while it is on, every adb connection is
-challenged. A machine that does not hold the installed key gets `unauthorized`
-over USB too, and this Dot has no screen to show the prompt a phone would.
-
-Changing position restarts `adbd`, which drops every live adb session -- the one
-you may be watching from included. Do not change it from an install that is
-running over adb.
-
-`Secure` is offered only if `deploy/install.sh` found a public key to install --
-`~/.android/adbkey.pub`, or whatever `ADBKEY` names. Without one it would refuse
-every machine including yours, so it is not listed at all. That key becomes the
-*only* one adbd will accept: a Dot that had authorised other machines over USB
-stops accepting them.
+- Connect with `adb connect <address>:5555`. `ANDROID_SERIAL` then picks it for
+  `install.sh`.
+- **`Off` and `Insecure` affect the network only.** Neither touches USB.
+- **`Secure` covers USB too.** `ro.adb.secure` applies to every transport, so
+  a machine without the installed key gets `unauthorized` over USB, and the Dot
+  has no screen to approve it.
+- `Secure` is offered only if `install.sh` found a public key
+  (`~/.android/adbkey.pub` or `$ADBKEY`). That key becomes the *only* one adbd
+  accepts.
+- A position change restarts adbd, which drops every adb session. Do not change
+  it from an install that runs over adb.
+- If a key locks you out, set `Off` or `Insecure` from Home Assistant; that path
+  does not use adb. Failing that, power-cycle the Dot.
+- Uninstalling does not turn it off. A reboot does.
+- Installing with no key while in `Secure` leaves the select showing a position
+  it no longer offers, which Home Assistant marks invalid. A reboot clears it.
 
 > **Secure is authentication, not a sandbox.** `ro.secure=1` on this build, so
-> adbd runs as `shell` and root still comes from `su`. A client holding the key
-> reaches root exactly as it did before. It decides who may connect, not what
-> they may do, and it is not a reason to expose tcp/5555 beyond your own network.
-
-If a key ever locks you out, set the control back to `Off` or `Insecure` from
-Home Assistant. That path is the ESPHome API on tcp/6053 and owes nothing to
-adb. Failing that, power-cycle the Dot.
-
-Uninstalling does not turn it off. The position lives in the property store and
-the firewall chain rather than on disk, and `uninstall.sh` may itself be running
-over the connection it would cut, so it says so and leaves it to a reboot.
-
-Installing with no key while the Dot is in `Secure` leaves the control reporting
-a position it no longer offers, and Home Assistant marks that state invalid.
-Both halves are true: the Dot really is in `Secure`, and `Secure` really cannot
-be chosen with no key to install. Nothing is broken by it, and a reboot clears
-it, since `ro.adb.secure` does not survive one.
+> adbd runs as `shell` and root comes from `su`. A client with the key still
+> reaches root. Do not expose tcp/5555 beyond your own network.
 
 ### Encryption
 
-The API speaks ESPHome's `Noise_NNpsk0_25519_ChaChaPoly_SHA256`, and speaks
-nothing else. There is no plaintext mode, because this build does not implement
-one, and no peer allowlist, because ESPHome has no such concept: the device is
-the server, and the client authenticates with a pre-shared key.
-
-`deploy/install.sh` generates that key when the device has none, the way
-ESPHome's own tooling does, and prints it once:
+- The API speaks only ESPHome's `Noise_NNpsk0_25519_ChaChaPoly_SHA256`. There
+  is no plaintext mode.
+- `deploy/install.sh` generates the key when the Dot has none, and prints it
+  once:
 
 ```
 Generated an API encryption key. Paste it into Home Assistant's
@@ -697,71 +539,72 @@ ESPHome integration. The installer keeps no copy:
     kR2b...
 ```
 
-Keep it. The installer does not take a key of your own, and re-running it leaves
-an existing one alone, so reinstalling does not lock Home Assistant out of a Dot
-it was already talking to.
-
-To rotate: delete `/data/local/bin/.overdub-noise-key` on the Dot, install
-again, and paste the new key into Home Assistant.
+- Keep it. A reinstall keeps an existing key, so Home Assistant stays paired.
+  The installer does not accept a key of your own.
+- To rotate: delete `/data/local/bin/.overdub-noise-key` on the Dot, install
+  again, and paste the new key into Home Assistant.
 
 ## Troubleshooting
 
 ```sh
 adb shell 'su -c "cat /data/local/tmp/overdub.log"'      # truncated per boot
 adb shell 'su -c "iptables -L INPUT -n -v | grep 6053"'  # packet counter
-adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # Alexa on playback
+adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
 ```
 
-| Symptom | Look at |
-|---|---|
-| you need the Dot's address to add it | `adb shell ip -4 addr show wlan0` |
-| Home Assistant times out adding the Dot | the tcp/6053 packet counter. Zero means the traffic never arrived |
-| Home Assistant logs `Unexpected device found` | the stored address now answers with a different MAC, so it is a different device: set a DHCP reservation |
-| Home Assistant says the key is invalid | the daemon log. `handshake failed` means the key it sent is not the one on the Dot |
-| Home Assistant says the device requires encryption | it has no key stored for this Dot; give it the one the installer printed |
-| nothing starts, and the log ends `no such file or directory (deploy/install.sh generates one)` | there is no key on the device: rerun `deploy/install.sh <name>` |
-| nothing starts, and the log says the key `decodes to N bytes` | the key on the device is corrupt. A reinstall keeps an existing key, so delete it first: `adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"'` |
-| nothing starts, and the log says `NAME is unset` | the boot script was installed by hand; rerun `deploy/install.sh <name>` |
-| mute stopped working | the clone's name. Android picks a keylayout by device name, so it must be `mtk-kpd` |
-| every keycode looks wrong | the build. `GOARCH=arm` is required |
-| the button does not chime | the mode first: only `intercept` chimes. Then the daemon log, where `presses will be silent` means the audio player did not start. It needs nothing of Alexa's stack, only the device's own `libOpenSLES.so` |
-| the button does nothing, and the device is otherwise online | the `Action button mode` select, then the daemon log, which names the address that changed it |
-| the button rings Alexa rather than chiming | the mode. `pass through` is Alexa's alone; `monitor` is hers *and* reported, and only `intercept` chimes |
+- **Home Assistant times out adding the Dot**: check the tcp/6053 packet
+  counter. 0 means the traffic never arrived.
+- **`Unexpected device found`**: the stored address now answers with a
+  different MAC. Set a DHCP reservation.
+- **The key is invalid**: the daemon log. `handshake failed` means Home
+  Assistant's key is not the one on the Dot.
+- **The device requires encryption**: Home Assistant has no key for this Dot.
+  Give it the one the installer printed.
+- **Nothing starts; the log ends
+  `no such file or directory (deploy/install.sh generates one)`**: there is no
+  key. Rerun `deploy/install.sh <name>`.
+- **Nothing starts; the log says the key `decodes to N bytes`**: the key is
+  corrupt. A reinstall keeps it, so delete it first:
+  `adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"'`
+- **Nothing starts; the log says `NAME is unset`**: the boot script was
+  installed by hand. Rerun `deploy/install.sh <name>`.
+- **Mute stopped working**: the clone's name. Android picks a keylayout by
+  device name, so it must be `mtk-kpd`.
+- **Every keycode looks wrong**: the build. `GOARCH=arm` is required.
+- **The button does not chime**: the mode first; only `intercept` chimes. Then
+  the daemon log: `presses will be silent` means the audio player did not
+  start. It needs only the device's own `libOpenSLES.so`.
+- **The button does nothing**: the `Action button mode` select, then the daemon
+  log, which names the address that changed it.
+- **The button rings Alexa instead of chiming**: the mode is `pass through` or
+  `monitor`.
 
 ## How it works
 
-`docs/` is the engineering record: what was measured on the hardware, and what
-each decision is defending against.
+`docs/` records what was measured on the hardware and what each decision
+defends against.
 
-* [Hardware](docs/hardware.md): the input nodes and keycodes, and how to test
-  against a live Dot
-* [Hard constraints](docs/constraints.md): what cannot change, and why
-* [The button](docs/button.md): the grab, the clone, the modes, and what a
-  press reports
-* [The Home Assistant API](docs/api.md): the entities, the polls, and the
+- [Hardware](docs/hardware.md): the input nodes, and testing against a live Dot
+- [Hard constraints](docs/constraints.md): what cannot change, and why
+- [The button](docs/button.md): the grab, the clone, the modes, the gestures
+- [The Home Assistant API](docs/api.md): the entities, the polls, the
   encryption
-* [Finding the Dot](docs/mdns.md): the mDNS responder, and what it advertises
-  for
-* [Network adb, and the microphone](docs/device.md): the two things Home
-  Assistant can switch on the Dot itself
-* [Audio](docs/audio.md): what it takes to make a sound here, and the chime
-* [Things that fail silently](docs/pitfalls.md): the failures that report
-  success
-* [Deployment](docs/deployment.md): installing and removing it
+- [Finding the Dot](docs/mdns.md): the mDNS responder and its adverts
+- [Network adb, and the microphone](docs/device.md): what Home Assistant can
+  switch on the Dot itself
+- [Audio](docs/audio.md): making a sound here, and the chime
+- [Alexa commands](docs/command.md): the credential, MapDump, the text command
+- [Music Assistant](docs/sendspin.md): the Sendspin client, its handshake, its
+  clock
+- [Things that fail silently](docs/pitfalls.md): failures that report success
+- [Deployment](docs/deployment.md): installing and removing it
 
 ## Licence
 
-BSD 2-Clause; [LICENSE.txt](LICENSE.txt) carries the terms.
-
-The chime is original to this repository, so the licence covers it as it covers
-the code. It is not a recording and not an asset: `internal/audio/chime.go`
-renders it at startup from two sine tones, 880 Hz then 1320 Hz, faded out over
-the last tenth of a second. It was an mp3 built by ffmpeg until the daemon
-learned to make the sound itself, and those are that clip's own numbers.
-
-This licence covers the code in this repository and nothing else. This
-repository contains no Amazon code. The Amazon names it does carry identify
-things already installed on the device, so that this software can interoperate
-with them: functional names, not copied implementation.
-
-overdub is not affiliated with, endorsed by, or supported by Amazon.
+- BSD 2-Clause; [LICENSE.txt](LICENSE.txt) carries the terms.
+- The chime is original to this repository and covered by the same licence.
+  `internal/audio/chime.go` renders it at startup from 2 sine tones, 880 Hz
+  then 1320 Hz.
+- This repository contains no Amazon code. The Amazon names it carries identify
+  things already on the device, so this software can interoperate with them.
+- overdub is not affiliated with, endorsed by, or supported by Amazon.

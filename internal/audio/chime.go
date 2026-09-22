@@ -1,3 +1,5 @@
+// Package audio renders the chime, sounds it through OpenSL ES, and places a
+// server's stream on the frame the player says it belongs on.
 package audio
 
 import "math"

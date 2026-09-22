@@ -1,134 +1,66 @@
 # The button
 
-## Button interception
+## Interception
 
-`internal/button` over `internal/evdev`. `event1` carries the action button
-*and* mute, so an exclusive `EVIOCGRAB` takes both. The fix is a `uinput` clone
-advertising exactly the real key bitmap, named `mtk-kpd` so Android applies the
-same keylayout; 138 is consumed and the rest re-emitted. `EventHub` picks the
-clone up by inotify. Read the bitmap with `EVIOCGBIT`, never from sysfs: that
-file's word size differs from `/proc/bus/input/devices` here, and guessing wrong
-silently breaks mute.
+`internal/button` over `internal/evdev`.
 
-The clone copies the original's `struct input_id` too, read with `EVIOCGID` for
-the reason the bitmap is read with `EVIOCGBIT`: it is what the device says
-rather than what this end believes about one model of Dot. All four fields
-matter, and the name is only the last resort among them. Android resolves a
-keylayout by `Vendor_XXXX_Product_XXXX_Version_XXXX.kl`, then
-`Vendor_XXXX_Product_XXXX.kl`, then the device name, then `Generic.kl`. Measured
-on biscuit, neither `Vendor_2454_Product_6500.kl` nor the clone's old
-`Vendor_0001_Product_0001.kl` exists, so both fell through to `mtk-kpd.kl` and
-the name alone was carrying it. Copying the ids means the clone would keep
-matching on a Dot that did ship a vendor keylayout, where the name would not.
+- `event1` carries the action button *and* mute, so an exclusive `EVIOCGRAB`
+  takes both. A `uinput` clone named `mtk-kpd` re-emits every key the daemon
+  does not consume, and Android applies the same keylayout to it. `EventHub`
+  finds the clone by inotify.
+- Read the key bitmap with `EVIOCGBIT`, never from sysfs. The sysfs word size
+  differs from `/proc/bus/input/devices` here, and a wrong guess silently breaks
+  mute.
+- The clone copies the node's `struct input_id` from `EVIOCGID`. Android picks a
+  keylayout by `Vendor_XXXX_Product_XXXX_Version_XXXX.kl`, then
+  `Vendor_XXXX_Product_XXXX.kl`, then the device name, then `Generic.kl`.
+  Biscuit has neither vendor file, so the name `mtk-kpd` selects `mtk-kpd.kl`.
+  The copied ids keep the clone matching on a Dot that ships a vendor file.
+- The bus decides `IsExternal`. With no `device.internal` in the `.idc` (true
+  for both nodes here), `EventHub::isExternalDeviceLocked` calls a device
+  external when its bus is `BUS_USB` or `BUS_BLUETOOTH`. Biscuit's keypad is
+  `BUS_HOST`.
+- The clone's `InputDeviceIdentifier` is byte-identical to the keypad's
+  (`bus=0x0019, vendor=0x2454, product=0x6500, version=0x0010`). Android still
+  gives them different descriptors, so per-device settings do not collide.
+- No test proves the id reaching `uinput` is the one read from the node. That
+  needs `/dev/uinput` and root. The daemon logs the id it cloned; compare it
+  with `dumpsys input`.
+- The button is taken before the network is waited for, and the API waits for
+  `wlan0` in its own goroutine. Mute passes through the read loop, so the read
+  loop cannot wait either.
+- The wait for `wlan0` never gives up. Nothing restarts a daemon that has not
+  exited, so an expired wait would lose the API for the rest of the boot.
 
-The bus is the field that was measurably wrong. `EventHub::isExternalDeviceLocked`
-looks first for `device.internal` in the device's `.idc` and answers from that
-when it is there; with no such property, which is this Dot's case for both
-nodes, it calls a device external when its bus is `BUS_USB` or `BUS_BLUETOOTH`. The
-clone hardcoded `BUS_USB` while biscuit's keypad is `BUS_HOST`. Measured before
-the change, `dumpsys input` agreed on everything else -- both devices
-`Sources: 0x00000501`, `KeyboardType: 1`, identical mapper parameters -- and
-disagreed on `IsExternal`, false for the real node and true for the clone. That
-is the one thing Android could have treated differently about a key arriving
-from a passed-through press, so it is the one thing worth removing.
+### What is fatal, and why
 
-Copying the ids makes the clone's `InputDeviceIdentifier` byte-identical to the
-keypad's, and Android disambiguates them anyway. Measured after the change, the
-two report the same `bus=0x0019, vendor=0x2454, product=0x6500, version=0x0010`
-and different descriptors, `f0d2e427...:24546500` against `d3f110579...:24546500`,
-so the per-device settings that key on a descriptor do not collide. That is the
-answer to the obvious objection rather than an incidental reading.
+- A failed grab. The real node still delivers to `EventHub`, so the clone would
+  land every key twice and mute would toggle on and straight off. Exiting gives
+  the button back to Alexa.
+- A failed re-emission. A write fails for the clone, not for one key, so the
+  daemon would hold the grab with mute going nowhere.
+- A key left down on the clone is a reset gesture held. Alexa resets to factory
+  on the action button alone at 20 seconds, and does an advanced reset on mute
+  and volume down at 8 seconds (docs/hardware.md). Exiting destroys the clone,
+  which releases the key.
+- `Close` destroys the clone before it releases the grab. The read loop can
+  still run at close, so the reverse order leaves `event1` ungrabbed beside a
+  live clone, and a key pressed then lands twice. Losing that key is cheaper.
 
-What no test holds is the wiring: the id reaching `uinput` is the one read from
-the node. `userDev` is tested against an id a test hands it and `idFromBytes`
-against bytes a test hands it, and the two are held together by a round trip,
-but putting the old invented id back in `NewUinput`'s caller leaves the whole
-suite green. Closing that needs `/dev/uinput` and root, which CI has neither of,
-so it is verified on the device instead -- the daemon logs the id it cloned, and
-`dumpsys input` reports what Android made of it. That is the rule CLAUDE.md
-already states, said out loud here because the failure would reach the Dot
-before anything else noticed.
+## The modes
 
-The wait for `wlan0` does not give up. Nothing restarts a daemon that has not
-exited, so a bounded wait that expired would cost the API for the rest of the
-boot on a Dot whose access point came back a minute late. It polls quietly after
-the first minute, because a line a minute for the rest of the boot would bury
-everything else.
+Two selects, `action_button_mode` and `mute_button_mode`. They are selects
+rather than a reading of whether the grab took, because a person who looks at
+that reading almost always wants to change it.
 
-The button is taken before the network is waited for, and the API waits in its
-own goroutine. Waiting for the MAC first left a Dot with no `wlan0` exiting
-after a minute and being restarted five seconds later, with no button for the
-whole boot. Waiting in the read loop would be no better, because mute passes
-through that loop.
-
-`main.go` is left holding the constants, the decision about what a press means,
-how long to wait for the node, and the signal handler. That is the seam every
-later feature arrives through: the package opens the node and reads it, and the
-decisions stay with the caller.
-
-A failed grab is fatal. Without the grab the real node still delivers to
-`EventHub`, so a clone that echoed anyway would land every key twice and mute
-would toggle on and straight back off. Exiting hands the button back to Alexa
-and takes the clone with it; a live clone beside a live original does not.
-
-A failed re-emission is fatal for the same reason. Writes fail for the clone
-rather than for one key, so carrying on holds the grab with mute going nowhere,
-and nothing restarts a daemon that has not exited. Exiting releases the grab and
-the supervisor builds a new clone five seconds later.
-
-A key left down is a reset gesture, held. Alexa binds a regular factory reset to
-the action button alone at 20s, and an advanced one to mute and volume down
-together at 8s; docs/hardware.md carries the config and the thresholds. So the
-stake is a Dot that deregisters itself with nobody touching it, and exiting is
-what takes the key away, because the clone goes with the process.
-
-The clone is destroyed before the grab is released, and not the other way round.
-The read loop can still be running when the close comes, so the reverse order
-opens the same window: `event1` ungrabbed and the clone still live, and a key
-pressed inside it lands twice. Losing that key is the cheaper failure.
-
-## The button modes
-
-These two selects are the only entities on this page Home Assistant writes to,
-and every reading it is told about is read-only. Each is a select rather than a diagnostic reading of whether
-the grab took, because what somebody looking at that reading almost always wants
-is to change it.
-
-**Two buttons, and each holds its own mode.** `event1` carries the action button
-and the microphone mute, the grab takes both, and until now mute was simply
-re-emitted. It is now a button in its own right: `mute_button` reports what it
-did and `mute_button_mode` says what the daemon does with it. That is why the
-mode lives on a `watch` per keycode rather than on the `Interceptor`: one key can
-be held while another is pressed, so each needs its own latch as well as its own
-mode.
-
-Mute ships in **monitor** where the action button ships in **intercept**, and
-that asymmetry is the point. Intercepting mute by default would leave a Dot that
-cannot be muted by the button that says mute on it; monitor is additive, so
-Alexa still mutes and Home Assistant is told. The zero value is still intercept,
-because a key nobody mentioned is one this daemon should keep -- so the shipped
-modes are named where the keys are, in `serve.go`, rather than left to the
-struct.
-
-`serve.go` holds one map of keycode to entity and shipped mode. One rather than
-two, so a key cannot be watched without an entity to report it, or given an
-entity nothing watches; `main_test.go` holds that map against the entities
-`internal/esphome` actually builds, which is the half a single map cannot make
-safe.
-
-A chain per button, too: a run belongs to the key it was pressed on, and one
-shared chain would read a press of each as a double press of either.
-
-Three modes, and they are two independent things rather than three points on a
-line: whether Android sees the key, and whether Home Assistant hears about it.
-**Intercept** keeps the key and reports it. **Monitor** re-emits it *and*
-reports it, so Alexa answers the press as she always did and an automation fires
-too. **Pass through** re-emits it and reports nothing.
-
-Measured on the Dot, 138 injected into `event1` with each mode set through the
-API, counting the daemon's own gesture lines against `uber` in logcat, which is
-this Dot's name for the action button. The daemon's count separates reported
-from not; logcat is what separates the two modes that report:
+- Each keycode has its own mode and latch, because one key can be held while
+  the other is pressed.
+- The action button ships in **intercept**, mute in **monitor**. Intercepting
+  mute by default would leave the mute button unable to mute. The zero value is
+  intercept, because a key nobody configured is one this daemon keeps.
+- The three modes are two independent choices: whether Android sees the key,
+  and whether Home Assistant hears of it. Measured with 138 injected into
+  `event1`, counted against `uber` in logcat:
 
 | mode | daemon reports | Alexa sees the key |
 |---|---|---|
@@ -136,38 +68,20 @@ from not; logcat is what separates the two modes that report:
 | `monitor` | yes | yes |
 | `pass through` | no | yes |
 
-It was a switch, and monitor is what it could not say. Two states can only offer
-"ours" or "hers", and the useful third is both -- press-to-talk still working
-while Home Assistant counts the presses.
+- Intercept is first in the list, so an unconfigured Dot keeps its button.
+- A mode the listing did not offer is refused and logged. Home Assistant sends
+  only listed options, so anything else comes from a peer that invented it.
+- A command for the mode the button already has is turned away.
 
-Intercept is first in the list and is what a Dot ships in, so a device nobody
-has configured keeps its button: the daemon exists to take it. `Mode`'s zero
-value is intercept for the same reason, so a construction path that never
-mentions a mode does not quietly hand the key to Alexa.
+### What the modes do not touch
 
-A mode the listing did not offer is refused rather than acted on. Home Assistant
-only sends what it was told, so anything else is a peer inventing one, and a
-select can be asked for a word rather than a bit -- which is a thing a switch
-could not get wrong.
-
-**The grab is untouched by all three.** Releasing it is the obvious reading of
-"pass the button through" and it is the wrong one: the real node still delivers
-to `EventHub`, so a released grab beside a live clone lands every key twice, and
-mute would toggle on and straight back off. What the other two modes mean instead
-is that keycode 138 is re-emitted through the clone like every other key. The clone
-is named `mtk-kpd` so Android applies the same keylayout, and that is the route
-mute has always taken here, which is the reason the clone carries the whole key
-bitmap in the first place.
-
-How far that is measured is worth being exact about. Android's input layer
-treats the two devices identically: the same keylayout, the same
-`Sources: 0x00000501`, the same `KeyboardType`, and since the ids are copied the
-same `IsExternal`. `mtk-kpd.kl` maps `key 138 BUTTON_MODE` and both devices
-resolve to it.
-
-The app layer was the open question and it is now answered. Measured on the Dot
-in pass through with 138 injected into `event1`, which reaches the daemon and
-not `EventHub` because `EVIOCGRAB` gates reading rather than writing:
+- The grab. Monitor and pass through re-emit 138 through the clone like every
+  other key. Releasing the grab beside a live clone lands every key twice.
+- Android's input layer treats both devices the same: same keylayout, same
+  `Sources: 0x00000501`, same `KeyboardType`, same `IsExternal`. `mtk-kpd.kl`
+  maps `key 138 BUTTON_MODE`.
+- Alexa's app layer does not care which device sent the key. Measured in pass
+  through with 138 injected into `event1` (`EVIOCGRAB` gates reads, not writes):
 
 ```
 HeadlessKeyPolicyManager: KEYCODE_BUTTON_MODE, scanCode=138, deviceId=24, source=0x501
@@ -177,264 +91,139 @@ SPCH-SIM_StartSpeechCommand: mInitiator=SHORT_BUTTON_PRESS
 SPCH-SIM_SimStateMachine:    ReadyState -> ListenState
 ```
 
-`deviceId=24` is the clone, so Alexa's handlers do not care which device the
-`KeyEvent` came from; the daemon logged nothing for that press and did report
-the same injection in intercept, which is the control. "uber" is the
-Dot's own name for the action button, and is what to grep for.
+- `deviceId=24` is the clone. That measures press-to-talk only. Stopping a
+  timer and setup mode use the same `uber` key and `KeyListener`, and were not
+  measured separately.
+- Releasing the grab to pass a key through would give two paths to Android. A
+  key held at the release keeps its native key-down and never gets an up:
+  `EVIOCGRAB` synthesizes no release, and an up through the clone cannot clear
+  it, because `dumpsys input` tracks `KeyDowns` per device. `BUTTON_MODE` held
+  past 600 ms is setup mode.
 
-What that measures exactly is press-to-talk. Stopping a timer and entering setup
-mode were not separately exercised, and they are the same `uber` key reaching
-the same `KeyListener`: `STATE_SHORT` is what press-to-talk and a timer stop
-both hang off, and setup mode hangs off the long press instead. So they follow
-from the same evidence rather than resting on it, which is a weaker claim than
-the one above and worth keeping apart from it.
+### Latching
 
-Releasing the grab instead, so the real node delivers to `EventHub` directly, is
-the obvious alternative and is rejected. It would give exact fidelity and cost a
-worse property: two paths to Android rather than one. Toggling between them
-inside a press desynchronises Android's key state, and one direction is bad
-rather than untidy. Taking the button back while the key is held means Android
-already has the key-down natively and never receives the up: `EVIOCGRAB` makes
-the kernel synthesize no release, and a synthetic one through the clone cannot
-clear it, because `dumpsys input` tracks `KeyDowns` per device. A `BUTTON_MODE`
-stuck past six hundred milliseconds is Alexa's long press, which is setup mode.
-With the clone as the only path there is nothing to desynchronise: a press is
-either delivered whole or not at all, which is what latching at the key-down
-buys.
+- A press latches its mode at the key-down until the key-up, because a toggle
+  can arrive between the two. Consuming the down and passing the up is
+  harmless. Passing the down and consuming the up leaves Android holding
+  `BUTTON_MODE` for ever.
+- A key held across daemon start has no latch: Android took its key-down from
+  the real node before the grab. Nothing is reported. The release reads the
+  current mode, and is passed on unless that mode is intercept. It cannot clear
+  the native key-down, but it can end the app layer's state machine, which
+  ignores the device.
+- Autorepeats of an unlatched key are dropped in every mode. `EventHub` reads
+  any non-zero value as a down, so a stale repeat on the clone is a fresh
+  key-down.
+- `Interceptor` owns the mode and the server reads it. The read loop checks it
+  on every event and cannot take the server lock, so one copy lives with the
+  button.
 
-**A press is latched at its key-down and stays latched until the key-up.** A
-toggle can arrive between the two, and the two halves of one press must not take
-different routes. The failures are not symmetric. Consuming the down and passing
-the up gives Android a release for a key it was never told was pressed, which it
-shrugs at. Passing the down and consuming the up leaves it holding `BUTTON_MODE`
-for ever. So the flag is read once, at the down, and the release follows it.
+### Publishing a mode change
 
-**A key held across the daemon starting has no latch of its own**, and that is
-the one case where the two halves of a press can still read the mode
-differently. Android took the key-down from the real node before the grab, so
-only the release arrives here. Nothing is reported for it, since there was no
-press of ours -- but the release is still passed on for a key Android is allowed
-to see. Not to clear that key-down: `dumpsys input` tracks `KeyDowns` per device,
-so a release on the clone never reaches the one the real node recorded. It is
-the app layer this is for, which does not look at the device at all -- measured,
-`deviceId=24` reaching Alexa's handlers -- and so has a state machine our
-release can end.
-
-The autorepeats before it are dropped instead, whatever the mode. `EventHub`
-reads any non-zero value as a down, so an emitted stale repeat is a fresh
-key-down on the clone -- and the release behind it reads the mode again, so a
-toggle in between swallows the only thing that could end it. That is Android
-holding `BUTTON_MODE` for ever, which is the failure the latch exists to
-prevent, arriving through the one pair the latch does not cover. Dropping the
-repeat leaves nothing to strand.
-
-**The button owns the flag and the server reads it**, rather than the server
-owning it and the button being told. The read loop consults it on every event
-and cannot take the server lock to do it, so it needs its own copy whichever way
-round this goes; one authority means there is only ever the one. The zero value
-is a captured button, so a construction path that never mentions capture keeps
-the key rather than quietly handing it to Alexa.
-
-Nothing is published from `handle`, and that is a hard rule rather than a
-preference: `publish` takes the server lock, `handle` holds it for its whole
-body, and a `sync.Mutex` is not reentrant, so publishing there deadlocks that
-goroutine with the lock held and wedges the accept path and every other
-connection behind it. So a toggle wakes `PollSensors` instead and the state goes
-out on that poll's next turn -- which is also why the reading rides `readTicked` rather than
-having a path of its own. That poll publishes once before its first wait, so the
-switch has a state before any connection exists.
-
-That wake is the one thing here a peer can ask for repeatedly on a connection it
-already holds, and it is why `PollSensors` has a `wakeGap` at all. Subscribing
-wakes the polls only on a connection's first request, so a peer spamming that
-needs a new connection each time and the eight slots bound it; a switch command
-needs neither. The no-op guard turns away a command asking for the state the
-button is already in, and that is all it does: a peer alternating on and off
-changes the state every time and so passes it every time. What bounds that is
-the gap on the poll, which is where the bound belongs, since the guard can only
-ever recognise the case a peer would not bother sending.
-
-The log line saying which way the button went is carried out of `handle` on the
-connection, the way the hello line is, because the log is a file on `/data` and
-the lock gates the accept path and every other connection. It is the only
-record that separates a button nobody is answering from one Home Assistant let
-go of, and it is not a guarantee: it goes through `s.untrustedLog.Printf` like
-every other line a peer causes, so a peer that has already spent the run's
-ceiling on connection churn moves the button unrecorded.
-
-Exempting it from that budget is the obvious fix and is wrong. `conn.noted` is
-set once per state *change*, which is once per message a peer sends, not once
-per wake -- the gap bounds the poll, not the toggles. So an exempt line is an
-unbounded write to `/data` by an unauthenticated-until-the-key peer, which is
-the hazard docs/pitfalls.md exists for. A budget of its own would work; sharing
-the general one and saying so is what is done.
-
-`SelectStateResponse` has a `missing_state` at field 3, as the state messages
-carrying a reading do, and nothing here sends one: a select is what this end
-last set it to, and there is no read of the device to have failed. Its listing
-numbers are its own as usual -- 52, 53 and 54 against the sensor's 16 and 25 --
-and `entity_category` is field 8 there, carrying `config` rather than the
-`diagnostic` every other entity here
-carries.
+- Nothing is published from `handle`. `handle` holds the server lock for its
+  whole body, `publish` takes it, and `sync.Mutex` is not reentrant: that
+  deadlocks the accept path. A mode change wakes `PollSensors` instead, which
+  publishes the select.
+- That wake is the one thing a peer can repeat on a connection it already
+  holds, so `PollSensors` enforces `wakeGap`. The no-op guard does not bound it:
+  a peer alternating two modes passes the guard every time.
+- The log line for a mode change leaves `handle` on the connection
+  (`conn.noted`), because the log is a file on `/data` and the lock gates the
+  accept path. It goes through `untrustedLog` like every peer-caused line, so a
+  peer past the run's ceiling changes modes unlogged. Exempting it would give a
+  peer an unbounded write to `/data`.
+- The select sends no `missing_state`: its state is what this end last set, and
+  no device read can fail.
 
 ## What a press reports
 
-The action button is one ESPHome *event* entity, `action_button`. It reports a
-moment rather than a value, so nothing publishes it and no snapshot replays it.
-A client that was not connected has missed it. Publishing a press instead would
-fire every automation hanging off one nobody made, on every reconnect.
+- Each button is one ESPHome *event* entity, `action_button` and
+  `mute_button`. An event is a moment, not a value: nothing replays it, and a
+  client that was not connected missed it. Replaying presses would fire every
+  automation on every reconnect.
+- Home Assistant drops an event whose type the listing did not advertise.
+  `event_test.go` holds `actionEvents` to the four types `FirePress` sends.
+- The device class is `button`, and Home Assistant draws the icon from it, so
+  the entity sends no icon. It sends no `entity_category`: a categorised entity
+  is filed away from the device's controls.
+- The gestures are Home Assistant's `ButtonEventType` verbatim, from its
+  architecture discussion 1377 (July 2026). Automations written for any other
+  button work here.
+- Two of the six types are absent; none is mandatory. `press_start` was dropped
+  as a trigger in that decision, and no gesture here needs a lone key-down.
+  `multi_press_ongoing` costs a message per press for a signal nothing uses. A
+  single press is `press_end`, not a `multi_press_end` of 1.
 
-`ListEntitiesEventResponse` is 107 and `EventResponse` is 108. Field numbers are
-per message: `device_class` is 8 here and a binary sensor's icon, `event_types`
-is 9 here and a sensor's `device_class`. Home Assistant drops an event whose type
-the listing did not advertise, so one slice is both.
+### The two timers
 
-The class is `button`, which Home Assistant draws the icon from, so the entity
-sends none. It sends no `entity_category` either: the readings are `diagnostic`
-and the switch is `config`, and a categorised entity is filed away from the
-device's controls. This is what the device is for.
+- A run of presses is one gesture. 350 ms of silence after a release closes it
+  and reports the count, so a single press waits the full gap. The chime does
+  not wait: it plays at the key-down, 33 ms in.
+- The gap must stay under the hold threshold. `main_test.go` asserts this.
+- A hold is reported while the key is still down. The 600 ms threshold is
+  Alexa's: `BUTTON_MODE` held past it is setup mode.
+- `AfterFunc` promises only "not before", so on a busy core the hold timer can
+  lose to the release. The release then decides by the duration it carries,
+  and fires `long_press_start` and `long_press_end` together. The alternative
+  reports a long hold as a press.
+- `long_press_start` and `long_press_end` are unpaired. An event carries no
+  state, so a Home Assistant that missed the end leaves the hold's action
+  running. Discussion 1377 accepted this cost; the alternative is a binary
+  sensor of the raw key, which reports the key rather than the gesture.
+- A hold ends the run in front of it, and the run is reported first. One lock
+  held across a whole report orders the read loop and both timers.
+- A run cannot close while a key is down. Otherwise a press inside the gap,
+  then held, would have its run closed under it and be reported twice.
+- A fired timer cannot be stopped, so a generation counter marks it stale. The
+  key event bumps it, because the key is what made the timer stale.
 
-**The gestures are Home Assistant's `ButtonEventType` verbatim.** Its
-architecture discussion 1377 settled the set in July 2026, because integrations
-spelled the same gestures differently and no generic automation worked across
-them. An automation written for any other button works here.
+### The count and the duration
 
-Two of the six are absent, and none is mandatory: an integration maps what its
-hardware produces. `press_start` went because the decision that approved the set
-dropped it as a trigger, and no gesture here needs a key-down alone.
-`multi_press_ongoing` went because it costs a message per press for a signal
-nothing here uses, and a run's count is not settled until the run closes. The
-same rule makes a single press `press_end` rather than a `multi_press_end`
-carrying one.
+- They ride a service call, because `EventResponse` carries only a key and a
+  type. Home Assistant's ESPHome platform passes only the type string to
+  `_trigger_event`, so the standard `multi_press_count` attribute has nowhere to
+  go.
+- The call is `esphome.overdub_pressed` with `is_event` set. It always carries
+  `event_type`, `device` and `button`; `multi_press_count` only on
+  `multi_press_end`; `held_ms` only on `long_press_end`. `button` is there
+  because every button fires the same service name.
+- A count on a single press is a 1 nobody asked about, and a run has no single
+  duration, so both are absent rather than zero.
+- Home Assistant fires an `is_event` call only for its own `esphome.` domain,
+  and adds `device_id` itself.
+- Numbers go in field 3, `data_template`. Every value in field 2, `data`, stays
+  a string. Home Assistant renders `data_template`, and `_parse_result` turns a
+  numeric string back into a number, so an automation gets integers.
+- A literal is not compiled: without Jinja markers `is_static` is true and
+  `async_render` returns the parsed value. This matters because a
+  `TemplateError` drops the whole event.
+- Strings stay in field 2, `device` especially. It is the operator's `-name`,
+  and Home Assistant evaluates Jinja in a `data_template` value. A number this
+  end formatted cannot carry a marker.
+- The call needs a second subscription, `SubscribeHomeassistantServices`,
+  tracked per connection. A peer that subscribed only to states gets the
+  gesture without the numbers. Home Assistant asks for both.
 
-**A run of presses is one gesture, and the gap ends it.** A run is closed and
-reported with its count by three hundred and fifty milliseconds of silence after
-a release. So a single press waits: nothing knows it was single until the gap
-passes. The chime does not wait, which is what makes that affordable -- it is at
-the key-down, 33ms in.
+### Sending
 
-The gap stays under the hold threshold, and `main_test.go` holds the two
-together.
+- The chime answers a different question: the daemon has the button. So it
+  plays once per press, not once per gesture: 4 presses are 4 chimes and one
+  `multi_press_end`. It plays only for the action button, and only in
+  intercept.
+- Gestures go out from whichever goroutine recognised them: the gap timer, the
+  hold timer, or the read loop. `FirePress` holds the server lock only to queue
+  a frame per subscriber, so mute through the read loop is not measurably
+  delayed. A queue in between would drop presses it cannot take.
+- A press with no server yet is logged and dropped. The read loop runs while
+  `wlan0` is still awaited, and a queued press would arrive at a moment it did
+  not happen.
 
-**The hold is reported while the key is still down.** Six hundred milliseconds
-is the threshold, and it is Alexa's: a `BUTTON_MODE` she sees held past it is
-setup mode. So the hold somebody already has in their hand is the one this
-reports. The boundary belongs to the hold.
+### The gesture tests race their own timers
 
-That is why `MultiPress` takes `Down` and `Up` rather than a finished press.
-`long_press_start` has to arrive while the button is held, so an automation can
-act *during* a hold, and nothing at the release is early enough. Two timers run:
-a hold timer armed at each key-down, and a gap timer armed at each release.
-
-The release is the backstop. `AfterFunc` promises only "not before", so on a
-busy core the timer can lose the race to `Up`, and the duration the release
-carries decides the boundary when it does. That path fires `long_press_start`
-and `long_press_end` together, so the hold is reported but not reported early:
-an automation bound to the start runs after the button is already up. It is
-reachable only when the timer runs late, and the alternative is reporting a key
-held past the threshold as a press.
-
-The pair is unpaired, and that is a cost rather than a solved problem. An event
-carries no state, so nothing heals a missing one: a Home Assistant that took the
-`long_press_start` and missed the `long_press_end` leaves whatever the hold
-started running. Discussion 1377 accepted this. The alternative is a stateful
-binary sensor of the raw key, which self-heals on reconnect and is what
-ESPHome's own `binary_sensor` does, and which reports the key rather than the
-gesture.
-
-A hold ends the run in front of it, at the threshold, and the run is reported
-first. They are separate automations at the far end. One lock held across a whole
-report is the only ordering between the read loop and the two timers.
-
-Every key event invalidates both timers, so a run cannot close while a key is
-down. Without that, a press arriving inside the gap and then held would have its
-run closed under it and be reported twice.
-
-A timer that has fired cannot be stopped, so a generation says its moment has
-passed -- a hold timer whose key came up, a gap timer whose run a new press took.
-Either would report something no longer true rather than a duplicate. The key
-event bumps the generation, because the key is what made the timer stale.
-
-**The count and the duration ride a service call**, because `EventResponse`
-carries a key and a type and nothing else. The standard puts the count in a
-`multi_press_count` attribute, and Home Assistant's ESPHome platform passes only
-the type string to `_trigger_event`, so an attribute has nowhere to go. A
-`HomeassistantServiceResponse` carries them instead: `esphome.overdub_pressed`,
-`is_event` set, with `event_type`, `device` and `button` always,
-`multi_press_count` on `multi_press_end`, and `held_ms` on `long_press_end`.
-`button` is there because every button fires the same service name, so an
-automation filtering only on the device would run for all of them. The key uses the
-standard's name.
-
-Each extra key belongs to the gesture that has one. A count on a single press is
-a 1 nobody asked about, and a run has several durations and no single one, so
-both are absent rather than zero: a zero read as a measurement is the `p2p0` row
-in docs/api.md again.
-
-The `esphome.` prefix is Home Assistant's rule -- it fires an `is_event` service
-call only for its own domain -- and it adds `device_id` itself, which the daemon
-could not know.
-
-**The numbers go in a different field from the strings.** Every value in a
-`HomeassistantServiceMap` is a string, so field 2, `data`, arrives as one. Home
-Assistant renders field 3, `data_template`, and every render ends in
-`_parse_result`, which turns a numeric string back into a number. So the numbers
-go in field 3 and reach an automation as integers, the way they would from an
-integration that calls the bus directly. Every integration but this one does;
-the string is an artifact of ESPHome's transport.
-
-A literal never compiles: `is_static` is true without Jinja markers, so
-`async_render` returns the parsed value without rendering. That matters because
-a `TemplateError` drops the whole event rather than one value, and there is no
-render here to fail.
-
-The strings stay in field 2, `device` especially. It is the operator's `-name`,
-and Home Assistant evaluates a `data_template` value carrying Jinja markers: a
-Dot named for a template would be one this daemon asked it to run. A number this
-end formatted cannot carry a marker, which is what makes the split safe.
-
-That second message is a second subscription, `SubscribeHomeassistantServices`,
-tracked per connection. A peer that asked only for states gets the gesture and
-not the numbers. Home Assistant asks for both.
-
-**The chime sounds at the key-down**, because it answers a different question. It
-says the daemon has the button, and it has to sound before anything knows what
-the run will be. One that waited would leave a hold silent while it was held. So
-it sounds once per press rather than once per gesture -- four presses are four
-chimes and one `multi_press_end` -- and only capture gates it.
-
-The gestures are sent from whichever goroutine recognised them. The gap timer
-closes a run, and so does the hold timer when a hold ends one, and so does the
-read loop when the release is the backstop -- so all three can send a
-run-closing gesture, and `long_press_end` comes from the read loop. `FirePress` holds the server lock only long enough to queue
-a frame per subscriber, so the read loop mute passes through is not measurably
-delayed. A queue was the shape this came from; it drops what it cannot take,
-which loses presses in order to report them, and the lock is what keeps two
-gestures in order anyway.
-
-**A press with no server to tell is dropped.** The button is taken before the
-network is waited for, so the read loop runs for as long as `wlan0` takes.
-`serve.go` holds the server in an `atomic.Pointer`, and a press that finds
-nothing there goes no further than the log. Queueing it would deliver a press at
-a moment it did not happen.
-
-**The gesture tests race their own timers, and one of them lost.**
-`multipress_test.go` drives `MultiPress` with a 20ms gap and a 60ms hold and
-then sleeps, which makes every assertion a footrace against a timer rather than
-a question about the state machine. `TestARunDoesNotCloseWhileAKeyIsDown` slept
-`3 * testGap` and then asserted the hold had not fired -- and `3 * testGap` is
-60ms, which is the hold exactly. The two deadlines landed on the same instant
-and the reading goroutine won by microseconds, which is a pass; when it lost,
-`held` had already reported the run in front of it and started the long press,
-so the failure read as a run closing under a key that was still down. Measured
-on the branch that found it: three failures in two hundred runs under
-`qemu-arm-static`, and one in forty with the emulator held to half a core. It
-takes a local hold of `10 * testGap` now, which puts 140ms between the check and
-the timer, and neither rate reproduces.
-
-What is left is smaller and has never been seen to fire. Chaining `m.tap()` into
-whatever follows has only the gap to do it in, because the tap's release arms the
-gap timer and the next call has to beat it; five tests in that file depend on
-20ms of wall clock arriving on time. Widening `testGap` would buy that margin and
-charge every `settle()` four times over for a hazard with no evidence behind it,
-so the number stays until something makes the case.
+- `multipress_test.go` drives `MultiPress` with a 20 ms gap and a 60 ms hold,
+  then sleeps, so every assertion races a timer.
+  `TestARunDoesNotCloseWhileAKeyIsDown` uses a local hold of `10 * testGap`. A
+  hold of `3 * testGap` fails 3 runs in 200 under `qemu-arm-static`.
+- One race remains, never seen to fire: a `m.tap()` chained into what follows
+  has only the gap to finish in, and 5 tests depend on 20 ms of wall clock
+  arriving on time. A wider `testGap` would multiply every `settle()`.

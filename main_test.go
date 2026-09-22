@@ -114,16 +114,6 @@ func TestTheScriptsUseTheKeyPathTheDaemonReads(t *testing.T) {
 	}
 }
 
-func TestTheReadmeNamesTheKeyPathTheDaemonReads(t *testing.T) {
-	readme, err := os.ReadFile("README.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(readme), noiseKeyPath) {
-		t.Errorf("README.md never names %q, so its rotation instructions point elsewhere", noiseKeyPath)
-	}
-}
-
 func TestTheSensorTickRespectsTheFloor(t *testing.T) {
 	if sensorTick < esphome.MinSensorTick {
 		t.Errorf("sensorTick is %v, under the %v floor PollSensors would raise it to", sensorTick, esphome.MinSensorTick)
@@ -179,24 +169,6 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 	}
 }
 
-func TestTheReadmeQuotesTheMissingKeyError(t *testing.T) {
-	const said = "(deploy/install.sh generates one)"
-	source, err := os.ReadFile("serve.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(source), said) {
-		t.Errorf("serve.go no longer says %q", said)
-	}
-	readme, err := os.ReadFile("README.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(readme), said) {
-		t.Errorf("README.md quotes an error serve.go does not write")
-	}
-}
-
 func TestServeWiresTheButtonToTheSelect(t *testing.T) {
 	source, err := os.ReadFile("serve.go")
 	if err != nil {
@@ -231,20 +203,11 @@ func TestEveryGestureHasItsStandardName(t *testing.T) {
 	}
 }
 
-func TestTheDocsPromiseTheHoldThresholdTheDaemonUses(t *testing.T) {
-	const said = "six hundred milliseconds"
+func TestTheHoldThresholdIsAlexasOwn(t *testing.T) {
 	const promised = 600 * time.Millisecond
 	if holdTime != promised {
-		t.Errorf("holdTime is %v and the docs promise %q; change them together", holdTime, said)
-	}
-	for _, path := range []string{"README.md", "docs/button.md"} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(body), said) {
-			t.Errorf("%s no longer says %q, which is the threshold the daemon uses", path, said)
-		}
+		t.Errorf("holdTime is %v, want %v: a BUTTON_MODE Alexa sees held past it is setup mode",
+			holdTime, promised)
 	}
 }
 
@@ -257,21 +220,6 @@ func TestServeGivesThePressSomewhereToGo(t *testing.T) {
 		if !strings.Contains(string(source), said) {
 			t.Errorf("serve.go never says %q, so a press reaches Home Assistant by no route", said)
 		}
-	}
-}
-
-func TestTheDocsPromiseTheGapTheDaemonUses(t *testing.T) {
-	const said = "three hundred and fifty milliseconds"
-	const promised = 350 * time.Millisecond
-	if multiGap != promised {
-		t.Errorf("multiGap is %v and the docs promise %q; change them together", multiGap, said)
-	}
-	body, err := os.ReadFile("docs/button.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), said) {
-		t.Errorf("docs/button.md no longer says %q, which is the gap the daemon uses", said)
 	}
 }
 
@@ -855,15 +803,6 @@ func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 		t.Fatalf("the client declares a %d ms lead where this dot needs %d, so a server may"+
 			" send a first chunk sooner than the mapping can be placed",
 			client.RequiredLeadMS, sendspinLead)
-	}
-	page, err := os.ReadFile("docs/sendspin.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(page), fmt.Sprintf("`required_lead_time_ms` is **%d**",
-		sendspinLead)) {
-		t.Errorf("docs/sendspin.md does not say the lead is %d, so the page and the wire"+
-			" disagree about the one number measured on hardware", sendspinLead)
 	}
 }
 

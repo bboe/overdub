@@ -1,376 +1,193 @@
 # Things that fail silently
 
-**A file mode is invisible to everything else here.** gofmt, vet, the tests and
-shellcheck all read the shell scripts rather than execute them, and the build
-runs `./build.sh` and never `install.sh`. So a script that lost its executable
-bit passes the whole suite and fails for the first person to run the command
-README.md gives them.
+Every entry here reports success and does the wrong thing. Read the section
+covering whatever you are about to touch.
 
-CI asserts that every tracked `.sh` is `100755`, as a rule rather than a list,
-so a script added later is covered without being remembered. Measured the hard
-way: `install.sh` was once committed `100644`, and the whole suite passed.
+## Install and build
 
-Which is why `install.sh` asks whether `build.sh` **exists** rather than whether
-it is executable. The two readings differ exactly where the release branch was
-added: a source tree whose `build.sh` lost its bit -- a `core.fileMode=false`
-checkout, a copy through a filesystem that drops it, an unpacked source archive
--- would answer "not executable", fall through to the tarball branch, and
-install whatever stale binary `build/` still held, reporting `binary verified`
-over it. A file that is there and cannot be run is a source tree that cannot
-build, and it stops.
+- Nothing executes the shell scripts: gofmt, vet, the tests and shellcheck
+  only read them. CI asserts every tracked `.sh` is `100755`.
+- `install.sh` asks two questions separately: does `build.sh` **exist**, and is
+  it executable. Merged, a source tree with stripped mode bits
+  (`core.fileMode=false`, an unpacked archive) takes the tarball branch,
+  installs a stale `build/overdub`, and prints `binary verified`.
+- `cp` onto the running binary fails with ETXTBSY, but toolbox `cp` exits 0,
+  `adb shell` exits 0 whatever happened remotely, and `set -e` catches nothing.
+  The binary goes in by rename, and its md5 is read back.
+- Compare by hash, never by size. Go's VCS stamp (commit, timestamp, dirty flag)
+  is fixed-length, so different source gives the same size. `build.sh` pins
+  `-buildvcs=false`.
+- One tree gives one set of bytes, from any directory, with or without `.git`,
+  dirty or clean. `OVERDUB_VERSION` is empty unless the release job sets it.
+- A release binary and a local build of the same tag differ: the runner's NDK
+  is not yours. The published hash identifies the release.
+- The `-L` that `build.sh` hands cgo for its `libpthread` stubs must stay
+  relative. An absolute path enters cgo's action hash, so two directories give
+  two binaries. The `cd` at the top makes the relative path resolve.
+- `zip` records each entry's mtime in its headers. `deploy/mapdump/build.sh`
+  pins it to zip's 1980 floor and passes `-X`.
+- `TZ=UTC` must cover **both** the `touch` and the `zip`. A zip entry carries a
+  DOS stamp in local time, so a mismatch writes the offset into the headers.
+- A reproducible binary cannot say what it was built from. `git checkout`
+  carries modified files across a branch change, so the build is not the
+  branch, and every check downstream passes on the wrong binary.
+- The boot script is the only reason anything runs. `install.sh` copies it to
+  Magisk 17.3's `/sbin/.core/img/.core/service.d/`. Where that directory does
+  not exist, the `cp` fails, the `rm` beside it still runs, and the Dot does
+  not start the daemon after its next reboot, with no log. The script's md5 is
+  read back.
+- The restart check calls `adb` through a function. A pipeline reports only its
+  last command, so inline, a pulled cable reads as an empty pid, which is also
+  what "nothing supervised the daemon" prints.
 
-**`install.sh` can lie, so it verifies itself.** `cp` onto the running binary
-fails with ETXTBSY, silently: toolbox `cp` prints "Text file busy" and exits 0,
-and `adb shell` exits 0 whatever happened remotely, so `set -e` catches nothing.
-An install can report success, change nothing, and take a reboot to notice. The
-binary is replaced by rename and its md5 checked against the build.
+## Paths and uids
 
-**By hash rather than size, because size does not separate two builds.** A
-binary replaced during an install here measured byte-for-byte the same size as
-the one replacing it, so a silently failed `cp` would have passed a size check.
-`build.sh` pins `-buildvcs=false` to make the comparison mean something: Go
-otherwise stamps the commit, its timestamp and a dirty flag into the binary, all
-three fixed-length, so builds of different source differ in content while
-matching exactly in size.
+- `/system/bin/pm` has no shebang, so `execve` answers ENOEXEC. A shell runs it
+  anyway, so it works by hand over `adb shell`. `Installed()` would read the
+  failure as a missing package, so `pm` runs as `/system/bin/sh
+  /system/bin/pm`. `am` has a shebang and runs directly.
+- `/data/local/bin` must be `0700`, and `mkdir -p` keeps whatever mode an
+  earlier install left. `install.sh` chmods it and reads the mode back.
+- MAP's uid, 32051, cannot traverse `0700`. `app_process` does not report a
+  permission error: it prints `ClassNotFoundException: MapDump` on
+  `DexPathList[[]]` and then `Aborted`, which reads like a bad jar. So the jar
+  lives in `/data/local/map`, owned by 32051, mode `0755`, and `install.sh`
+  checks that uid 32051 can read it.
+- Uid 32051 cannot write to `/data/local/tmp` (`root:shell`). The failure is
+  `EACCES` from inside dalvik, well after start. Nothing the jar does at
+  runtime touches that directory.
+- `adb push` does not carry the local mode, and `/data/local/tmp` is `0771`, so
+  a `0600` key lands `0666` and any uid can reach it by name. `install.sh`
+  stages secrets through a `0700` directory of its own, then removes it. The
+  binary and the boot script are not secret and use the shared directory.
+- There is no `/etc/resolv.conf`, so every Go lookup fails against `::1` with
+  "connection refused". `internal/alexa` reads `net.dns1` and `net.dns2` and
+  builds its own resolver.
 
-Without the stamp the same tree always gives the same bytes, measured across
-repeat builds, a different directory, a checkout with no `.git`, and a dirty
-tree. `OVERDUB_VERSION` is an input to that rather than an exception to it: it is
-empty unless the release job sets it, and two builds of one tag agree. What does
-not agree is a release binary against a local build of the same tag, because the
-NDK on the runner is not the NDK on anybody's machine, and the released one is
-identified by its published hash rather than by being re-derived.
+## The firewall
 
-The different directory is the one that needs help. `build.sh` makes the empty
-`libpthread` stub archives that Bionic ships no library for, and the `-L` it
-hands cgo has to stay **relative**: an absolute path lands in cgo's action hash,
-so the same commit built from two directories would produce two different
-binaries and break the promise above quietly. The `cd` at the top of the script
-is what makes a relative path resolve.
+- FireOS runs iptables with `INPUT policy DROP` and a port allowlist without
+  `tcp/6053`. Home Assistant then times out adding the device, with **nothing in
+  the daemon log**: the SYN never reaches userspace.
+  `internal/device/firewall.go` opens the port.
+- `iptables -L INPUT -n -v | grep 6053` shows a packet counter, which tells
+  "the device dropped it" from "the network did".
+- `AllowTCP` checks and then appends. The API's re-assert, network adb and the
+  Sendspin switch all call it, so two concurrent calls could both append, and
+  one `-D` would leave an ACCEPT behind. `chainMu` covers both mutations.
+- `DenyTCP` deletes until iptables reports no match, at most 16 times. An
+  iptables that answered 0 for a no-op delete would otherwise spin holding
+  `chainMu`, and `tcp/6053` would not be re-asserted.
+- `tcp/8928`'s rule goes in **after** the listener binds. A rule for a port
+  nothing listens on is re-asserted every 30 seconds for the rest of the boot.
+  The API needs no such order: a failed bind there exits the daemon.
+- `-w` here takes no seconds argument and waits on the xtables lock
+  indefinitely, and netd holds that lock constantly. So every call has a
+  10-second deadline, and a failed re-assert is logged once until it succeeds.
 
-`mapdump.jar` needed help of its own, because the binary is not the only thing
-published. `zip` records each entry's mtime, so the same `classes.dex` archived
-twice gave two different digests -- measured, and the difference is in the local
-and central headers rather than the content. Two runs of one tag would then
-publish two different tarballs, which is the property the release's `tar` flags
-exist to establish. So `deploy/mapdump/build.sh` pins the dex's mtime to zip's
-own 1980 floor and passes `-X`.
+## Startup races the network
 
-`TZ=UTC` has to cover **both** of those commands, which is the part that is easy
-to get half right. A zip entry carries a DOS stamp in local time, so `zip`
-renders the mtime back through `localtime()`: pinning the mtime under the
-builder's own zone and archiving it under UTC writes that zone's offset into the
-headers. Measured, same `classes.dex` both times: touched in `America/Los_Angeles`
-the entry is dated 01-01-1980 08:00 and the archive hashes one way, touched in
-UTC it is 00:00 and hashes another. With `TZ=UTC` on both, a builder in Pacific
-and a builder in Tokyo produce the same bytes.
-
-That last one is the one to say out loud, so `install.sh` does. Reproducibility
-here means the binary cannot tell you what it was built from, and `git checkout`
-carries modified files across a branch change: the checkout reads as a revert,
-the build is not one, and every check downstream then passes on the wrong
-binary, twice in a row, printing "binary verified" each time. Measured the hard
-way.
-
-Every step is read back, because not one of them reports its own failure: the
-binary is hashed, and the boot script compared against what was pushed. The boot
-script matters most: it is the only reason anything runs at all, and the path
-it goes to is the one this device's Magisk 17.3 uses. A Magisk that keeps
-`service.d` somewhere else has no such directory, so the `cp` fails, the `rm`
-beside it runs regardless, and the Dot does not come back from its next reboot
-with no log to read, because that script is what creates it. Which versions
-share the 17.3 layout is not something measured here.
-
-The restart check goes through a function for the same class of reason: a
-pipeline reports only its last command, so with `adb` inline a pulled cable read
-as an empty pid, which is what this script says when nothing was supervising the
-daemon at all.
-
-**`pm` carries no shebang and `am` does**, so one of the two cannot be exec'd
-and the other can. `/system/bin/pm` is six lines of shell that set `CLASSPATH`
-and hand off to `app_process`, with no `#!` line in front of them, so `execve`
-answers ENOEXEC and Go's `exec.Command` fails before the script runs. A shell
-falls back to interpreting a file it cannot exec, which is why the same command
-works by hand over `adb shell` and fails from the daemon.
-
-Nothing about that failure names its cause. `Installed()` read the error as a
-package that is not there and reported one -- on every Dot, including the one
-with the package plainly installed, which is what makes it worth writing down:
-the check was measured against a device where the answer really was no, and
-agreed with the device for the wrong reason. Anything reached through
-`/system/bin/pm` goes through `/system/bin/sh` in front of it, the way
-`settings` always has. `am` is exec'd directly and is not the same case;
-`head -1` is the whole test.
-
-**`/data/local/bin`'s mode used to be whatever created it, and it varied between
-Dots.** `mkdir -p` gives `0700` under root's umask, and a directory that already
-existed keeps whatever it had. Measured across three Dots running the same
-install: `drwx------` on one and `drwxr-xr-x` on the other two, which is the sort
-of difference that decides whether a bug reproduces. `install.sh` now chmods it
-to `0700` and reads the mode back, so it is a fact rather than an inheritance;
-an older install is corrected by the next one.
-
-So a jar under it is a jar that may or may not load, which is worse than one
-that never does. MAP's uid cannot traverse the `0700` case, and what
-`app_process` reports when it cannot read the classpath it was handed is not a
-permission error: it is `ClassNotFoundException: MapDump` on `DexPathList[[]]`,
-an empty path list, followed by `Aborted` -- which reads exactly like a jar built
-wrong. Measured both ways on the `0700` Dot: from `/data/local/bin/map` the
-class is not found, and from `/data/local/map`, owned by 32051 with
-`/data/local` already `o+x`, the same jar loads and reports `accounts: 1`. On the
-other two the old path would have worked, and did: one of them ran that build in
-August.
-
-The API key does not depend on this either way -- it is `0600` wherever the
-directory stands -- but the jar cannot be, because the uid that reads it is not
-root.
-
-**Anything running as uid 32051 cannot write to `/data/local/tmp`.** It is
-`root:shell`, and the failure is `EACCES` from inside dalvik well after the
-process has started. So the jar's own directory is owned by that uid, and
-nothing the jar does at runtime touches the shared tmp directory. The install
-passes through it, the way the binary and the boot script do, and for the same
-reason: the jar is hash-verified against the local build after the copy and is
-not a secret, so the `0666`-in-a-`0771`-directory hazard that sends the API key
-through a private directory does not apply to it.
-
-**Go cannot resolve names on this device by default.** There is no
-`/etc/resolv.conf`, so every lookup fails against `::1` with "connection
-refused". `internal/alexa` reads `net.dns1`/`net.dns2` and builds its own
-resolver out of them.
-
-**The Dot's own firewall.** FireOS runs iptables with `INPUT policy DROP` and a
-port allowlist, and `tcp/6053` is not on it, so Home Assistant times out adding
-the device **with nothing in the daemon log**: the SYN never reaches userspace.
-The daemon opens it itself, in `internal/device/firewall.go`. `iptables -L
-INPUT -n -v | grep 6053` shows a packet counter, which separates "the device
-dropped it" from "the network did".
-
-`AllowTCP` checks and then appends, which is two calls and not one. One port
-needed no lock. There are now three, reached from the sensor poll, the adb worker
-and the Sendspin switch's own worker, and two arriving together both find their
-rule absent and both append it. The `-D` that closes a port removes one copy, so the chain
-keeps an ACCEPT nothing will ever delete for a port the select truthfully
-reports as closed. The chain is not ours alone either, so nothing tidies it up
-later. One mutex over both mutations is the whole fix.
-
-`DenyTCP` deletes until iptables reports that it matched nothing, because one
-`-D` removes one copy and a chain that is not ours alone may hold two. What ends
-that loop is iptables' own refusal, so it is bounded at sixteen passes as well:
-an iptables that answered 0 for a delete that removed nothing would spin there
-holding the chain mutex, which stops `tcp/6053` being re-asserted and takes the
-API away at netd's next rebuild. Sixteen is far past any real duplicate.
-
-`tcp/8928` is the same case as 6053 and is opened the same way, with one ordering
-rule of its own: the rule goes in **after** the listener binds. The API's rule does
-not follow that order, because `esphome.Server.Listen` binds and serves in one
-call, and it cannot matter there: a failed bind exits the daemon, so the rule it
-left behind is not re-asserted and netd's next rebuild takes it. A rule for a port
-nothing listens on is re-asserted every thirty seconds for the rest of the boot and
-removed by nothing, so a Dot that could not read its key or could not bind would
-otherwise hold an ACCEPT open for a port that answers nobody -- the same shape as
-the duplicate-ACCEPT hazard above, arrived at from the other direction.
-
-`-w` on this iptables takes no seconds argument: it waits for the xtables lock
-for as long as it takes, and netd holds that lock constantly. Ten seconds, so a
-held lock is reported rather than waited on. The one-shot call at startup says
-so; the thirty-second re-assert says so once and then goes quiet, because netd
-rebuilding the chain is the ordinary case and a line every thirty seconds for
-the rest of the boot would bury everything else.
-
-**Anything done once at daemon startup races the network.** On a cold boot, which
-a warm restart hides entirely:
+A warm restart hides all of this.
 
 | Uptime | What is true |
 |---|---|
-| 0-15s | `wlan0` does not exist at all |
-| ~26s | `sys.boot_completed`, boot script runs, daemon starts |
-| later | netd rebuilds the iptables INPUT chain, discarding our rule |
+| 0-15 seconds | `wlan0` does not exist |
+| ~26 seconds | `sys.boot_completed`, boot script runs, daemon starts |
+| later | netd rebuilds the INPUT chain, discarding our rule |
 
-Both are live hazards: a daemon that reads the MAC once starts before there is
-an interface to read it from, and a rule added at boot is wiped afterwards.
-Measured on a cold boot: the daemon logged `waiting for wlan0 to appear` and
-waited 15 seconds, then added its rule, which was gone by 49 seconds and back by
-64. Setup that depends on the network must wait or re-assert, never run once.
+- Setup that depends on the network must wait or re-assert, never run once. On
+  a cold boot the daemon waited 15 seconds for `wlan0`, and its rule was gone
+  by 49 seconds and back by 64.
+- The 30-second re-assert leaves a gap. Across one reboot the rule went in at
+  25 seconds, was gone by 30, and was back at 57, and the mDNS announcement
+  went out at 36. So the rule is asserted once more immediately before
+  announcing; docs/sendspin.md has the order.
+- A repeated announcement with the same data is a refresh, not news, so the
+  responder cannot fix that for a peer that already holds the records. The
+  client's retry must. Home Assistant reconnects on a timer; Music Assistant
+  gives up permanently after about 8.5 minutes.
 
-Measured again with `tcp/8928` alongside it, because a second port is a second
-chance to get this wrong.
-The daemon waited 9 seconds for `wlan0`, another 10 for an address, and had both
-rules; at ~40 seconds the `8928` rule was **gone** and Music Assistant could not
-connect; by 67 seconds it was back with a SYN counted against it, and the session
-came up. The thirty-second re-assert is what closes that window, and it closes it
-for whichever port is handed to it.
+## What a peer can spend
 
-The re-assert alone does not close the gap a peer meets in between, because it
-only fires on a tick. Measured across a reboot, in uptime rather than wall clock:
-the rule was added at 25 seconds, gone by 30, still gone at 52, and back at 57 --
-and the mDNS announcement went out at 36, in the middle of it. The port was
-advertised and unreachable at the same time, and a client that acted on that
-announcement was dropped with nothing logged, because the SYN never reached
-userspace. What closes it is asserting the rule once more immediately before
-announcing, so the announcement cannot be the thing that falls in the hole;
-docs/sendspin.md carries the ordering.
+- A peer causes every line the API logs. `%q` renders a frame of `\xff` at 4
+  times its size on 1 line: one `HelloRequest` wrote 131,207 bytes.
+- The boot script truncates the log only at boot and every 20th restart, and a
+  peer never makes the daemon exit.
+- `internal/untrustedlog` holds the limits: peer strings cut to 64 bytes before
+  quoting, every line cut at 512 bytes, 20 peer lines a minute, and 5,000 for
+  the run. `Cut` is the call site's job; peer bytes inside an error formatted
+  with `%v` are bounded only by the 512-byte line cut.
+- Counters are per `Log`, so each subsystem has its own budget and the disk
+  sees the sum.
+- The rate alone is not enough: 21 lines a minute at the measured 311-byte
+  worst case is 9 MB a day. After the 5,000th line one line says so, and then
+  nothing a peer does is logged until restart, not even a dropped count.
+- An empty pre-shared key is no key. `flynn/noise` reads an empty
+  `PresharedKey` as no psk modifier, so `NNpsk0` becomes `NN` and every peer
+  completes the handshake. The first handshake message is 48 bytes with a
+  32-byte key and 32 bytes with none. `noiseAccept` checks the key length;
+  `TestAServerWithNoKeyRefusesEveryone` fails without that check.
+- There is no peer allowlist: ESPHome has none. Any host that can route to the
+  Dot can hold one of the 8 slots until the handshake wait expires, and 8 such
+  hosts keep Home Assistant out. Past the slot, everything needs the key.
+- Two frames are indexed right after they are measured, and a peer with no key
+  reaches the first: an empty second handshake frame read at `[0]`, and a
+  decrypted message under 4 bytes sliced for its header. A panic there restarts
+  the daemon 5 seconds later with the button ungrabbed, so a repeated empty
+  frame is a restart loop. Each guard has a test that panics without it.
 
-Nothing the responder can send fixes that for a peer that already knows the
-records, because a repeated announcement carrying the same data is a refresh
-rather than news. Recovery is the client's own retry, and how long it is willing
-to retry is the whole story: Home Assistant reconnects on a timer and never showed
-this; Music Assistant gives up permanently after about eight and a half minutes,
-measured on a Dot by counting its SYNs against this very rule. docs/sendspin.md
-carries what the advert does about that, and docs/mdns.md what the announcement
-ladder is and is not for.
+## mDNS and adb
 
-**A log line is an unauthenticated write to `/data`.** Every line the API logs
-is there because a peer did something, and `%q` renders a frame of `\xff` as
-four times its size on one line: measured, one `HelloRequest` wrote 131,207
-bytes. The log is truncated at boot and every twentieth restart, and a peer
-writing to it never makes the daemon exit, so neither truncation arrives. Peer
-strings are cut to 64 bytes and an ellipsis before they are quoted, every line is
-truncated at 512 bytes whatever the call site passed -- peer bytes arrive inside
-errors as well as as strings, and an error formatted with `%v` was never cut by
-anything -- and peer lines are limited twice over besides: 20 a minute, and 5,000
-for the run.
-`internal/untrustedlog` holds the rule, so a second peer-facing subsystem
-cannot keep its own copy of these numbers and drift from them. It does not hold
-one budget between them: the counters live per `Log`, so a second subsystem
-gets its own twenty a minute and its own five thousand, and what reaches the
-disk is the sum. That is a decision made by constructing a second `Log` rather
-than a constant copied by accident, which is the part worth having; if the
-total ever matters more than telling the subsystems apart, the counters belong
-in the package rather than the value. The rate alone is not enough: 21 lines a
-minute at the measured 311-byte worst case is 9 MB a day, and nothing truncates
-it. After the ceiling nothing a peer does is logged again until the daemon
-restarts, the count of what was dropped included, because a line a minute
-saying so grows the same file. Connection churn is the same hazard at a smaller
-size, a connect and a disconnect line apiece, so those are limited too rather
-than only the lines carrying a peer's own bytes.
+- udp/5353 needs no rule: the stock INPUT chain accepts it, because Alexa runs
+  her own mDNS. Her sockets are why the responder sets `SO_REUSEADDR` and
+  `SO_REUSEPORT` before binding; without both the bind fails.
+- `adb` merges the device's stderr into its stdout, so any read-back can carry
+  a line of noise. A linker warning from `su` prepended to a key file makes it
+  decode to nothing. No deploy script compares the whole stream to a literal:
+  each matches the shape it expects, and a read that decides something ends
+  with a word of its own, so silence and "no" differ.
 
-**An empty pre-shared key is not a weak key, it is no key.** `flynn/noise` reads
-an empty `PresharedKey` as *no psk modifier at all*, so `NNpsk0` quietly becomes
-plain `NN` and every peer on the subnet completes the handshake. It fails open,
-and it fails silently: nothing errors. Measured by asking it for a first
-handshake message each way: 48 bytes with a 32-byte key, and **32 bytes with a
-nil one**, which is the psk contribution simply missing. So `noiseAccept` checks
-the length before it uses the key, and `TestAServerWithNoKeyRefusesEveryone`
-fails if that check is removed. `DecodeNoisePSK` means the one caller cannot
-reach it today, but a key that is configured and not enforced only looks like
-protection.
+## Tests and emulation
 
-**udp/5353 needs no rule, and the port is already taken.** Unlike tcp/6053, the
-stock INPUT chain accepts `udp dpt:5353` outright: measured on a Dot, that rule
-is there with 15,293 packets against it, because Alexa runs its own mDNS. The
-same fact is why the socket sets `SO_REUSEADDR` and `SO_REUSEPORT` before
-binding: two sockets are already on `0.0.0.0:5353`, and without both options the
-bind fails rather than sharing. So the responder needs nothing from the firewall
-and everything from the socket options, which is the reverse of the API.
+- qemu-user's socket options depend on the build. Under `qemu-arm-static` on
+  x86-64 (CI), *setting* `IP_MULTICAST_IF` fails with `protocol not available`.
+  Under Docker's `linux/arm/v7` and `linux/arm64` it succeeds.
+  `IP_ADD_MEMBERSHIP`, one line earlier, succeeds everywhere.
+- Linux refuses `getsockopt(IP_MULTICAST_IF)` with `ENOPROTOOPT`, on native
+  arm64 too. So no test can assert the one option whose loss sends replies out
+  of the wrong interface. `SO_REUSEADDR`, `SO_REUSEPORT` and group membership
+  are read back and checked.
+- Tests that need a real multicast socket skip on `ENOPROTOOPT`, and each
+  read-back assertion skips on its own. The Dot runs ARM natively and never
+  meets this.
 
-**`adb` merges the device's stderr into its stdout**, so every read-back in the
-deploy scripts is one line of noise away from a wrong answer. A linker warning
-from `su` prepended to a key file makes it decode to nothing; taken as the answer
-to `[ -x ... ]` it is not `yes`; counted as "anything still on the device" it is
-six things left behind. So no read compares the whole stream against a literal.
-Each one matches the shape it expects, and the ones whose answer is a decision
-rather than a value end the remote command with a word of their own and demand
-it, because otherwise silence and "no" are the same reading, and a dropped cable
-becomes a confident wrong diagnosis.
+## evdev and syscalls
 
-**`adb push` does not carry the local mode, and `/data/local/tmp` is `0771`.**
-A key written locally as `0600` lands on the device as `0666`, and the `o+x` on
-that directory lets any uid reach it by name, so staging the key there hands it
-to every app on the device for as long as it sits there. Nothing reports this:
-the install succeeds, the key is correct, and the mode it finally lands with is
-right. Measured both ways on a Dot: from `/data/local/tmp` an app uid reads the
-staged key, and from a `0700` directory of our own the same read is denied. So
-`install.sh` makes that directory first and removes it after. The binary and the
-boot script go through the shared one still, because neither is a secret: the
-binary is read back by hash, and the boot script compared against what was
-pushed.
+- `os.File.Fd()` calls `pfd.SetBlocking()`. After that, `Close()` cannot
+  interrupt a `Read` blocked on the file: the reader holds a goroutine, a
+  thread and the fd, and later acts on an event meant for the next owner.
+  Through `SyscallConn().Control`, the blocked read returns
+  `file already closed`.
+- So every ioctl on an evdev descriptor in `internal/evdev` goes through
+  `Control`. This is a package rule, because one call through `Fd()`
+  reintroduces the hang. `/dev/uinput` uses `Fd()` safely: nothing reads it.
+- A pointer converted to `uintptr` for a syscall must be converted in that
+  syscall's own argument list, in the same *frame*. Elsewhere the compiler
+  stops tracking it, and a stack move leaves the integer naming freed memory.
+  `ioctlPtr` takes an `unsafe.Pointer` and converts it in the call. `go vet`'s
+  `unsafeptr` check flags only the reverse conversion.
 
-**Which socket options qemu-user implements depends on the qemu build**, so a
-socket test can pass in one emulator and fail in another for reasons that have
-nothing to do with the code. Under `qemu-arm-static` on x86-64, which is
-what CI runs, *setting* `IP_MULTICAST_IF` fails with `protocol not available`,
-so the responder cannot open a socket at all. Under Docker's `linux/arm/v7` and
-`linux/arm64` it is set without complaint. `IP_ADD_MEMBERSHIP` on the line
-before succeeds everywhere, so the socket opens far enough to look right either
-way.
+## The device name
 
-Reading an option back is a separate question from setting it, and the answer
-is not qemu's. Linux refuses `getsockopt(IP_MULTICAST_IF)` with the same
-`ENOPROTOOPT`, measured on native arm64 as well as under emulation, so the one
-socket option whose loss would send replies out of whichever interface the
-route table prefers is the one no test can assert. The other three are read
-back and checked.
-
-The tests that need a real multicast socket therefore skip on `ENOPROTOOPT`
-rather than fail on it, and the assertions that read an option back skip
-individually, so an option one emulator will not report does not take the other
-three with it. The daemon never meets any of this: the Dot runs ARM without an
-emulator. What made it worth writing down is how it presented. The socket test
-had never once passed in CI, and the single green run that seemed to prove
-otherwise predated the file.
-
-**Two frames are indexed right after they are measured**, and a peer with no key
-reaches the first. An empty second handshake frame would be read at `[0]` for
-its preamble, and a decrypted message shorter than four bytes sliced for its
-inner header. Neither is a crash the daemon survives usefully: the supervisor
-brings it back five seconds later with the button ungrabbed each time, so one
-peer repeating one empty frame is a reboot loop. Each guard has a test that
-panics without it, rather than one that reads the code back.
-
-**`os.File.Fd()` takes the descriptor out of Go's poller, and nothing says
-so.** It calls `pfd.SetBlocking()`, after which `Close()` can no longer interrupt
-a `Read` blocked on that file: the reader waits for a byte that may never come,
-holding a goroutine, a thread and the fd, and a reader stranded that way later
-acts on an event meant for whoever replaced it. Measured on `linux/arm/v7`:
-through `Fd()` a blocked read survives `Close`; through `SyscallConn().Control`
-the same read returns `file already closed`. So every ioctl in `internal/evdev`
-goes through `Control`.
-
-That is the package's rule rather than any one call's, because it has been
-arrived at twice. `Grab` was fixed on its own first, and a keycode check added
-two commits later reintroduced it through `DeviceKeys`, on the same descriptor,
-with the earlier fix still in place beside it. `/dev/uinput` still uses `Fd()`
-and is not the same case: nothing ever reads it.
-
-**A pointer converted to `uintptr` for a syscall has to be converted in that
-syscall's own argument list.** Anywhere else the compiler stops tracking it as a
-pointer, so a stack copy moves the object and leaves the integer naming memory
-that has been handed back. The conversion and `syscall.Syscall` sharing a
-*source line* is not enough -- they must share a *frame*, which a helper in
-between quietly ends: `go build -gcflags=-m` reported `cannot inline control:
-cost 150 exceeds budget 80` while the buffers it was handed stayed on the stack.
-`ioctlPtr` therefore takes an `unsafe.Pointer` and converts it in the call, which
-is the one shape the rule names. `go vet`'s `unsafeptr` check does not look at
-this: it flags the reverse conversion only.
-
-**There is still no peer allowlist**, because ESPHome has no such concept. The
-key is the whole of the access control, and it guards what a peer can reach
-rather than whether it gets in: anything that can route to the Dot on `wlan0`
-may open a connection and hold one of the eight slots until the handshake wait
-expires, and eight of those keep Home Assistant off the device for as long as
-somebody cares to. What is behind the slot needs the key.
-
-**`-name` is required and has to be unique.** README.md carries the rule a user
-needs; the rest of this is why there is no way around it.
-
-The daemon checks it as well as `install.sh`, because the binary can be run by
-hand, and the rules are ESPHome's own: the name is the device's identity in Home
-Assistant and the prefix of every entity id it creates.
-
-It has **no default**. A default is the same name on every Dot, and Home
-Assistant prefixes every entity id with it, so two Dots would collide there.
-Adding the second stops in a conflict menu asking whether to migrate or
-overwrite the first, which is a question nobody can answer from what it shows.
-
-A MAC-derived default like `echodot-00532a` is no better: it invents a
-placeholder identity ESPHome deliberately does not have, since ESPHome fails the
-compile without a `name:`. `friendly_name` is sent equal to `name` rather than
-dropped, because Home Assistant otherwise logs an INFO line on every connect, and
-because it collapses the discovery card to one string.
-
-Deriving `name` from a display name fails the other way. They have opposite
-lifecycles: the identity is pinned at first connect, the label is cosmetic and
-freely edited, so deriving one from the other turns a cosmetic edit into a
-breaking change. Slugifying is lossy besides: "Alexa's Dot" and "Alexas Dot"
-both land on `alexas-dot`.
+- `-name` is required, has no default, and must be unique. The daemon checks it
+  as well as `install.sh`, because the binary can be run by hand.
+- A fixed default would give every Dot the same name. Home Assistant prefixes
+  every entity id with it, so adding a second Dot stops in a conflict menu.
+- A MAC-derived default invents an identity ESPHome deliberately lacks: ESPHome
+  fails the compile without a `name:`.
+- `friendly_name` is sent equal to `name`. Without it Home Assistant logs an
+  INFO line on every connect, and the discovery card shows one string.
+- `name` is not derived from a display name. The identity is pinned at first
+  connect and the label is cosmetic, so a derived name turns a cosmetic edit
+  into a breaking change. Slugifying is also lossy: "Alexa's Dot" and "Alexas
+  Dot" both become `alexas-dot`.
