@@ -537,6 +537,7 @@ func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
 		return device.MusicVolume{
 			Max: 30, Speaker: v, SpeakerStep: int(v) * 30 / 100, SpeakerOK: ok,
 			Jack: 70, JackStep: 21, JackOK: true,
+			Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true,
 		}
 	}
 }
@@ -550,6 +551,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 		return device.MusicVolume{
 			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
 			Jack: 70, JackStep: 21, JackOK: true,
+			Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true,
 		}
 	}
 	s.jack = func() (bool, bool) { return true, true }
@@ -562,11 +564,11 @@ func stubSensors(s *Server) map[uint32]float32 {
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
 		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.7,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
-		s.keyADB: 0, s.keyAlexa: 1,
+		s.keyADB: 0, s.keyAlexa: 1, s.keyBT: 80,
 	}
 }
 
-const sensorCount = 14
+const sensorCount = 15
 
 func listening(s *Server) *conn {
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
@@ -643,7 +645,8 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
-		"cpu_temperature", "memory_available", "audio_jack", "speaker_playing"} {
+		"bluetooth_volume", "cpu_temperature", "memory_available", "audio_jack",
+		"speaker_playing"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -662,15 +665,23 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				failedKey = s.keyWifi
 			case "volume":
 				s.volumes = func() device.MusicVolume {
-					return device.MusicVolume{Max: 30, Jack: 70, JackStep: 21, JackOK: true}
+					return device.MusicVolume{Max: 30, Jack: 70, JackStep: 21, JackOK: true,
+						Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true}
 				}
 				failedKey = s.keyVolume
 			case "jack_volume":
 				s.volumes = func() device.MusicVolume {
-					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true}
+					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+						Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true}
 				}
 				failedKey = s.keyJack
 				delete(want, s.keySpeaker)
+			case "bluetooth_volume":
+				s.volumes = func() device.MusicVolume {
+					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
+						Jack: 70, JackStep: 21, JackOK: true}
+				}
+				failedKey = s.keyBT
 			case "audio_jack":
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn

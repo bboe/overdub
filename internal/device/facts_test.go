@@ -69,7 +69,7 @@ func TestParseWifiLevel(t *testing.T) {
 const audioDump = `- STREAM_MUSIC:
    Mute count: 0
    Max: 30
-   Current: 40000000 (default): 21, 2000000 (proxy): 21, 400 (hdmi): 30, 2 (speaker): 12, 4 (headset): 21, 200000 (aux_line): 30
+   Current: 40000000 (default): 21, 2000000 (proxy): 21, 400 (hdmi): 30, 80 (bt_a2dp): 24, 100 (bt_a2dp_hp): 18, 200 (bt_a2dp_spk): 9, 2 (speaker): 12, 4 (headset): 21, 200000 (aux_line): 30
 - STREAM_ALARM:
    Mute count: 0
    Max: 30
@@ -187,6 +187,47 @@ func TestParseJackVolume(t *testing.T) {
 				t.Errorf("jack = %v, %v; want %v, %v", v.Jack, v.JackOK, tt.want, tt.ok)
 			}
 		})
+	}
+}
+
+func TestParseBluetoothVolume(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		dump string
+		want float32
+		ok   bool
+	}{
+		{"the Dot with a speaker paired", audioDump, 80, true},
+		{"the generic route wins when all three are listed",
+			"- STREAM_MUSIC:\n   Max: 30\n" +
+				"   Current: 80 (bt_a2dp): 9, 100 (bt_a2dp_hp): 30, 200 (bt_a2dp_spk): 30\n", 30, true},
+		{"headphones when the generic route is absent",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 100 (bt_a2dp_hp): 15\n", 50, true},
+		{"a speaker when the generic route is absent",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 200 (bt_a2dp_spk): 15\n", 50, true},
+		{"headphones win over a speaker when the generic route is absent",
+			"- STREAM_MUSIC:\n   Max: 30\n" +
+				"   Current: 100 (bt_a2dp_hp): 9, 200 (bt_a2dp_spk): 30\n", 30, true},
+		{"sco is not a2dp",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 10 (bt_sco): 21, 2 (speaker): 12\n", 0, false},
+		{"nothing is paired",
+			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12\n", 0, false},
+		{"muted",
+			"- STREAM_MUSIC:\n   Mute count: 1\n   Max: 30\n   Current: 80 (bt_a2dp): 9\n", 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			v := parseMusicVolumes(tt.dump)
+			if v.Bluetooth != tt.want || v.BluetoothOK != tt.ok {
+				t.Errorf("bluetooth = %v, %v; want %v, %v", v.Bluetooth, v.BluetoothOK, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestABluetoothLevelIsAReadingOnItsOwn(t *testing.T) {
+	v := parseMusicVolumes("- STREAM_MUSIC:\n   Max: 30\n   Current: 80 (bt_a2dp): 9\n")
+	if !v.BluetoothOK || v.BluetoothStep != 9 || v.Max != 30 {
+		t.Errorf("a dump naming no speaker and no jack gave %+v, want the bluetooth step alone", v)
 	}
 }
 

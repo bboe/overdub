@@ -103,6 +103,7 @@ func (s *Server) readLive() []reading {
 		{key: s.keyMemory, value: memory, ok: memoryOK},
 		{key: s.keyVolume, value: volumes.Speaker, ok: volumes.SpeakerOK},
 		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
+		{key: s.keyBT, value: volumes.Bluetooth, ok: volumes.BluetoothOK},
 		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
 	if step, _, ok := activeVolume(volumes, occupied, jackOK); ok && volumes.Max > 0 {

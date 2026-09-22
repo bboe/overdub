@@ -137,6 +137,7 @@ type Server struct {
 	keyMemory   uint32
 	keyJack     uint32
 	keyJackOn   uint32
+	keyBT       uint32
 	keySound    uint32
 	keySpeaker  uint32
 	keyMicMute  uint32
@@ -251,6 +252,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyCPU:       entityKey("cpu_temperature"),
 		keyMemory:    entityKey("memory_available"),
 		keyJack:      entityKey("jack_volume"),
+		keyBT:        entityKey("bluetooth_volume"),
 		keyJackOn:    entityKey("audio_jack"),
 		keySound:     entityKey("speaker_playing"),
 		keySpeaker:   entityKey("speaker"),

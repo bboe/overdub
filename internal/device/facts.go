@@ -168,15 +168,20 @@ var (
 func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
 
 type MusicVolume struct {
-	Max         int
-	Muted       bool
-	Speaker     float32
-	SpeakerStep int
-	SpeakerOK   bool
-	Jack        float32
-	JackStep    int
-	JackOK      bool
+	Max           int
+	Muted         bool
+	Speaker       float32
+	SpeakerStep   int
+	SpeakerOK     bool
+	Jack          float32
+	JackStep      int
+	JackOK        bool
+	Bluetooth     float32
+	BluetoothStep int
+	BluetoothOK   bool
 }
+
+func (v MusicVolume) sawRoute() bool { return v.SpeakerOK || v.JackOK || v.BluetoothOK }
 
 func MusicVolumes() MusicVolume {
 	ctx, cancel := context.WithTimeout(context.Background(), volumeReadTimeout)
@@ -194,7 +199,7 @@ func parseMusicVolumes(dump string) MusicVolume {
 	muted, sawMute := false, false
 	var found MusicVolume
 	done := func() MusicVolume {
-		if !found.SpeakerOK && !found.JackOK {
+		if !found.sawRoute() {
 			return MusicVolume{}
 		}
 		found.Muted = muted
@@ -205,13 +210,16 @@ func parseMusicVolumes(dump string) MusicVolume {
 			if found.JackOK {
 				found.Jack = 0
 			}
+			if found.BluetoothOK {
+				found.Bluetooth = 0
+			}
 		}
 		return found
 	}
 	for _, line := range strings.Split(dump, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- STREAM_") {
-			if inMusic && (found.SpeakerOK || found.JackOK) {
+			if inMusic && found.sawRoute() {
 				return done()
 			}
 			inMusic = trimmed == "- STREAM_MUSIC:"
@@ -220,7 +228,7 @@ func parseMusicVolumes(dump string) MusicVolume {
 			continue
 		}
 		if trimmed != "" && line == strings.TrimLeft(line, " \t") {
-			if inMusic && (found.SpeakerOK || found.JackOK) {
+			if inMusic && found.sawRoute() {
 				return done()
 			}
 			inMusic = false
@@ -253,6 +261,14 @@ func parseMusicVolumes(dump string) MusicVolume {
 				found.JackStep, found.JackOK = deviceStep(trimmed, max, "headphone")
 			}
 			found.Jack = stepPercent(found.JackStep, max)
+			found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp")
+			if !found.BluetoothOK {
+				found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp_hp")
+			}
+			if !found.BluetoothOK {
+				found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp_spk")
+			}
+			found.Bluetooth = stepPercent(found.BluetoothStep, max)
 			continue
 		}
 	}

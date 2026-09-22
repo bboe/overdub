@@ -498,7 +498,7 @@ takes: `Max:` under `- STREAM_MUSIC:`, and that stream's `Current:` line, where
 each output device appears as `<hex mask> (<name>): <level>`. Only the ratio
 means anything. Measured here, 12 of 30.
 
-The volume is two readings rather than one, because Android keeps a level per
+The volume is three readings rather than one, because Android keeps a level per
 route and moves between them: with something in the socket the level that
 matters is `4 (headset)`, and the speaker's own sits unchanged at whatever it
 was. Reporting only the speaker made the sensor freeze the moment anything was
@@ -506,13 +506,46 @@ plugged in -- measured, three volume changes on a pair of headphones while the
 sensor held 40% throughout, which reads as a broken integration rather than as
 a routing question. `8 (headphone)` is read when `4` is absent, though nothing
 on this device has ever produced it, and `line` and `aux_line` have never moved
-at all. A route paired over bluetooth is a third level again and is not read at
-all, so a Dot playing to one is reporting neither of these.
+at all. A route paired over bluetooth is a third level again, and is read below.
 
-Either reading can be absent while the other is not, which is why a `Current:`
-line that names no speaker no longer ends the search: before there were two
-routes it could only mean a line we could not use, and now it is the ordinary
-shape of a dump whose jack is the half we can answer for.
+Any of the three can be absent while the others are not, which is why a
+`Current:` line that names no speaker no longer ends the search: before there
+was one route it could only mean a line we could not use, and now it is the
+ordinary shape of a dump whose jack or paired speaker is the half we can answer
+for. What ends the search is a line that named **any** route we can read, a
+bluetooth level on its own included, and the mute published with it is the one
+that block declared.
+
+**A speaker paired over bluetooth is a third route, read the same way.** Android
+keeps three A2DP devices in that line -- `80 (bt_a2dp)`, `100 (bt_a2dp_hp)` and
+`200 (bt_a2dp_spk)` -- and which one is live is not the device class. A JBL Go 3
+declares `DevClass` 2360340, portable audio, and a set landed on the plain
+`bt_a2dp` mask: measured by moving the level to 23 and reading it back, with
+`speaker` left at 7 and `headset` at 8. So the generic mask is read first and
+the other two are fallbacks, the order `headset` and `headphone` already have,
+and the whole parenthesised name still has to match -- `bt_a2dp` must not answer
+for `bt_a2dp_hp`.
+
+The level is reported whether or not anything is connected, as the jack's is
+with an empty socket: `bt_a2dp` read 25 of 30 with no speaker in sight, which is
+a real level the device would return to rather than a claim about what is
+playing. A mute zeroes all three percentages at once, since a mute is not per
+route.
+
+**What this level is not is the speaker's own volume.** Absolute volume is never
+negotiated on this Dot: AVRCP reports `mFeatures: 1` -- metadata, and not the
+`0x02` absolute-volume bit -- with `mRemoteVolume: -1` and an empty
+`mVolumeMapping`, measured against two different speakers. The remote is not
+what is missing, since one of them advertises `0000110e`, A/V Remote Control,
+reports LMP version 12 and does absolute volume with a phone; and nothing here
+turns it on, since `bt_stack.conf` carries only tracing and no property mentions
+AVRCP. It is a compile-time absence in this bluedroid build. So the Dot
+attenuates before encoding, the two volumes sit in series, and the speaker's own
+buttons report nothing back.
+
+Which route the *media player* counts from is a separate question and is not
+answered here: it still starts from the socket or the speaker, so a Dot playing
+to a paired speaker has a slider that counts from a level nobody is hearing.
 
 `settings get system volume_music_speaker` gives the same number and was the
 first attempt. It is a shell script that starts a VM, and it puts the two

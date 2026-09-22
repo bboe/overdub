@@ -127,6 +127,7 @@ func (s *Server) listEntities(conn *conn) error {
 		{"cpu_temperature", s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement, ""},
 		{"memory_available", s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement, ""},
 		{"jack_volume", s.keyJack, "Jack volume", "%", "", stateClassMeasurement, volumeIcon},
+		{"bluetooth_volume", s.keyBT, "Bluetooth volume", "%", "", stateClassMeasurement, volumeIcon},
 	} {
 		var entity pb
 		entity.str(1, sensor.objectID)
