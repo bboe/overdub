@@ -80,6 +80,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | uptime | `/proc/uptime` | 67 µs | minute |
 | signal | `/proc/net/wireless` | 1.8 ms | minute |
 | registration | `dumpsys account` | 10.5 ms | minute, subscribed |
+| Bluetooth name | `dumpsys bluetooth_manager` | 11.5 ms | minute, subscribed |
 | button modes | held in memory | -- | minute |
 | adb mode | `/proc/net/tcp`, `iptables -C` | 2 forks if open | minute |
 | temperature | a thermal zone's `temp` | 118 µs | heavy |
@@ -100,6 +101,8 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - `dumpsys account` and `dumpsys audio` were timed in the same loop, because
   the absolute figure moves with device load: 300 calls took 4.66 and 5.23
   seconds.
+- `dumpsys bluetooth_manager` costs what `dumpsys audio` does: 100 calls took
+  1.43 to 1.54 seconds against 1.30 to 1.47.
 - Zero is a valid reading for the signal, the uptime and the volume. So a
   reading that could not be taken is never published as zero.
 
@@ -132,10 +135,11 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - The snapshot is sent from `handle`, under the lock that orders it against a
   push, and reads nothing. `publish` logs its failures after the lock is
   dropped.
-- A wake is sent with the server lock held, so it may be dropped but never
-  blocks. A blocking send deadlocks: the poll that drains the channel takes the
-  same lock to publish.
-- Both polls hold a wake to `wakeGap`, because every wake is peer-caused.
+- A wake may be dropped but never blocks. A subscribe and a button mode change
+  send theirs with the server lock held, and a blocking send there deadlocks:
+  the poll that drains the channel takes the same lock to publish.
+- Both polls hold a wake to `wakeGap`, because a peer causes most wakes and a
+  route can flap.
   `PollLive` drops an early one: its own tick comes in 500 ms. `PollSensors`
   waits out the rest and then serves it, or the value stays wrong until the
   minute tick.
@@ -312,6 +316,42 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   mode.
 - So the first subscriber after a restart gets no registration state at all.
   The entity shows unknown, not unavailable, until the next minute tick.
+
+### Which speaker is connected
+
+- `bluetooth_device` names the speaker A2DP is connected to, or gives its
+  address when the Dot has no name for it. Empty means nothing is connected.
+  It is read only while somebody is subscribed, beside the registration.
+- It is one entity, not a flag and a name. A connected speaker always takes the
+  route, so `output_device` already says whether one is connected. A flag on
+  the minute tick would disagree with the live route for up to a minute.
+- The address is `mCurrentDevice` under `Profile: A2dpService` in `dumpsys
+  bluetooth_manager`, `null` when nothing is connected. The profile line must
+  match whole: `A2dpSinkService` has the same field for a phone playing into
+  the Dot, and `HeadsetService` for a route that is not A2DP.
+- The name is the `Name` tag in that address's section of
+  `/data/misc/bluedroid/bt_config.xml`. The search stops at the next address,
+  so a neighbour's name cannot answer. The Dot's own name, under `Local`, comes
+  before every address, so it cannot answer either.
+- The lookup reads the file in-process: 0.8 to 1.2 ms against a 59,589-byte
+  file. It runs only while a speaker is connected.
+- The name is made valid UTF-8. A text sensor state is a proto3 string, and
+  Home Assistant's client drops the connection on one it cannot decode. The
+  snapshot would then drop every reconnect for as long as the state stood.
+- `HidService` and the GATT clients carry no audio and are not read, so the
+  Alexa app over BLE is not a speaker. `mPlayingA2dpDevice` is not a playing
+  signal: it follows the AVDTP stream and was set with nothing playing.
+- **A route change to or from `bluetooth` wakes the minute poll**, so the name
+  follows the route within about a second. A change between the speaker and
+  the jack cannot move the name and wakes nothing. `wakeGap` bounds a route
+  that flaps. The route became `jack` and the name cleared in the same second.
+- **A swap from 1 speaker to another waits for the minute tick.** The Dot holds
+  1 A2DP sink, and `mBluetoothName` is a literal, not a name, so the route stays
+  `bluetooth` and nothing wakes. The link drops between speakers in practice:
+  across 6 transitions, the name and the route arrived together, 1 to 3
+  seconds behind the device.
+- `bt_config.xml`'s mtime does not track connections: a disconnect left it
+  unchanged for 2.5 minutes, and it was rewritten with nothing connected.
 
 ## The volume
 

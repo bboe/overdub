@@ -276,6 +276,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | sensor | `memory_available` | diagnostic | MiB an allocation could get |
 | binary_sensor | `audio_jack` | diagnostic | on: a plug in the socket |
 | sensor | `output_device` | diagnostic | `speaker`, `jack`, `bluetooth` (5) |
+| sensor | `bluetooth_device` | diagnostic | the connected speaker (5) |
 | binary_sensor | `speaker_playing` | diagnostic | on: wired audio out (6) |
 | binary_sensor | `alexa_registered` | diagnostic | on: has an account (7) |
 | select | `action_button_mode` | config | starts `intercept` (8) |
@@ -291,7 +292,8 @@ Each entity id is `<domain>.<name>_<suffix>`.
 3. Setting it presses the mute key, ring included.
 4. A reading that is not a signal is missing, not zero.
 5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
-   count.
+   count. `bluetooth_device` is the speaker's name, or its address when the Dot
+   has no name for it, and empty when no speaker is connected.
 6. Sound shorter than about 1.5 seconds is not reported. Bluetooth is not seen.
 7. Off on a Dot never set up, or deregistered; everything else still works.
 8. `intercept`, `monitor` or `pass through`.
@@ -311,12 +313,14 @@ Sendspin identity.
 | every | reads | when |
 |---|---|---|
 | 60 seconds | uptime, signal | always |
-| 60 seconds | registration | subscribed |
+| 60 seconds | registration, Bluetooth device | subscribed |
 | 2.5 seconds | 3 volumes, jack, route, temperature, memory, mic | subscribed |
 | 500 ms | whether the speaker is playing | subscribed |
 
 - The first subscriber wakes both polls. The registration has no state on the
   first connect after a restart until that reading arrives.
+- A speaker connecting or disconnecting reads the Bluetooth device again within
+  a few seconds.
 - A value is sent only when it changes.
 
 ### Volume

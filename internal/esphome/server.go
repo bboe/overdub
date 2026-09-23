@@ -141,6 +141,7 @@ type Server struct {
 	keyJackOn   uint32
 	keyBT       uint32
 	keyOutput   uint32
+	keyBTDevice uint32
 	keySound    uint32
 	keySpeaker  uint32
 	keyMicMute  uint32
@@ -188,6 +189,8 @@ type Server struct {
 	soundLastOn time.Time
 	soundSeen   time.Time
 
+	lastRoute string
+
 	uptime    func() (float32, bool)
 	wifi      func() (float32, bool)
 	volumes   func() device.MusicVolume
@@ -210,6 +213,7 @@ type Server struct {
 	delayWasSet bool
 	cpu         func() (float32, bool)
 	alexa       func() (bool, bool)
+	btDevice    func() (string, bool)
 	memory      func() (float32, bool)
 
 	play        func(url string) error
@@ -257,6 +261,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyJack:      entityKey("jack_volume"),
 		keyBT:        entityKey("bluetooth_volume"),
 		keyOutput:    entityKey("output_device"),
+		keyBTDevice:  entityKey("bluetooth_device"),
 		keyJackOn:    entityKey("audio_jack"),
 		keySound:     entityKey("speaker_playing"),
 		keySpeaker:   entityKey("speaker"),
@@ -276,6 +281,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		cpu:          device.CPUTemperature,
 		micMute:      device.MicMuted,
 		alexa:        device.AlexaRegistered,
+		btDevice:     device.BluetoothDevice,
 		micPress: func() error {
 			return fmt.Errorf("no button to press: the switch is not wired to one")
 		},

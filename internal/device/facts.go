@@ -4,11 +4,9 @@
 package device
 
 import (
-	"context"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -152,20 +150,9 @@ func parseWifiLevel(table, iface string) (float32, bool) {
 	return 0, false
 }
 
-var (
-	volumeReadTimeout = 1000 * time.Millisecond
-	volumeWaitDelay   = 500 * time.Millisecond
+var volumeDump = newDumpsys("audio", 1000*time.Millisecond, 500*time.Millisecond)
 
-	volumeArgv = []string{"/system/bin/dumpsys", "audio"}
-
-	volumeCommand = func(ctx context.Context) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, volumeArgv[0], volumeArgv[1:]...)
-		cmd.WaitDelay = volumeWaitDelay
-		return cmd.Output()
-	}
-)
-
-func VolumeReadBudget() time.Duration { return volumeReadTimeout + volumeWaitDelay }
+func VolumeReadBudget() time.Duration { return volumeDump.budget() }
 
 type MusicVolume struct {
 	Max              int
@@ -186,9 +173,7 @@ type MusicVolume struct {
 func (v MusicVolume) sawRoute() bool { return v.SpeakerOK || v.JackOK || v.BluetoothOK }
 
 func MusicVolumes() MusicVolume {
-	ctx, cancel := context.WithTimeout(context.Background(), volumeReadTimeout)
-	defer cancel()
-	out, err := volumeCommand(ctx)
+	out, err := volumeDump.read()
 	if err != nil {
 		return MusicVolume{}
 	}

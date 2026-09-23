@@ -146,7 +146,7 @@ func TestTheNinthConnectionIsRefused(t *testing.T) {
 
 func TestAnUnsubscribedClientGetsNoStates(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
-	s.uptime = func() (float32, bool) { return 1234, true }
+	stubSensors(s)
 	quiet := &conn{out: make(chan frame, sendQueue)}
 	loud := &conn{out: make(chan frame, sendQueue), states: true}
 	s.mu.Lock()
@@ -331,6 +331,10 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		registered, _ := watch(1)()
 		return registered != 0, true
 	}
+	s.btDevice = func() (string, bool) {
+		watch(0)()
+		return "JBL Go 3", true
+	}
 
 	go s.Poll(MinSensorTick, time.Hour)
 
@@ -370,7 +374,7 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		}
 	}
 
-	const readersAWakeCosts = 7 // cpu, memory, volumes, jack, sound, mic, registration
+	const readersAWakeCosts = 8 // cpu, memory, volumes, jack, sound, mic, registration, bluetooth
 	mu.Lock()
 	defer mu.Unlock()
 	if underLock {
@@ -559,16 +563,17 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.micMute = func() (bool, bool) { return false, true }
 	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
 	s.alexa = func() (bool, bool) { return true, true }
+	s.btDevice = func() (string, bool) { return "JBL Go 3", true }
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
 		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.7,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
-		s.keyADB: 0, s.keyAlexa: 1, s.keyBT: 80, s.keyOutput: 0,
+		s.keyADB: 0, s.keyAlexa: 1, s.keyBT: 80, s.keyOutput: 0, s.keyBTDevice: 0,
 	}
 }
 
-const sensorCount = 16
+const sensorCount = 17
 
 func listening(s *Server) *conn {
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
@@ -645,8 +650,8 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
-		"bluetooth_volume", "cpu_temperature", "memory_available", "audio_jack",
-		"speaker_playing"} {
+		"bluetooth_volume", "bluetooth_device", "cpu_temperature", "memory_available",
+		"audio_jack", "speaker_playing"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -683,6 +688,9 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 						Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true}
 				}
 				failedKey = s.keyBT
+			case "bluetooth_device":
+				s.btDevice = func() (string, bool) { return "", false }
+				failedKey = s.keyBTDevice
 			case "audio_jack":
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn
@@ -1601,6 +1609,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.keyADB:                          {"network_adb", msgSelectState},
 				s.keyAlexa:                        {"alexa_registered", msgBinarySensorState},
 				s.keyOutput:                       {"output_device", msgTextSensorState},
+				s.keyBTDevice:                     {"bluetooth_device", msgTextSensorState},
 			}
 
 			s.sound = tt.sound
@@ -2289,6 +2298,39 @@ func TestTheRegistrationIsNotForkedWhileNobodyIsListening(t *testing.T) {
 		t.Errorf("a subscriber got %d registration readings and %v in the tick; want one of each",
 			reads, found)
 	}
+}
+
+func TestTheBluetoothDeviceIsNotForkedWhileNobodyIsListening(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	reads := 0
+	s.btDevice = func() (string, bool) {
+		reads++
+		return "JBL Go 3", true
+	}
+
+	s.readTicked()
+	if reads != 0 {
+		t.Errorf("the Bluetooth device was read %d times with nobody subscribed", reads)
+	}
+
+	defer quiet(s, listening(s))
+	for _, r := range s.readTicked() {
+		if r.key != s.keyBTDevice {
+			continue
+		}
+		if !r.ok || r.text != "JBL Go 3" || r.kind != kindTextSensor {
+			t.Errorf("the speaker's name went out as %+v, want it as a text sensor state", r)
+		}
+		if reads != 1 {
+			t.Errorf("a subscriber got %d Bluetooth device reads, want 1", reads)
+		}
+		return
+	}
+	t.Error("the minute poll carries no Bluetooth device reading for a subscriber")
 }
 
 func TestTheFirstSubscriberGetsNoRegistrationUntilThePollTakesOne(t *testing.T) {

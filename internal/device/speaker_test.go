@@ -190,9 +190,8 @@ func TestAnUnreadableDumpIsNoReading(t *testing.T) {
 		{"no active track", []byte(flingerIdle), nil, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			old := speakerCommand
-			speakerCommand = func(context.Context) ([]byte, error) { return tt.out, tt.err }
-			defer func() { speakerCommand = old }()
+			defer func(was dumpsys) { *speakerDump = was }(*speakerDump)
+			speakerDump.command = func(context.Context) ([]byte, error) { return tt.out, tt.err }
 
 			playing, ok := SpeakerPlaying()
 			if playing != tt.playing || ok != tt.ok {
@@ -215,12 +214,11 @@ func TestASilentSubstreamNeverForks(t *testing.T) {
 	}
 
 	forked := false
-	old := speakerCommand
-	speakerCommand = func(context.Context) ([]byte, error) {
+	defer func(was dumpsys) { *speakerDump = was }(*speakerDump)
+	speakerDump.command = func(context.Context) ([]byte, error) {
 		forked = true
 		return []byte(flingerDump), nil
 	}
-	defer func() { speakerCommand = old }()
 
 	playing, ok := SpeakerPlaying()
 	if playing || !ok {
@@ -244,9 +242,9 @@ func TestThePCMRefreshIsTheOneThatShips(t *testing.T) {
 }
 
 func TestTheSpeakerReadBudgetIsBounded(t *testing.T) {
-	if got := SpeakerReadBudget(); got != speakerReadTimeout+speakerWaitDelay {
+	if got := SpeakerReadBudget(); got != speakerDump.timeout+speakerDump.wait {
 		t.Errorf("SpeakerReadBudget is %v, want the deadline plus the wait delay (%v)",
-			got, speakerReadTimeout+speakerWaitDelay)
+			got, speakerDump.timeout+speakerDump.wait)
 	}
 	if SpeakerReadBudget() >= 500*time.Millisecond {
 		t.Errorf("SpeakerReadBudget is %v, which does not fit inside the half second it is "+
@@ -387,13 +385,10 @@ func TestOneSpeakerReadCannotOutlastItsBudget(t *testing.T) {
 	}
 
 	defer stubPCM(t, filepath.Join(dir, "card*", "pcm*p", "sub*", "status"))()
-	wasArgv, wasTimeout, wasDelay := speakerArgv, speakerReadTimeout, speakerWaitDelay
-	defer func() {
-		speakerArgv, speakerReadTimeout, speakerWaitDelay = wasArgv, wasTimeout, wasDelay
-	}()
+	defer func(was dumpsys) { *speakerDump = was }(*speakerDump)
 
-	speakerReadTimeout, speakerWaitDelay = 100*time.Millisecond, 400*time.Millisecond
-	speakerArgv = []string{"sh", "-c", "sleep 30 & sleep 30"}
+	speakerDump.timeout, speakerDump.wait = 100*time.Millisecond, 400*time.Millisecond
+	speakerDump.argv = []string{"sh", "-c", "sleep 30 & sleep 30"}
 
 	start := time.Now()
 	playing, ok := SpeakerPlaying()
@@ -402,25 +397,12 @@ func TestOneSpeakerReadCannotOutlastItsBudget(t *testing.T) {
 	if ok {
 		t.Errorf("a read that never answered reported playing=%v as a reading", playing)
 	}
-	if elapsed < speakerReadTimeout {
+	if elapsed < speakerDump.timeout {
 		t.Fatalf("the read failed in %v, before the deadline it was supposed to hit; the command never ran", elapsed)
 	}
 	if limit := SpeakerReadBudget() + 100*time.Millisecond; elapsed > limit {
 		t.Errorf("one read took %v against a budget of %v; the budget has to bound the whole call",
 			elapsed, SpeakerReadBudget())
-	}
-}
-
-func TestTheSpeakerReadsTheFlingerService(t *testing.T) {
-	want := []string{"/system/bin/dumpsys", "media.audio_flinger"}
-	if len(speakerArgv) != len(want) {
-		t.Fatalf("speakerArgv is %v, want %v", speakerArgv, want)
-	}
-	for i := range want {
-		if speakerArgv[i] != want[i] {
-			t.Errorf("speakerArgv is %v, want %v", speakerArgv, want)
-			break
-		}
 	}
 }
 

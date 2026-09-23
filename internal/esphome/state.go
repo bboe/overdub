@@ -40,6 +40,10 @@ func (s *Server) readTicked() []reading {
 		out = append(out, reading{
 			key: s.keyAlexa, value: boolValue(registered), ok: alexaOK, kind: kindBinary,
 		})
+		connected, connectedOK := s.btDevice()
+		out = append(out, reading{
+			key: s.keyBTDevice, text: connected, ok: connectedOK, kind: kindTextSensor,
+		})
 	}
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
@@ -109,6 +113,7 @@ func (s *Server) readLive() []reading {
 	}
 	route, routeKnown := activeRoute(volumes, occupied, jackOK)
 	out = append(out, reading{key: s.keyOutput, text: route, ok: routeKnown, kind: kindTextSensor})
+	s.routeObserved(route, routeKnown)
 	if step, _, ok := activeVolume(volumes, occupied, jackOK); ok && volumes.Max > 0 {
 		out = append(out, reading{
 			key:   s.keySpeaker,
@@ -130,6 +135,21 @@ func (s *Server) readLive() []reading {
 		out = append(out, reading{key: s.keyDelay, value: float32(s.delayMS()), ok: true, kind: kindNumber})
 	}
 	return out
+}
+
+func (s *Server) routeObserved(route string, known bool) {
+	if !known {
+		return
+	}
+	last := s.lastRoute
+	s.lastRoute = route
+	if last == "" || route == last || (route != routeBluetooth && last != routeBluetooth) {
+		return
+	}
+	select {
+	case s.sensorWake <- struct{}{}:
+	default:
+	}
 }
 
 func boolValue(b bool) float32 {
@@ -343,6 +363,7 @@ func (s *Server) PollLive(every time.Duration) {
 		if listening != watched {
 			if !listening {
 				s.forgetSound()
+				s.lastRoute = ""
 			}
 			watched = listening
 		}

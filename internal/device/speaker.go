@@ -2,9 +2,7 @@ package device
 
 import (
 	"bytes"
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,20 +20,9 @@ var (
 
 var pcmRefresh = time.Minute
 
-var (
-	speakerReadTimeout = 300 * time.Millisecond
-	speakerWaitDelay   = 100 * time.Millisecond
+var speakerDump = newDumpsys("media.audio_flinger", 300*time.Millisecond, 100*time.Millisecond)
 
-	speakerArgv = []string{"/system/bin/dumpsys", "media.audio_flinger"}
-
-	speakerCommand = func(ctx context.Context) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, speakerArgv[0], speakerArgv[1:]...)
-		cmd.WaitDelay = speakerWaitDelay
-		return cmd.Output()
-	}
-)
-
-func SpeakerReadBudget() time.Duration { return speakerReadTimeout + speakerWaitDelay }
+func SpeakerReadBudget() time.Duration { return speakerDump.budget() }
 
 func SpeakerPlaying() (bool, bool) {
 	running, ok := pcmRunning()
@@ -45,9 +32,7 @@ func SpeakerPlaying() (bool, bool) {
 	if !running {
 		return false, true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), speakerReadTimeout)
-	defer cancel()
-	out, err := speakerCommand(ctx)
+	out, err := speakerDump.read()
 	if err != nil {
 		return false, false
 	}

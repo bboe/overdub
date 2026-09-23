@@ -29,6 +29,8 @@ const (
 	commandIcon = "mdi:microphone-message"
 
 	alexaIcon = "mdi:account-check"
+
+	bluetoothIcon = "mdi:bluetooth"
 )
 
 const (
@@ -254,6 +256,17 @@ func (s *Server) listEntities(conn *conn) error {
 	route.boolean(6, false) // disabled_by_default
 	route.u32(7, entityCategoryDiagnostic)
 	if err := s.send(conn, msgListTextSensor, route.b); err != nil {
+		return err
+	}
+
+	var connected pb
+	connected.str(1, "bluetooth_device")
+	connected.fixed32(2, s.keyBTDevice)
+	connected.str(3, "Bluetooth device")
+	connected.str(5, bluetoothIcon)
+	connected.boolean(6, false) // disabled_by_default
+	connected.u32(7, entityCategoryDiagnostic)
+	if err := s.send(conn, msgListTextSensor, connected.b); err != nil {
 		return err
 	}
 

@@ -58,31 +58,19 @@ func TestTheAuthenticatorIsNotAnAccount(t *testing.T) {
 }
 
 func TestARegistrationReadThatFailedIsNoReading(t *testing.T) {
-	defer func(c func(context.Context) ([]byte, error)) { accountCommand = c }(accountCommand)
+	defer func(was dumpsys) { *accountDump = was }(*accountDump)
 
-	accountCommand = func(context.Context) ([]byte, error) {
+	accountDump.command = func(context.Context) ([]byte, error) {
 		return []byte(accountDumpRegistered), errors.New("killed")
 	}
 	if registered, ok := AlexaRegistered(); ok || registered {
 		t.Errorf("AlexaRegistered() = %v, %v; want a reading nobody took", registered, ok)
 	}
 
-	accountCommand = func(context.Context) ([]byte, error) {
+	accountDump.command = func(context.Context) ([]byte, error) {
 		return []byte(accountDumpRegistered), nil
 	}
 	if registered, ok := AlexaRegistered(); !ok || !registered {
 		t.Errorf("AlexaRegistered() = %v, %v; want true, true", registered, ok)
-	}
-}
-
-func TestTheRegistrationReadAsksDumpsysForTheAccounts(t *testing.T) {
-	want := []string{"/system/bin/dumpsys", "account"}
-	if len(accountArgv) != len(want) {
-		t.Fatalf("accountArgv is %v, want %v", accountArgv, want)
-	}
-	for i := range want {
-		if accountArgv[i] != want[i] {
-			t.Fatalf("accountArgv is %v, want %v", accountArgv, want)
-		}
 	}
 }

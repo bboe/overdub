@@ -122,9 +122,9 @@ func TestTheSensorTickRespectsTheFloor(t *testing.T) {
 	if floor < esphome.MinSensorTick {
 		floor = esphome.MinSensorTick
 	}
-	if budget := device.AccountReadBudget(); budget >= floor {
-		t.Errorf("the registration is read every %v and one read may take %v, so a slow read "+
-			"delays the tick behind it", floor, budget)
+	if budget := device.AccountReadBudget() + device.BluetoothReadBudget(); budget >= floor {
+		t.Errorf("the registration and the Bluetooth device are read every %v and may take "+
+			"%v between them, so a slow read delays the tick behind it", floor, budget)
 	}
 }
 

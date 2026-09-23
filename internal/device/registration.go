@@ -1,26 +1,13 @@
 package device
 
 import (
-	"context"
-	"os/exec"
 	"strings"
 	"time"
 )
 
-var (
-	accountReadTimeout = 1000 * time.Millisecond
-	accountWaitDelay   = 500 * time.Millisecond
+var accountDump = newDumpsys("account", 1000*time.Millisecond, 500*time.Millisecond)
 
-	accountArgv = []string{"/system/bin/dumpsys", "account"}
-
-	accountCommand = func(ctx context.Context) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, accountArgv[0], accountArgv[1:]...)
-		cmd.WaitDelay = accountWaitDelay
-		return cmd.Output()
-	}
-)
-
-func AccountReadBudget() time.Duration { return accountReadTimeout + accountWaitDelay }
+func AccountReadBudget() time.Duration { return accountDump.budget() }
 
 const (
 	accountCount = "Accounts:"
@@ -29,9 +16,7 @@ const (
 )
 
 func AlexaRegistered() (registered, ok bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), accountReadTimeout)
-	defer cancel()
-	out, err := accountCommand(ctx)
+	out, err := accountDump.read()
 	if err != nil {
 		return false, false
 	}

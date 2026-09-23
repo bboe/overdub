@@ -326,12 +326,11 @@ func TestJackOccupiedWithNoSwitch(t *testing.T) {
 }
 
 func TestTheVolumeReadGivesUpRatherThanHanging(t *testing.T) {
-	wasCmd, wasWait := volumeCommand, volumeReadTimeout
-	defer func() { volumeCommand, volumeReadTimeout = wasCmd, wasWait }()
+	defer func(was dumpsys) { *volumeDump = was }(*volumeDump)
 
-	volumeReadTimeout = 100 * time.Millisecond
+	volumeDump.timeout = 100 * time.Millisecond
 	started := make(chan struct{})
-	volumeCommand = func(ctx context.Context) ([]byte, error) {
+	volumeDump.command = func(ctx context.Context) ([]byte, error) {
 		close(started)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -356,13 +355,10 @@ func TestOneReadCannotOutlastItsBudget(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skipf("no shell to fork with: %v", err)
 	}
-	wasArgv, wasTimeout, wasDelay := volumeArgv, volumeReadTimeout, volumeWaitDelay
-	defer func() {
-		volumeArgv, volumeReadTimeout, volumeWaitDelay = wasArgv, wasTimeout, wasDelay
-	}()
+	defer func(was dumpsys) { *volumeDump = was }(*volumeDump)
 
-	volumeReadTimeout, volumeWaitDelay = 100*time.Millisecond, 400*time.Millisecond
-	volumeArgv = []string{"sh", "-c", "sleep 30 & sleep 30"}
+	volumeDump.timeout, volumeDump.wait = 100*time.Millisecond, 400*time.Millisecond
+	volumeDump.argv = []string{"sh", "-c", "sleep 30 & sleep 30"}
 
 	start := time.Now()
 	got := MusicVolumes()
@@ -371,7 +367,7 @@ func TestOneReadCannotOutlastItsBudget(t *testing.T) {
 	if got.SpeakerOK || got.JackOK {
 		t.Errorf("a read that never answered reported %+v", got)
 	}
-	if elapsed < volumeReadTimeout {
+	if elapsed < volumeDump.timeout {
 		t.Fatalf("the read failed in %v, before the deadline it was supposed to hit; the command never ran", elapsed)
 	}
 	if limit := VolumeReadBudget() + 100*time.Millisecond; elapsed > limit {

@@ -2,6 +2,7 @@ package esphome
 
 import (
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,4 +340,151 @@ func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 
 func shortSoundDelays(s *Server) {
 	s.onDelay, s.offDelay = 30*time.Millisecond, 60*time.Millisecond
+}
+
+func TestARouteChangeWakesTheNameRead(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	wired := s.volumes()
+	wired.BluetoothRoute = false
+	bluetooth := wired
+	bluetooth.BluetoothRoute = true
+	s.volumes = func() device.MusicVolume { return wired }
+
+	s.readLive()
+	if len(s.sensorWake) != 0 {
+		t.Error("the first route seen woke the name read; subscribing already wakes it")
+	}
+	s.readLive()
+	if len(s.sensorWake) != 0 {
+		t.Error("a route that did not change woke the poll that reads the speaker's name")
+	}
+
+	s.jack = func() (bool, bool) { return false, true }
+	s.readLive()
+	s.jack = func() (bool, bool) { return true, true }
+	s.readLive()
+	if len(s.sensorWake) != 0 {
+		t.Error("the route moved between the jack and the speaker, which cannot change the " +
+			"Bluetooth device, and woke the name read")
+	}
+
+	unknown := wired
+	unknown.BluetoothRouteOK = false
+	s.volumes = func() device.MusicVolume { return unknown }
+	s.readLive()
+	s.volumes = func() device.MusicVolume { return wired }
+	s.readLive()
+	if len(s.sensorWake) != 0 {
+		t.Error("a route that could not be read, between two that agree, woke the name read")
+	}
+
+	s.volumes = func() device.MusicVolume { return bluetooth }
+	s.readLive()
+	if len(s.sensorWake) != 1 {
+		t.Fatal("the route became bluetooth and the name read was left to the minute tick")
+	}
+	<-s.sensorWake
+	s.readLive()
+	if len(s.sensorWake) != 0 {
+		t.Fatal("a speaker still connected woke the name read on every heavy tick")
+	}
+
+	s.volumes = func() device.MusicVolume { return wired }
+	s.readLive()
+	if len(s.sensorWake) != 1 {
+		t.Fatal("the speaker went away and the name it left behind was not read again")
+	}
+	<-s.sensorWake
+
+	s.volumes = func() device.MusicVolume { return unknown }
+	s.readLive()
+	s.volumes = func() device.MusicVolume { return bluetooth }
+	s.readLive()
+	if len(s.sensorWake) != 1 {
+		t.Fatal("a route that could not be read hid the speaker that connected across it")
+	}
+
+	s.volumes = func() device.MusicVolume { return wired }
+	done := make(chan struct{})
+	go func() {
+		s.readLive()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a wake the sensor poll had not yet taken blocked the live poll")
+	}
+}
+
+func TestTheRouteIsForgottenWhenTheLastSubscriberGoes(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	wired := s.volumes()
+	var onBluetooth atomic.Bool
+	s.volumes = func() device.MusicVolume {
+		v := wired
+		v.BluetoothRoute = onBluetooth.Load()
+		return v
+	}
+	sub := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
+	join := func() {
+		s.mu.Lock()
+		s.conns[sub] = struct{}{}
+		s.mu.Unlock()
+	}
+	leave := func() {
+		s.mu.Lock()
+		delete(s.conns, sub)
+		s.mu.Unlock()
+	}
+	t.Cleanup(leave)
+	published := func(key uint32) (reading, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		r, ok := s.published[key]
+		return r, ok
+	}
+	until := func(what string, done func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+			if done() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal(what)
+	}
+
+	join()
+	go s.PollLive(5 * time.Millisecond)
+	until("the poll never published the route", func() bool {
+		r, ok := published(s.keyOutput)
+		return ok && r.text == routeJack
+	})
+
+	leave()
+	until("the poll never noticed the last subscriber go", func() bool {
+		_, ok := published(s.keySound)
+		return !ok
+	})
+	onBluetooth.Store(true)
+	select {
+	case <-s.sensorWake:
+	default:
+	}
+
+	join()
+	until("the poll never published the route it found on return", func() bool {
+		r, ok := published(s.keyOutput)
+		return ok && r.text == routeBluetooth
+	})
+	if len(s.sensorWake) != 0 {
+		t.Error("a subscriber's return woke the name read a second time; subscribing already " +
+			"wakes it, and the route it was compared against was taken for somebody else")
+	}
 }

@@ -206,40 +206,51 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	}
 }
 
-func TestTheOutputDeviceIsListedAsATextSensor(t *testing.T) {
+func TestTheTextSensorsAreListedTheWayHomeAssistantReadsThem(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	want := map[string]struct {
+		key  uint32
+		name string
+		icon string
+	}{
+		"output_device":    {s.keyOutput, "Output device", speakerIcon},
+		"bluetooth_device": {s.keyBTDevice, "Bluetooth device", bluetoothIcon},
+	}
 
-	found := 0
 	for _, entity := range listed(t, s) {
 		if entity[0].num != uint64(msgListTextSensor) {
 			continue
 		}
-		found++
-		if got := string(entity[1].data); got != "output_device" {
-			t.Errorf("the text sensor listed is %q, want \"output_device\"", got)
+		objectID := string(entity[1].data)
+		w, ok := want[objectID]
+		if !ok {
+			t.Errorf("the text sensor %q is none of ours, or was listed twice", objectID)
+			continue
 		}
-		if uint32(entity[2].num) != s.keyOutput {
-			t.Errorf("output_device has key %d, want %d", entity[2].num, s.keyOutput)
+		delete(want, objectID)
+		if uint32(entity[2].num) != w.key {
+			t.Errorf("%s has key %d, want %d", objectID, entity[2].num, w.key)
 		}
 		if entity[2].wire != wireFixed32 {
-			t.Errorf("output_device sent its key as wire type %d, want fixed32 (%d)",
-				entity[2].wire, wireFixed32)
+			t.Errorf("%s sent its key as wire type %d, want fixed32 (%d)",
+				objectID, entity[2].wire, wireFixed32)
 		}
-		if got := string(entity[3].data); got != "Output device" {
-			t.Errorf("output_device is named %q, want \"Output device\"", got)
+		if got := string(entity[3].data); got != w.name {
+			t.Errorf("%s is named %q, want %q", objectID, got, w.name)
 		}
-		if got := string(entity[5].data); got != speakerIcon {
-			t.Errorf("output_device carries icon %q, want %q", got, speakerIcon)
+		if got := string(entity[5].data); got != w.icon {
+			t.Errorf("%s carries icon %q, want %q", objectID, got, w.icon)
 		}
 		if entity[6].num != 0 {
-			t.Error("output_device is disabled_by_default; it would not appear until somebody enabled it")
+			t.Errorf("%s is disabled_by_default; it would not appear until somebody enabled it",
+				objectID)
 		}
 		if entity[7].num != entityCategoryDiagnostic {
-			t.Error("output_device is not diagnostic; it would sit among the device's controls")
+			t.Errorf("%s is not diagnostic; it would sit among the device's controls", objectID)
 		}
 	}
-	if found != 1 {
-		t.Errorf("%d text sensors were listed, want 1: output_device", found)
+	for objectID := range want {
+		t.Errorf("%s was never listed", objectID)
 	}
 }
 
