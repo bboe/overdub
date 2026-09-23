@@ -12,8 +12,6 @@ const (
 	commandVolume      = "volume"
 	commandMute        = "mute"
 
-	// KeepApart and KeepTries are this package's flash-write policy, and the
-	// Sendspin switch writes the same property under it when no client holds one.
 	KeepApart = time.Minute
 	KeepTries = 3
 

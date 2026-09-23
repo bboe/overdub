@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	// Prefix is every property name this daemon keeps.
 	Prefix = "persist.overdub."
 
 	keyMax = 31
