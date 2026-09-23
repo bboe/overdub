@@ -23,8 +23,9 @@ docker run --rm --platform linux/arm/v7 -v "$PWD":/src \
   -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.26 go test -count=2 ./...
 
 # -race has no arm build, so these run natively
-go test -race ./internal/audio/ ./internal/esphome/ ./internal/device/ \
-  ./internal/mdns/ ./internal/sendspin/ ./internal/untrustedlog/
+go test -race ./internal/alexa/ ./internal/audio/ ./internal/esphome/ \
+  ./internal/device/ ./internal/mdns/ ./internal/sendspin/ \
+  ./internal/untrustedlog/
 
 git ls-files -z '*.sh' | xargs -0 shellcheck -S style   # as CI runs it
 deploy/check-identifiers.sh   # Amazon identifiers still look like ones
