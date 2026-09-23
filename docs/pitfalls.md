@@ -207,6 +207,35 @@ A warm restart hides all of this.
 - `service call audio 3` sets it: 3 is `adjustMasterVolume`, next to
   `adjustStreamVolume` at 2. docs/api.md has the mapping.
 
+## A stream mute another app holds
+
+- `setStreamMute` is counted per client. A mute another app holds keeps the
+  music silent after Home Assistant unmutes: the daemon's unmute takes away
+  only its own request. The volume keys do not lift it either.
+- The daemon mutes through `service call audio 8`, which passes no binder, so
+  that mute outlives the process that made it. A shell mute moved the count 1
+  to 2 and its unmute back to 1; more unmutes moved nothing.
+- The tell is `Mute count:` above 0 under `- STREAM_MUSIC:` in `dumpsys audio`
+  when Home Assistant did not mute the Dot. The volume sensors read 0%.
+- The holder seen is `com.amazon.mediaplayeragent`. Its
+  `ChannelVolumeController` carries out Alexa's `SetMute` directive, from the
+  cloud, the app or a voice command, and ignores the route. Capture its log
+  tag, `AMBS_ChannelVolumeController`, if it happens again.
+- It stuck once after a cable insert, and later came and went in 4 seconds with
+  nothing plugged in. 3 inserts, 1 during playback, and a speaker lost to range
+  all left every mute count at 0. The trigger is not known; the likeliest
+  reading, not measured, is a `SetMute(false)` that never arrived.
+- Its guard is not the cause. `setMute` skips a call that `isMute()` already
+  agrees with, and `isMute()` reads `getStreamVolume() == 0`. A muted stream
+  reads 0 there: through `IAudioService`, `getStreamVolume(3)` read 10, then 0
+  while muted, then 10.
+- A reboot clears it. Force-stopping `com.amazon.mediaplayeragent` should,
+  because a client's mutes go when its binder dies; that is not tested. Pulling
+  the cable cleared it once, by a path not traced.
+- "Alexa, mute" is another mechanism: it sets the level to 0 and leaves the
+  count at 0. `settings get global` reads `musicMuteHappened`,
+  `ttsMuteHappened` and `musicMuteByCloud`; all 3 read 0 on a Dot not muted.
+
 ## Bluetooth and Wi-Fi share the radio
 
 - With a speaker connected, a weak Wi-Fi link collapses. At -75 dBm on 5 GHz,
@@ -237,3 +266,33 @@ E/bt-btif: ERROR btif_get_num_aa_frame Unsupported transcoding format 0x0
 
 - Reconnecting does not clear it; a reboot does (`sbc rate = 328 kps`). Grep a
   connect for `sbc rate` to tell this from a Dot that cannot do A2DP.
+
+## A speaker left paused
+
+- A speaker can connect at 328 kbps and play nothing, earcons included, while
+  AudioFlinger writes to the A2DP output at real time: about 17 writes of
+  2,560 frames a second. `dumpsys audio` reads as working.
+- The tell is AVRCP in `dumpsys bluetooth_manager`: `mCurrentPlayState` held
+  at `state=2`, paused. It follows A2DP: paused when the link drops during
+  playback, and `state=3`, playing, when a reconnect resumes. Stuck, it stayed
+  paused from 1 such drop through every later connect. `mLastStateUpdate` is
+  the uptime, in ms, of its last change.
+- Restarting the daemon does not clear it. Killing `com.android.bluetooth` as
+  root does: it restarts itself, and the speaker reconnects in about 20
+  seconds.
+- Seen once, with a JBL Go 3. The trigger is not known: the same drop during
+  playback, repeated, did not cause it.
+- Another silent connect fails before that. `audio_a2dp_hw` logs `Audiopath
+  start failed` every 15 seconds and no `sbc rate` line follows. Seen 2 times
+  in about 9 connects; turning the speaker off and on cleared it once. 1 such
+  line right after `Remote initiated A2DP Disconnect` is ordinary.
+- A good connect logs `sbc rate = 328 kps` about 0.75 seconds after
+  `A2dpStateMachine` logs `Enter Connected`.
+- `logcat -d` run later has lost these lines. The Bluetooth process logs
+  `GKI_LINUX` every 100 ms, so logd prunes its lines first. Start a live
+  capture before reproducing:
+
+```
+adb logcat -v time -s A2dpStateMachine:V bt-btif:V audio_a2dp_hw:V \
+  BluetoothA2dpServiceJni:V bt-l2cap:V > bt.log
+```
