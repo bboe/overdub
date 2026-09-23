@@ -166,7 +166,7 @@ func (c *Chime) ahead() (Point, error) {
 		return Point{}, errors.New("audio: nothing of ours is playing, so the queue the" +
 			" output reports is somebody else's")
 	}
-	st, err := readStatus(statusPath)
+	st, err := outputStatus(socketsPath, statusPath)
 	if err != nil {
 		return Point{}, err
 	}

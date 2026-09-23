@@ -256,6 +256,59 @@ one at a time, as there is one player.
 - `smoothOver` is **50 chunks**. At 400 the average lagged, overshot each
   crossing and oscillated: 1,163 edits in 30 seconds.
 
+### Over Bluetooth
+
+- A2DP never touches the MTK PCM device. While a speaker plays, the status file
+  reads `XRUN` with `delay: 0`, so a reading from it fails and nothing is
+  placed.
+- The route comes from `/proc/net/unix`: a connected
+  `@/data/misc/bluedroid/.a2dp_data` socket (state `03`) means audio goes to a
+  speaker. The A2DP output never enters standby while a speaker is connected,
+  so the socket stays up between sounds.
+- The socket table is about 170 lines. A read costs about 1 ms, 3 times the PCM
+  status.
+- The socket is checked before the PCM. A sound mirrored to the speaker can
+  leave the PCM running while ours goes over the air.
+- The depth over Bluetooth is our queue plus `a2dpDelay`, 407 ms. Android
+  reports 258 ms for the A2DP output: its 2,560-frame buffer at 44.1 kHz plus a
+  flat 200 ms. A JBL Go 3 measured 149 ms more, against Dots on their own
+  speakers.
+- That figure belongs to one speaker model. The output delay can trim another
+  one, and it applies on every route.
+- The mixer pulls the A2DP output about every 66 ms, irregularly: 4 to 5, 7,
+  or 11 to 12 blocks at a time. One reading lands anywhere in about 100 ms of
+  that cycle. The mean of 50 readings holds within 2 ms, and the readings
+  drift 59 ppm.
+- The anchor's 5 readings share one burst, so a stream starts up to about
+  50 ms off. A Bluetooth reading is marked `Bursty`, and the stream then:
+  - averages its first 20 readings, about 2 seconds, and jumps the mapping
+    there once. The jump cuts or pads up to about 50 ms; 25 ms measured.
+  - follows a running average over 128 readings, about 13 seconds, and moves
+    the mapping only past 4 ms. The audio follows, eased, once it is 5 ms out
+    (`deadBand`). That tracks drift and walks a poor first settle in.
+- A slip past 150 ms for 3 readings in a row, wider than the bursts ever swing,
+  places the stream again at once and settles again. The average alone takes
+  over 20 seconds to follow a 1-second slip.
+- Easing is 1 frame per chunk: 0.83 ms a second with Music Assistant's
+  1,200-frame chunks. Eased instead of jumped, a 25 ms first correction took
+  28 seconds, heard as doubling in a group.
+- Measured with a microphone against chirps scheduled on one server clock, 6
+  fresh starts: the JBL settled at a median of 2.9 ms from a Dot on its
+  speaker, from -2.7 to +14.9 ms, about 2 seconds in. Over 2 minutes it moved
+  about 3 ms.
+- A settle 11 ms off held for 20 seconds with the readings agreeing with it,
+  so part of that spread is past what the Dot can see. The speaker's own
+  buffer is the likely cause.
+- Measure with both clocks converged. A fresh connection over a busy radio
+  moved one Dot's clock 17 ms in 30 seconds, which the stream then eased.
+- A change of output drops the mapping and any readings toward one, and the
+  next 5 readings anchor it again, without the 100 ms settle a new stream
+  waits. The depth moves by about 330 ms.
+- **Switching back to the speaker mid-stream is not handled.** The speaker's
+  output had been idle, and the re-anchor read 82 ms against a warm 141. The
+  mapping was then placed again 3 times in 15 seconds, and the stream stayed
+  off until the next one. A switch with the output already awake read 141.
+
 ### What a peer's audio can cost
 
 - The queue is ordered by due time. Only the head is examined, so one chunk

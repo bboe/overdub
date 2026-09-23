@@ -3,6 +3,7 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -389,9 +390,11 @@ func TestASmallSlipIsNotWorthSkippingTheAudioFor(t *testing.T) {
 	anchorAt(s, now)
 	origin := s.origin
 
-	s.observe(Point{At: now.Add(anchorSlip / 2)})
+	for range 200 {
+		s.observe(Point{At: now.Add(anchorSlip / 2)})
+	}
 	if s.slips != 0 || !s.origin.Equal(origin) {
-		t.Errorf("a %s reading moved the mapping; the instrument itself is only good to a"+
+		t.Errorf("readings %s off moved the mapping; the instrument itself is only good to a"+
 			" few milliseconds, so following it skips audio to chase its own noise",
 			anchorSlip/2)
 	}
@@ -941,5 +944,327 @@ func TestAShortChunkIsStillCorrected(t *testing.T) {
 	if s.eased == 0 {
 		t.Error("a server sending short chunks got no correction at all, so the error" +
 			" runs until it passes snapAbove and the stream jumps 50 ms")
+	}
+}
+
+func anchorBursty(s *Stream, when time.Time) {
+	s.first = time.Now().Add(-anchorSettle)
+	for range anchorTake {
+		s.observe(Point{At: when, Bursty: true})
+	}
+	if !s.anchored {
+		panic("the stream did not learn where the player had reached")
+	}
+}
+
+func TestBurstyReadingsAreFollowedByTheirAverage(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+
+	const truth = 30 * time.Millisecond
+	for i := range 20 * burstyOver {
+		scatter := time.Duration(i%17-8) * 10 * time.Millisecond
+		s.observe(Point{At: now.Add(truth + scatter), Bursty: true})
+	}
+	if s.slips != 0 {
+		t.Errorf("readings scattered %s either way were followed with %d skips; measured"+
+			" over Bluetooth, one reading lands anywhere in about 100 ms", 80*time.Millisecond,
+			s.slips)
+	}
+	const within = 10 * time.Millisecond
+	if off := s.origin.Sub(now) - truth; off > within || off < -within {
+		t.Errorf("the mapping settled %s from where the readings average, want within %s",
+			off, within)
+	}
+}
+
+func TestTheFirstBurstySettleJumpsToTheMeanOfItsReadings(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+	origin := s.origin
+
+	const mean = 20 * time.Millisecond
+	const settleAfter = 20
+	reading := func(i int) Point {
+		return Point{At: now.Add(mean + time.Duration(i%5-2)*10*time.Millisecond), Bursty: true}
+	}
+	for i := range settleAfter - 1 {
+		s.observe(reading(i))
+	}
+	if !s.origin.Equal(origin) || s.jump {
+		t.Fatalf("the mapping moved before %d readings were in; one burst's reading is off by"+
+			" up to 100 ms over Bluetooth", settleAfter)
+	}
+	s.observe(reading(settleAfter - 1))
+	if got := s.origin.Sub(origin); got != mean {
+		t.Errorf("the first settle moved the mapping %s, want the %s its readings average", got,
+			mean)
+	}
+	if !s.jump {
+		t.Error("the first settle was left to easing, which moves about 1 ms a second, so a" +
+			" stream starts out of step with its group for up to a minute")
+	}
+	if s.slips != 0 {
+		t.Errorf("the first settle was counted as %d re-placements", s.slips)
+	}
+}
+
+func TestASteadyBurstyOffsetAfterTheSettleIsFollowedWithoutPlacingAgain(t *testing.T) {
+	for _, offset := range []time.Duration{2 * anchorSlip, -2 * anchorSlip} {
+		s := quiet()
+		now := time.Now()
+		anchorBursty(s, now)
+		for range burstyFirst {
+			s.observe(Point{At: now, Bursty: true})
+		}
+		s.jump = false
+
+		peak := time.Duration(0)
+		for range 20 * burstyOver {
+			s.observe(Point{At: now.Add(offset), Bursty: true})
+			moved := s.origin.Sub(now)
+			if offset < 0 {
+				moved = -moved
+			}
+			peak = max(peak, moved)
+		}
+		if peak > offset.Abs()+10*time.Millisecond {
+			t.Errorf("following a steady %s offset overshot by %s; each move has to start the"+
+				" average again, or the next reading moves it by the same amount twice", offset,
+				peak-offset.Abs())
+		}
+		if s.slips != 0 || s.jump {
+			t.Errorf("a %s offset reached after the settle placed the stream again (%d slips,"+
+				" jump %v); the average follows an offset that small", offset, s.slips, s.jump)
+		}
+		const within = 10 * time.Millisecond
+		if off := s.origin.Sub(now) - offset; off > within || off < -within {
+			t.Errorf("the mapping stopped %s short of a steady %s offset", off, offset)
+		}
+	}
+}
+
+func TestAJumpLongerThanAChunkCutsAllOfIt(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+	const chunk = 1200
+	for k := range 12 {
+		at := now.Add(frameTime(int64(k * chunk)))
+		if err := s.Write(at, level(chunk, int16(100*(k+1)))); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	block := make([]int16, BlockFrames)
+	s.read(block)
+
+	const cut = 40 * time.Millisecond
+	for range burstyFirst {
+		s.observe(Point{At: now.Add(frameTime(BlockFrames) + cut), Bursty: true})
+	}
+	var out []int16
+	for range 25 {
+		s.read(block)
+		out = append(out, block...)
+	}
+	got := BlockFrames + slices.Index(out, 1000)
+	if want := 9*chunk - 1920; got != want {
+		t.Errorf("after a %s jump the 10th chunk started at frame %d, want %d; the jump was"+
+			" spent on a chunk it dropped whole, and the rest was left to easing", cut, got,
+			want)
+	}
+}
+
+func TestAJumpPlacesTheNextChunkWhereItsTimestampSays(t *testing.T) {
+	for _, jump := range []bool{true, false} {
+		s := quiet()
+		now := time.Now()
+		anchorAt(s, now)
+		if err := s.Write(now, level(BlockFrames, 1000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		block := make([]int16, BlockFrames)
+		s.read(block)
+
+		s.jump = jump
+		if err := s.Write(now.Add(frameTime(BlockFrames+960)), level(BlockFrames, 2000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		var out []int16
+		for range 4 {
+			s.read(block)
+			out = append(out, block...)
+		}
+		first := slices.IndexFunc(out, func(v int16) bool { return v != 0 })
+		if jump && (first != 960 || s.jump) {
+			t.Errorf("after a jump the chunk started %d frames on, want the 960 its timestamp"+
+				" names, with the jump spent (still set: %v)", first, s.jump)
+		}
+		if !jump && first == 960 {
+			t.Error("without a jump a 20 ms gap was cut in whole rather than eased")
+		}
+	}
+}
+
+func TestAChangeOfOutputPlacesTheStreamAfresh(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+
+	later := now.Add(200 * time.Millisecond)
+	s.observe(Point{At: later, Bursty: true})
+	if s.anchored {
+		t.Fatal("the output changed under the stream and the old mapping was kept; the" +
+			" depth moves by about 200 ms, which the average would creep towards for" +
+			" seconds")
+	}
+	for range anchorTake - 1 {
+		s.observe(Point{At: later, Bursty: true})
+	}
+	if !s.anchored || !s.origin.Equal(later) {
+		t.Errorf("after the change the stream was placed at %s, want %s", s.origin.Sub(now),
+			later.Sub(now))
+	}
+}
+
+func TestScatteredBurstyReadingsAroundTheMappingLeaveItAlone(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+	for range burstyFirst {
+		s.observe(Point{At: now, Bursty: true})
+	}
+	moves, last := 0, s.origin
+	for i := range 20 * burstyOver {
+		scatter := time.Duration(i%17-8) * 10 * time.Millisecond
+		s.observe(Point{At: now.Add(scatter), Bursty: true})
+		if !s.origin.Equal(last) {
+			moves, last = moves+1, s.origin
+		}
+	}
+	if moves > 5 {
+		t.Errorf("readings scattered 80 ms either way of the mapping moved it %d times; every"+
+			" move is a correction the listener pays for, chasing one burst's phase", moves)
+	}
+}
+
+func TestAReallyLargeBurstySlipIsPlacedAgainAtOnce(t *testing.T) {
+	for _, slip := range []time.Duration{time.Second, -time.Second} {
+		s := quiet()
+		now := time.Now()
+		anchorBursty(s, now)
+		for range burstyFirst {
+			s.observe(Point{At: now.Add(10 * time.Millisecond), Bursty: true})
+		}
+		s.jump = false
+
+		settled := s.origin
+		far := settled.Add(slip)
+		for _, at := range []time.Time{far, far, settled, far, far} {
+			s.observe(Point{At: at, Bursty: true})
+		}
+		if s.slips != 0 {
+			t.Fatalf("%s slips broken by a reading in step moved the mapping; 3 in a row are"+
+				" the rule, as on the speaker", slip)
+		}
+		s.observe(Point{At: far, Bursty: true})
+		if s.slips != 1 || !s.origin.Equal(far) || !s.jump {
+			t.Errorf("a %s slip held for 3 readings left the mapping %s out with %d slips"+
+				" (jump %v); following it by the average takes over 20 seconds", slip,
+				far.Sub(s.origin), s.slips, s.jump)
+		}
+		const off = 20 * time.Millisecond
+		for range burstyFirst - 1 {
+			s.observe(Point{At: far.Add(off), Bursty: true})
+		}
+		s.jump = false
+		s.observe(Point{At: far.Add(off), Bursty: true})
+		if !s.jump || s.origin.Sub(far) != off {
+			t.Errorf("after it was placed again the stream settled %s on (jump %v), want the"+
+				" %s its new readings average", s.origin.Sub(far), s.jump, off)
+		}
+	}
+}
+
+func TestAChangeBackToTheSpeakerPlacesTheStreamAfresh(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+
+	later := now.Add(-300 * time.Millisecond)
+	s.observe(Point{At: later})
+	if s.anchored {
+		t.Fatal("the stream kept its Bluetooth mapping after the output went back to the" +
+			" speaker")
+	}
+	for range anchorTake - 1 {
+		s.observe(Point{At: later})
+	}
+	if !s.anchored || !s.origin.Equal(later) || s.bursty {
+		t.Errorf("back on the speaker the stream was placed at %s (bursty %v), want %s",
+			s.origin.Sub(now), s.bursty, later.Sub(now))
+	}
+}
+
+func TestTheSettleRunsAgainWhenBluetoothComesBack(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorBursty(s, now)
+	for range burstyFirst {
+		s.observe(Point{At: now.Add(10 * time.Millisecond), Bursty: true})
+	}
+	for range anchorTake {
+		s.observe(Point{At: now})
+	}
+	for range anchorTake {
+		s.observe(Point{At: now, Bursty: true})
+	}
+	s.jump = false
+	const off = 25 * time.Millisecond
+	for range burstyFirst {
+		s.observe(Point{At: now.Add(off), Bursty: true})
+	}
+	if !s.jump || s.origin.Sub(now) != off {
+		t.Errorf("the second Bluetooth anchor was not settled: jump %v, mapping at %s, want %s",
+			s.jump, s.origin.Sub(now), off)
+	}
+}
+
+func TestAChangeOfOutputWhileAnchoringStartsTheReadingsOver(t *testing.T) {
+	s := quiet()
+	s.first = time.Now().Add(-anchorSettle)
+	now := time.Now()
+	for range 3 {
+		s.observe(Point{At: now.Add(330 * time.Millisecond), Bursty: true})
+	}
+	for range anchorTake {
+		s.observe(Point{At: now})
+	}
+	if !s.anchored || !s.origin.Equal(now) || s.slips != 0 {
+		t.Errorf("readings from 2 outputs anchored the stream at %s with %d re-placements,"+
+			" want the speaker's own %s with none", s.origin.Sub(now), s.slips,
+			time.Duration(0))
+	}
+}
+
+func TestARunOfSlipsDoesNotCarryAcrossAnOutputChange(t *testing.T) {
+	s := quiet()
+	now := time.Now()
+	anchorAt(s, now)
+	for range slipRuns - 1 {
+		s.observe(Point{At: now.Add(2 * anchorSlip)})
+	}
+	for range anchorTake {
+		s.observe(Point{At: now, Bursty: true})
+	}
+	for range anchorTake {
+		s.observe(Point{At: now})
+	}
+	s.observe(Point{At: now.Add(2 * anchorSlip)})
+	if s.slips != 0 {
+		t.Error("one reading after 2 output changes re-placed the stream, because the run" +
+			" of slips from before them was still counted")
 	}
 }

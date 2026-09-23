@@ -207,6 +207,22 @@ A warm restart hides all of this.
 - `service call audio 3` sets it: 3 is `adjustMasterVolume`, next to
   `adjustStreamVolume` at 2. docs/api.md has the mapping.
 
+## Bluetooth and Wi-Fi share the radio
+
+- With a speaker connected, a weak Wi-Fi link collapses. At -75 dBm on 5 GHz,
+  a 54 Mbps link, TCP connects to the Dot took 126 ms at the median and 858 ms
+  at the 90th percentile, against 6 ms with the speaker off.
+- Sendspin chunks then arrived up to 7.9 seconds late, and whole 30-second
+  windows placed nothing, while a Dot in the same group got every chunk on
+  time.
+- Nothing names Wi-Fi. The log reads chunks due between -3.0 and -0.4 seconds
+  ahead, and the socket's receive queue sits at 0: the daemon reads what
+  arrives.
+- FireOS 5 does not roam. A Dot carried to another room stayed on its old
+  access point at -87 dBm with one at -55 dBm in the room. `svc wifi disable`
+  then `svc wifi enable` joined the near one in 14 seconds, and connects with
+  the speaker on then took 34 ms at the median.
+
 ## A2DP with a zero SBC configuration
 
 - A speaker can pair, read `Device Connected`, follow the volume keys, show

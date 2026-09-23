@@ -22,6 +22,11 @@ const (
 	anchorSlip = 50 * time.Millisecond
 	slipRuns   = 3
 
+	burstyFirst = 20
+	burstyOver  = 128
+	burstyBand  = 4 * time.Millisecond
+	burstySlip  = 150 * time.Millisecond
+
 	deadBand   = ChimeRate / 200
 	softStep   = 21 * ChimeRate / 1000000
 	easeApart  = 200
@@ -100,6 +105,11 @@ type Stream struct {
 	originIndex int64
 	ref         int64
 	candidates  []time.Time
+	bursty      bool
+	slipMean    time.Duration
+	firstSum    time.Duration
+	firstTaken  int
+	jump        bool
 
 	asked     int64
 	unread    int
@@ -282,8 +292,9 @@ func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
 			if step != 0 {
 				s.easedAt = s.index
 			}
-			if !s.began || err > snapAbove || err < -snapAbove {
+			if !s.began || s.jump || err > snapAbove || err < -snapAbove {
 				step, s.smooth = err, 0
+				s.jump = s.jump && err <= -int64(len(c.pcm))
 			}
 			c.eased = true
 			c.soft = step != err
@@ -393,6 +404,11 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 	s.unread = 0
 
 	due := p.At.Add(frameTime(p.Ahead))
+	if p.Bursty != s.bursty {
+		s.anchored, s.candidates, s.outside = false, nil, 0
+		s.unease()
+	}
+	s.bursty = p.Bursty
 	if !s.anchored {
 		if len(s.candidates) == 0 {
 			s.ref = s.index
@@ -403,10 +419,14 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 		}
 		slices.SortFunc(s.candidates, time.Time.Compare)
 		s.origin, s.originIndex = s.candidates[len(s.candidates)/2], s.ref
-		s.candidates, s.anchored = nil, true
+		s.candidates, s.anchored, s.slipMean = nil, true, 0
+		s.firstSum, s.firstTaken = 0, 0
 		return due.Sub(p.At), 0, false
 	}
 	slip = due.Sub(s.origin.Add(frameTime(s.index - s.originIndex)))
+	if p.Bursty {
+		return s.follow(slip)
+	}
 	if slip <= anchorSlip && slip >= -anchorSlip {
 		s.outside = 0
 		return 0, 0, false
@@ -415,11 +435,47 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 		return 0, 0, false
 	}
 	s.origin, s.originIndex = due, s.index
+	s.unease()
+	s.outside, s.slips = 0, s.slips+1
+	return 0, slip, true
+}
+
+func (s *Stream) follow(slip time.Duration) (depth, moved time.Duration, again bool) {
+	if slip > burstySlip || slip < -burstySlip {
+		if s.outside++; s.outside < slipRuns {
+			return 0, 0, false
+		}
+		s.origin = s.origin.Add(slip)
+		s.firstSum, s.firstTaken, s.slipMean, s.outside = 0, 0, 0, 0
+		s.jump, s.slips = true, s.slips+1
+		s.unease()
+		return 0, slip, true
+	}
+	s.outside = 0
+	if s.firstTaken < burstyFirst {
+		s.firstSum += slip
+		if s.firstTaken++; s.firstTaken < burstyFirst {
+			return 0, 0, false
+		}
+		moved = s.firstSum / burstyFirst
+		s.origin, s.jump = s.origin.Add(moved), true
+		s.unease()
+		return 0, 0, false
+	}
+	s.slipMean += (slip - s.slipMean) / burstyOver
+	if s.slipMean <= burstyBand && s.slipMean >= -burstyBand {
+		return 0, 0, false
+	}
+	moved, s.slipMean = s.slipMean, 0
+	s.origin = s.origin.Add(moved)
+	s.unease()
+	return 0, 0, false
+}
+
+func (s *Stream) unease() {
 	for i := range s.queue {
 		if s.queue[i].off == 0 {
 			s.queue[i].eased = false
 		}
 	}
-	s.outside, s.slips = 0, s.slips+1
-	return 0, slip, true
 }

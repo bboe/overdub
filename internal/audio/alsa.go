@@ -12,9 +12,17 @@ import (
 
 const statusPath = "/proc/asound/card0/pcm23p/sub0/status"
 
+const (
+	socketsPath    = "/proc/net/unix"
+	a2dpDataSocket = "@/data/misc/bluedroid/.a2dp_data"
+	socketLinked   = "03"
+	a2dpDelay      = 407 * ChimeRate / 1000
+)
+
 type pcmStatus struct {
-	State string
-	Delay int64
+	State  string
+	Delay  int64
+	bursty bool
 }
 
 func (s pcmStatus) running() bool { return s.State == "RUNNING" }
@@ -63,11 +71,35 @@ func readStatus(path string) (pcmStatus, error) {
 	return parseStatus(bufio.NewScanner(f))
 }
 
+func overBluetooth(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	r := bufio.NewScanner(f)
+	for r.Scan() {
+		fields := strings.Fields(r.Text())
+		if len(fields) == 8 && fields[7] == a2dpDataSocket && fields[5] == socketLinked {
+			return true
+		}
+	}
+	return false
+}
+
+func outputStatus(sockets, status string) (pcmStatus, error) {
+	if overBluetooth(sockets) {
+		return pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}, nil
+	}
+	return readStatus(status)
+}
+
 const aheadCeiling = ChimeRate
 
 type Point struct {
-	Ahead int64
-	At    time.Time
+	Ahead  int64
+	At     time.Time
+	Bursty bool
 }
 
 func point(pending int64, st pcmStatus, at time.Time) (Point, error) {
@@ -84,7 +116,7 @@ func point(pending int64, st pcmStatus, at time.Time) (Point, error) {
 			" been written to it, and a delay below zero is not a measurement", st.Delay)
 	}
 	if ahead := pending + st.Delay; ahead >= 0 && ahead <= aheadCeiling {
-		return Point{Ahead: ahead, At: at}, nil
+		return Point{Ahead: ahead, At: at, Bursty: st.bursty}, nil
 	}
 	return Point{}, fmt.Errorf("audio: the player and the output claim to hold %d frames"+
 		" between them, and a pipeline outside 0 to %d is not a measurement",

@@ -8,7 +8,8 @@ keeps running.
   component, no MQTT, no Home Assistant credential on the Dot.
 - The Dot reports presses and holds of its buttons, reports what it can read
   about itself, and chimes on every press it takes.
-- It also joins Music Assistant as a Sendspin player.
+- It also joins Music Assistant as a Sendspin player, through its own speaker
+  or a paired Bluetooth speaker.
 
 ## Scope
 
@@ -23,6 +24,11 @@ keeps running.
   fallback key is a published constant, so anything that reaches the Dot on
   `wlan0` can take the session. The session gives playback only; see
   [SECURITY.md](SECURITY.md) for what it holds.
+- **Sendspin over Bluetooth needs a strong Wi-Fi link.** The Dot's Wi-Fi and
+  Bluetooth share one radio, and a weak link starves the stream (see
+  [docs/pitfalls.md](docs/pitfalls.md)). A stream settles in sync about 2
+  seconds after it starts. Turning the speaker off mid-stream leaves the Dot
+  out of step until playback is stopped and started again.
 - Taking the action button takes it from Alexa. While the daemon holds it, the
   button does not stop timers or alarms, talk, or enter setup mode. The
   `Action button mode` select gives it back without stopping anything else.

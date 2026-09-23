@@ -3,6 +3,8 @@ package audio
 import (
 	"bufio"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,5 +164,95 @@ func TestADelaySoLargeThatTheSumWrapsIsRefused(t *testing.T) {
 		t.Error("a delay of the largest int64 was believed: the sum wraps negative, which" +
 			" is under the ceiling rather than over it, and the stream is then placed" +
 			" against a pipeline it reads as being behind the speaker")
+	}
+}
+
+const socketsA2DP = `Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 675213 @/data/misc/bluedroid/.a2dp_data
+0000000000000000: 00000002 00000000 00010000 0001 01 627612 @/data/misc/bluedroid/.a2dp_ctrl
+0000000000000000: 00000003 00000000 00000000 0001 03 688233 @/data/misc/bluedroid/.a2dp_ctrl
+0000000000000000: 00000003 00000000 00000000 0001 03 675215 @/data/misc/bluedroid/.a2dp_data
+0000000000000000: 00000003 00000000 00000000 0001 03 12345
+`
+
+const socketsIdle = `Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 627612 @/data/misc/bluedroid/.a2dp_ctrl
+0000000000000000: 00000003 00000000 00000000 0001 03 12345
+`
+
+func writeFile(t *testing.T, name, text string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestOnlyAConnectedA2DPDataSocketMeansBluetooth(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		table string
+		want  bool
+	}{
+		{"a speaker taking audio", socketsA2DP, true},
+		{"nothing connected", socketsIdle, false},
+		{"the data socket only listening",
+			"x: 00000002 00000000 00010000 0001 01 675213 @/data/misc/bluedroid/.a2dp_data\n",
+			false},
+		{"only the control socket connected",
+			"x: 00000003 00000000 00000000 0001 03 688233 @/data/misc/bluedroid/.a2dp_ctrl\n",
+			false},
+		{"a path that only ends the same way",
+			"x: 00000003 00000000 00000000 0001 03 1 @/data/misc/bluedroid/.a2dp_data2\n",
+			false},
+		{"a path with more after a space",
+			"x: 00000003 00000000 00000000 0001 03 1 @/data/misc/bluedroid/.a2dp_data x\n",
+			false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := overBluetooth(writeFile(t, "unix", tt.table)); got != tt.want {
+				t.Errorf("overBluetooth = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if overBluetooth(filepath.Join(t.TempDir(), "gone")) {
+		t.Error("a socket table that could not be read was taken for a speaker")
+	}
+}
+
+func TestBluetoothTakesTheA2DPDelayWhateverThePCMSays(t *testing.T) {
+	sockets := writeFile(t, "unix", socketsA2DP)
+	for _, pcm := range []string{
+		writeFile(t, "idle", idleStatus),
+		writeFile(t, "busy", strings.Replace(idleStatus, "XRUN", "RUNNING", 1)),
+		filepath.Join(t.TempDir(), "gone"),
+	} {
+		want := pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}
+		st, err := outputStatus(sockets, pcm)
+		if err != nil || st != want {
+			t.Errorf("over Bluetooth the output read %+v, %v; want %+v", st, err, want)
+		}
+	}
+}
+
+func TestAReadingSaysWhetherItsOutputTakesAudioInBursts(t *testing.T) {
+	pt, err := point(3840, pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}, time.Now())
+	if err != nil || !pt.Bursty {
+		t.Errorf("a Bluetooth reading came back as %+v, %v; want it marked bursty", pt, err)
+	}
+	if pt, _ := point(3840, running(3056), time.Now()); pt.Bursty {
+		t.Error("a reading of the speaker's PCM was marked bursty")
+	}
+}
+
+func TestWithoutBluetoothThePCMStatusDecides(t *testing.T) {
+	sockets := writeFile(t, "unix", socketsIdle)
+	st, err := outputStatus(sockets, writeFile(t, "idle", idleStatus))
+	if err != nil || st.running() {
+		t.Errorf("the speaker's idle PCM read %+v, %v; want it not running", st, err)
+	}
+	if _, err := outputStatus(sockets, filepath.Join(t.TempDir(), "gone")); err == nil {
+		t.Error("a missing status file was not reported with no speaker connected")
 	}
 }

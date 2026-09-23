@@ -2,7 +2,7 @@
 
 Sendspin is the multi-room audio protocol Music Assistant uses as its native
 playback provider. `internal/sendspin` implements the **client** side, so the
-Dot's speaker joins a synchronised group.
+Dot joins a synchronised group.
 
 - Spec: github.com/Sendspin/spec, pinned at commit `8fc2f8f` (2026-09-12). Read
   the spec for what the protocol says. This page carries what was measured and
@@ -746,9 +746,13 @@ Each is refused, and each has a test that fails without it.
   `AudioContext.outputLatency`. The browser was also sent FLAC stereo, the Dots
   PCM mono.
 - To resolve it: nudge `CONF_SENDSPIN_STATIC_DELAY` until aligned, which sizes
-  the gap but not its owner. An absolute answer needs 1 microphone on both
-  speakers, the offset from the autocorrelation's secondary peak; 1 metre of
-  path difference is 2.9 ms.
+  the gap but not its owner. 1 metre of path difference is 2.9 ms.
+- Measured with a microphone: each speaker in its own group, the same chirp
+  scheduled 0.3 seconds apart on one server clock, a matched filter on the
+  recording. 2 Dots on their speakers played 4.5 ms apart, within 0.5 ms over
+  20 seconds.
+- A Dot playing through a JBL Go 3 settled a median 2.9 ms from a Dot on its
+  speaker, and within 15 ms; docs/audio.md has the Bluetooth path.
 - Two Dots test that the offset is the same on every unit. A Dot against
   another player tests that it is right.
 - By ear: within about 5 ms sounds like one speaker, 5 to 20 ms combs, past
