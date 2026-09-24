@@ -44,17 +44,11 @@ func (f *fakeMic) state() (bool, int) {
 
 func waitMicIdle(t *testing.T, s *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "the microphone worker to go idle", func() bool {
 		s.mu.Lock()
-		busy := s.micWorking || s.micHasPending
-		s.mu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the microphone worker never went idle")
+		defer s.mu.Unlock()
+		return !s.micWorking && !s.micHasPending
+	})
 }
 
 func setMic(s *Server, want bool) {

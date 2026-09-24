@@ -63,17 +63,11 @@ func (f *fakeVolume) state() (speaker, jack, sets int) {
 
 func waitVolumeIdle(t *testing.T, s *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "the volume worker to go idle", func() bool {
 		s.mu.Lock()
-		busy := s.volWorking || s.volHasPending
-		s.mu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the volume worker never went idle")
+		defer s.mu.Unlock()
+		return !s.volWorking && !s.volHasPending
+	})
 }
 
 func askVolume(s *Server, want volumeWant) {
@@ -680,6 +674,15 @@ func wireFakePlay(s *Server, err error) (*[]string, func()) {
 	}
 }
 
+func waitPlayIdle(t *testing.T, s *Server) {
+	t.Helper()
+	waitFor(t, "the play worker to go idle", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return !s.playWorking && !s.playHasPending
+	})
+}
+
 func TestAPlayCommandHandsTheURLOnUntouched(t *testing.T) {
 	var out lockedBuffer
 	defer restoreLog(t, &out)()
@@ -711,7 +714,7 @@ func TestAPlayCommandForAnotherKeyIsNotOurs(t *testing.T) {
 	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySound, "http://x.invalid/a.mp3", false)); err != nil {
 		t.Fatalf("a play command for another key was an error: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitPlayIdle(t, s)
 	if len(*asked) != 0 {
 		t.Errorf("a command naming the speaker sensor played %v", *asked)
 	}
@@ -728,7 +731,7 @@ func TestAnEmptyURLIsNotAPlay(t *testing.T) {
 	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySpeaker, "", false)); err != nil {
 		t.Fatalf("an empty url was an error: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitPlayIdle(t, s)
 	if len(*asked) != 0 {
 		t.Errorf("an empty url was played as %v", *asked)
 	}
@@ -774,12 +777,8 @@ func TestAPlayThatCouldNotStartLeavesNothingPlaying(t *testing.T) {
 		t.Fatalf("a play command was an error: %v", err)
 	}
 	wait()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline) && s.playing(); {
-		time.Sleep(time.Millisecond)
-	}
-	if s.playing() {
-		t.Error("a play that failed to start left the player reporting playing for ever")
-	}
+	waitFor(t, "a play that failed to start to stop the player reporting playing",
+		func() bool { return !s.playing() })
 }
 
 func TestPlaybackWakesThePollThatPublishesIt(t *testing.T) {
@@ -881,16 +880,7 @@ func TestPlaysDoNotPileUp(t *testing.T) {
 	s.mu.Unlock()
 
 	close(release)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		busy := s.playWorking || s.playHasPending
-		s.mu.Unlock()
-		if !busy {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitPlayIdle(t, s)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -915,12 +905,7 @@ func TestAPlayErrorIsCutBeforeItIsLogged(t *testing.T) {
 		t.Fatalf("a play command was an error: %v", err)
 	}
 	wait()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		if n := len(out.String()); n > 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForLog(t, &out, "playback: ")
 	if n := len(out.String()); n > 512 {
 		t.Errorf("one failed play wrote %d bytes to the log", n)
 	}
@@ -966,16 +951,7 @@ func TestThePlayerCanBeWiredWhilePlaysArrive(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		s.mu.Lock()
-		busy := s.playWorking || s.playHasPending
-		s.mu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the play worker never went idle")
+	waitPlayIdle(t, s)
 }
 
 func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
@@ -993,15 +969,12 @@ func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
 	if err := c.send(msgSubscribeStates, nil); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		n := len(s.conns)
-		s.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	s.mu.Lock()
+	joined := len(s.conns)
+	s.mu.Unlock()
+	if joined != 1 {
+		t.Fatalf("%d connections are in the table, want 1, so this test would prove nothing",
+			joined)
 	}
 
 	s.UsePlay(func(string) error { return nil })
@@ -1121,17 +1094,11 @@ func wireFakeMute(s *Server, f *fakeVolume) *int {
 
 func waitMuteIdle(t *testing.T, s *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "the mute worker to go idle", func() bool {
 		s.mu.Lock()
-		busy := s.muteWorking || s.muteHasPending
-		s.mu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the mute worker never went idle")
+		defer s.mu.Unlock()
+		return !s.muteWorking && !s.muteHasPending
+	})
 }
 
 func TestTheMuteIsOfferedOnlyWhenThereIsAMuteToSet(t *testing.T) {

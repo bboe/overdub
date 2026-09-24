@@ -2,6 +2,7 @@ package esphome
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -71,27 +72,30 @@ func (f *fakeADB) askedFor() []device.ADBMode {
 
 func (f *fakeADB) waitAsked(t *testing.T, n int) []device.ADBMode {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := f.askedFor(); len(got) >= n {
-			return got
+	var got []device.ADBMode
+	waitFor(t, fmt.Sprintf("%d calls to the device", n), func() bool {
+		got = f.askedFor()
+		return len(got) >= n
+	})
+	return got
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("the device was asked for %v, want %d calls", f.askedFor(), n)
-	return nil
 }
 
 func waitForLog(t *testing.T, out *lockedBuffer, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), want) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Errorf("nothing in the log says %q: %q", want, out.String())
+	waitFor(t, fmt.Sprintf("the log to say %q", want), func() bool {
+		return strings.Contains(out.String(), want)
+	})
 }
 
 func TestEachOfferedADBModeReachesTheDevice(t *testing.T) {
@@ -123,7 +127,7 @@ func TestAnADBModeThatWasNeverOfferedIsRefused(t *testing.T) {
 		s.setADBLocked(&conn{sock: fakeAddr{}}, choice)
 		s.mu.Unlock()
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitADBIdle(t, s)
 	if got := f.askedFor(); len(got) != 0 {
 		t.Errorf("a mode nobody offered reached the device: %v", got)
 	}
@@ -139,7 +143,7 @@ func TestSecureIsRefusedWithoutAKeyToAuthenticateAgainst(t *testing.T) {
 	s.mu.Lock()
 	s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBSecure.String())
 	s.mu.Unlock()
-	time.Sleep(20 * time.Millisecond)
+	waitADBIdle(t, s)
 	if got := f.askedFor(); len(got) != 0 {
 		t.Errorf("Secure reached the device with no key installed: %v", got)
 	}
@@ -251,7 +255,7 @@ func TestARepeatedADBCommandDoesNotRestartAdbd(t *testing.T) {
 		s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
 		s.mu.Unlock()
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitADBIdle(t, s)
 	if got := f.askedFor(); len(got) != 1 {
 		t.Errorf("the device was asked %d times for a position it was already in: %v", len(got), got)
 	}
@@ -272,19 +276,11 @@ func TestAnADBCommandRepeatingTheOneInFlightIsDropped(t *testing.T) {
 	s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
 	s.mu.Unlock()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	waitFor(t, "the worker to reach the apply", func() bool {
 		s.mu.Lock()
-		inFlight := s.adbWorking && !s.adbHasPending
-		s.mu.Unlock()
-		if inFlight {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the worker never reached the apply")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer s.mu.Unlock()
+		return s.adbWorking && !s.adbHasPending
+	})
 
 	s.mu.Lock()
 	s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
@@ -300,7 +296,7 @@ func TestAnADBCommandRepeatingTheOneInFlightIsDropped(t *testing.T) {
 	f.mu.Unlock()
 
 	f.waitAsked(t, 1)
-	time.Sleep(50 * time.Millisecond)
+	waitADBIdle(t, s)
 	if got := f.askedFor(); len(got) != 1 {
 		t.Errorf("adbd was restarted %d times for one position: %v", len(got), got)
 	}
@@ -308,17 +304,7 @@ func TestAnADBCommandRepeatingTheOneInFlightIsDropped(t *testing.T) {
 
 func waitADBIdle(t *testing.T, s *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		busy := s.adbWorking || s.adbHasPending
-		s.mu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the adb worker never went idle")
+	waitFor(t, "the adb worker to go idle", func() bool { return !s.adbBusy() })
 }
 
 func TestClosingTheportDeletesTheRuleAgainAfterTheSettle(t *testing.T) {
@@ -334,17 +320,11 @@ func TestClosingTheportDeletesTheRuleAgainAfterTheSettle(t *testing.T) {
 	s.mu.Unlock()
 	f.waitAsked(t, 1)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "the rule to be deleted again after the port was closed", func() bool {
 		f.mu.Lock()
-		n := f.denies
-		f.mu.Unlock()
-		if n > 0 {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Error("the rule was never deleted again after the port was closed")
+		defer f.mu.Unlock()
+		return f.denies > 0
+	})
 }
 
 func TestAPositionThatFailedCanBeAskedForAgain(t *testing.T) {
@@ -465,7 +445,7 @@ func TestARepeatBeforeTheStateIsPublishedDoesNotRestartAdbd(t *testing.T) {
 		s.setADBLocked(&conn{sock: fakeAddr{}}, device.ADBInsecure.String())
 		s.mu.Unlock()
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitADBIdle(t, s)
 	if got := f.askedFor(); len(got) != 1 {
 		t.Errorf("the device was asked %d times for the position it had just reached: %v", len(got), got)
 	}

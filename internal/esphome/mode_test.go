@@ -141,6 +141,17 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 	s.wakeGap = 10 * time.Millisecond
 	stubSensors(s)
 	button := wireFakeButton(s)
+	modeReads := make(chan struct{}, 8)
+	b := s.button("action_button")
+	mode := b.mode
+	s.UseButton("action_button", func() string {
+		m := mode()
+		select {
+		case modeReads <- struct{}{}:
+		default:
+		}
+		return m
+	}, b.setMode)
 
 	c, err := dial(t, s, psk)
 	if err != nil {
@@ -171,7 +182,14 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 		}
 		break
 	}
-	time.Sleep(20 * s.wakeGap)
+	for range 2 {
+		select {
+		case <-modeReads:
+		case <-time.After(testTimeout):
+			t.Fatal("the sensor poll never read the mode in the pass the subscribe woke, so " +
+				"the mode change could ride on that pass rather than on a wake of its own")
+		}
+	}
 
 	if err := c.send(msgSelectCommand, selectCommand(s.button("action_button").keyMode, "pass through")); err != nil {
 		t.Fatal(err)
@@ -201,15 +219,7 @@ func TestChoosingPassThroughHandsTheButtonBackAndReportsIt(t *testing.T) {
 		}
 		break
 	}
-	for deadline := time.Now().Add(3 * time.Second); ; {
-		if strings.Contains(out.String(), "set action_button to pass through") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the mode change was never logged; the log says %q", out.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForLog(t, &out, "set action_button to pass through")
 }
 
 func TestASelectCommandForAnotherEntityIsIgnored(t *testing.T) {
@@ -322,42 +332,43 @@ func TestTogglingCannotOutrunTheWakeGap(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	stubSensors(s)
 	wireFakeButton(s)
-	s.wakeGap = time.Hour
+	s.wakeGap = 100 * time.Millisecond
 
-	var mu sync.Mutex
-	reads := 0
+	held := make(chan struct{})
+	read := make(chan time.Time, 8)
 	s.uptime = func() (float32, bool) {
-		mu.Lock()
-		defer mu.Unlock()
-		reads++
+		<-held
+		select {
+		case read <- time.Now():
+		default:
+		}
 		return 1234, true
 	}
-	count := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return reads
+	next := func(what string) time.Time {
+		t.Helper()
+		select {
+		case at := <-read:
+			return at
+		case <-time.After(testTimeout):
+			t.Fatalf("the sensor poll never took %s", what)
+		}
+		return time.Time{}
 	}
 
 	go s.PollSensors(time.Hour)
-	for deadline := time.Now().Add(3 * time.Second); count() == 0; {
-		if time.Now().After(deadline) {
-			t.Fatal("the sensor poll never took its first reading, so this proves nothing")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	before := count()
-
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}}
 	for i := 0; i < 20; i++ {
 		if err := s.handle(c, msgSelectCommand, selectCommand(s.button("action_button").keyMode, buttonModes[i%len(buttonModes)])); err != nil {
 			t.Fatalf("command %d: %v", i, err)
 		}
 	}
-	time.Sleep(200 * time.Millisecond)
+	close(held)
 
-	if got := count(); got != before {
-		t.Errorf("twenty commands drew %d readings of the device, want 0: a peer holding "+
-			"the key sets the poll's rate", got-before)
+	first := next("its first reading, so this proves nothing")
+	second := next("the reading the twenty commands woke it for")
+	if gap := second.Sub(first); gap < s.wakeGap {
+		t.Errorf("twenty commands drew a reading %v after the last, inside the %v wake gap: "+
+			"a peer holding the key sets the poll's rate", gap, s.wakeGap)
 	}
 	if want := buttonModes[19%len(buttonModes)]; s.button("action_button").mode() != want {
 		t.Errorf("the last command asked for %q and the button is in %q", want, s.button("action_button").mode())

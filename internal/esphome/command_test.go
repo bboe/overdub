@@ -125,24 +125,14 @@ func TestACommandIsPublishedSoALaterSubscriberSeesIt(t *testing.T) {
 	}
 	<-sent
 
-	deadline := time.Now().Add(commandWait)
-	for {
-		s.mu.Lock()
-		r, told := s.published[s.keyText]
-		s.mu.Unlock()
-		if told {
-			if r.text != "set a timer for ten minutes" {
-				t.Errorf("the entity holds %q", r.text)
-			}
-			if r.kind != kindText {
-				t.Errorf("the command went out as kind %d, want kindText (%d)", r.kind, kindText)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the command was never published, so a subscriber arriving after it sees nothing")
-		}
-		time.Sleep(time.Millisecond)
+	s.mu.Lock()
+	r := s.published[s.keyText]
+	s.mu.Unlock()
+	if r.text != "set a timer for ten minutes" {
+		t.Errorf("the entity holds %q, so a subscriber arriving after the command sees something else", r.text)
+	}
+	if r.kind != kindText {
+		t.Errorf("the command went out as kind %d, want kindText (%d)", r.kind, kindText)
 	}
 }
 
@@ -164,13 +154,7 @@ func TestACommandsFailureIsNotCutToTheLengthOfAPeerString(t *testing.T) {
 	}
 	<-done
 
-	deadline := time.Now().Add(commandWait)
-	for !strings.Contains(out.String(), "accounts: 0") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the reason was cut before the part that says why: %q", out.String())
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForLog(t, &out, "accounts: 0")
 }
 
 func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
@@ -189,13 +173,7 @@ func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
 	}
 	<-done
 
-	deadline := time.Now().Add(commandWait)
-	for !strings.Contains(out.String(), "HTTP 401") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the failure was never logged: %q", out.String())
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForLog(t, &out, "HTTP 401")
 	if s.untrustedLog.Written() == 0 {
 		t.Error("the failure did not go through the peer rate limit, which a peer can cause")
 	}
@@ -416,36 +394,23 @@ func TestClearingTheBoxClearsTheEntity(t *testing.T) {
 	}
 	<-sent
 
-	deadline := time.Now().Add(commandWait)
-	for {
-		s.mu.Lock()
-		r := s.published[s.keyText]
-		s.mu.Unlock()
-		if r.text == "what time is it" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the command was never published, so this test would prove nothing")
-		}
-		time.Sleep(time.Millisecond)
+	s.mu.Lock()
+	r := s.published[s.keyText]
+	s.mu.Unlock()
+	if r.text != "what time is it" {
+		t.Fatalf("the box holds %q, so the command was never published and this test would "+
+			"prove nothing", r.text)
 	}
 
 	if err := s.handle(&conn{sock: fakeAddr{}}, msgTextCommand, keyedText(s.keyText, "  ")); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		s.mu.Lock()
-		r := s.published[s.keyText]
-		s.mu.Unlock()
-		if r.text == "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("emptying the box left the last command in it, so the card snaps back " +
-				"to what was cleared")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, "emptying the box to empty the entity, or the card snaps back to what was cleared",
+		func() bool {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.published[s.keyText].text == ""
+		})
 	select {
 	case got := <-sent:
 		t.Errorf("clearing the box asked alexa to run %q", got)
@@ -472,25 +437,14 @@ func TestAClearQueuedBehindACommandStillWins(t *testing.T) {
 	}
 	close(release)
 
-	deadline := time.Now().Add(commandWait)
-	for {
-		s.mu.Lock()
-		r, told := s.published[s.keyText]
-		queued := len(s.cmdQueue)
-		s.mu.Unlock()
-		if told && queued == 0 && r.text == "" {
-			return
-		}
-		if time.Now().After(deadline) {
+	waitFor(t, "the box to be empty after both ran; a clear sent while a command was in "+
+		"flight must not be decided against a state the worker had not published yet",
+		func() bool {
 			s.mu.Lock()
-			r = s.published[s.keyText]
-			s.mu.Unlock()
-			t.Fatalf("the box holds %q after being emptied; a clear sent while a command "+
-				"was in flight was decided against a state the worker had not published yet",
-				r.text)
-		}
-		time.Sleep(time.Millisecond)
-	}
+			defer s.mu.Unlock()
+			r, told := s.published[s.keyText]
+			return told && len(s.cmdQueue) == 0 && r.text == ""
+		})
 }
 
 func TestTheLengthLimitCountsWhatTheBoxAdvertises(t *testing.T) {

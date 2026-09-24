@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -79,6 +80,11 @@ func TestDisconnectIsAnsweredBeforeTheSocketCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	waitFor(t, "the server to drop the connection it was asked to end", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.conns) == 0
+	})
 	time.Sleep(200 * time.Millisecond)
 
 	msgType, _, err := c.recv()
@@ -109,24 +115,43 @@ func serveOne(t *testing.T, s *Server) net.Conn {
 	return client
 }
 
+func handled(t *testing.T, c *client) {
+	t.Helper()
+	if err := c.send(msgPingRequest, nil); err != nil {
+		t.Fatalf("sending a ping: %v", err)
+	}
+	for {
+		msgType, _, err := c.recv()
+		if err != nil {
+			t.Fatalf("the server never answered a ping sent after everything else: %v", err)
+		}
+		if msgType == msgPingResponse {
+			return
+		}
+	}
+}
+
+func liveCaughtUp(t *testing.T, s *Server) {
+	t.Helper()
+	select {
+	case s.liveWake <- struct{}{}:
+	case <-time.After(testTimeout):
+		t.Fatal("the live poll never took the wake already waiting for it")
+	}
+	waitFor(t, "the live poll to take a wake, which it does only between passes",
+		func() bool { return len(s.liveWake) == 0 })
+}
+
 func TestTheNinthConnectionIsRefused(t *testing.T) {
 	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for i := 0; i < maxConns; i++ {
 		serveOne(t, s)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(t, fmt.Sprintf("all %d connections to be admitted", maxConns), func() bool {
 		s.mu.Lock()
-		n := len(s.conns)
-		s.mu.Unlock()
-		if n == maxConns {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d connections were admitted", n, maxConns)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		defer s.mu.Unlock()
+		return len(s.conns) == maxConns
+	})
 
 	over := serveOne(t, s)
 	if err := over.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil &&
@@ -338,18 +363,11 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 
 	go s.Poll(MinSensorTick, time.Hour)
 
-	for deadline := time.Now().Add(3 * time.Second); ; {
+	waitFor(t, "the sensor poll to publish, or this test would measure nothing", func() bool {
 		s.mu.Lock()
-		published := len(s.published)
-		s.mu.Unlock()
-		if published > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the sensor poll never published, so this test would measure nothing")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer s.mu.Unlock()
+		return len(s.published) > 0
+	})
 
 	mu.Lock()
 	polled := reads
@@ -478,14 +496,7 @@ func TestPollSensorsWillNotAcceptATickUnderTheFloor(t *testing.T) {
 	done := make(chan struct{})
 	go func() { s.PollSensors(time.Millisecond); close(done) }()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), "raised to") {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Errorf("a 1ms tick was accepted; the log says %q", out.String())
+	waitForLog(t, &out, "raised to")
 }
 
 func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, bool) {
@@ -1278,7 +1289,7 @@ func TestTheLivePollSleepsUntilSomebodySubscribes(t *testing.T) {
 	}
 
 	go s.PollLive(30 * time.Second)
-	time.Sleep(200 * time.Millisecond)
+	liveCaughtUp(t, s)
 	mu.Lock()
 	idle := reads
 	mu.Unlock()
@@ -1313,6 +1324,7 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	s := testServer(t, psk)
 	stubSensors(s)
 	pollAll(s)
+	s.wakeGap = time.Hour
 
 	var mu sync.Mutex
 	reads := 0
@@ -1342,20 +1354,28 @@ func TestResubscribingDoesNotBuyAnotherReading(t *testing.T) {
 	}
 
 	ask(0)
-	time.Sleep(300 * time.Millisecond)
+	handled(t, c)
+	waitFor(t, "the sensor poll's first pass, the live poll's reading and the sensor poll "+
+		"taking its wake; without them this test would pass on a server that never reads",
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return reads >= 3 && len(s.sensorWake) == 0
+		})
 	mu.Lock()
 	first := reads
 	mu.Unlock()
-	if first == 0 {
-		t.Fatal("the first subscribe woke nothing, so this test would pass on a server that never reads")
-	}
 
 	const asks = 50
 	for i := 1; i <= asks; i++ {
 		ask(i)
 	}
-	time.Sleep(300 * time.Millisecond)
+	handled(t, c)
 
+	if len(s.sensorWake) != 0 {
+		t.Errorf("%d further subscribe requests woke the polls again; a peer holding the key "+
+			"can ask as fast as it likes", asks)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if reads != first {
@@ -1451,14 +1471,18 @@ func TestTheLivePollKeepsReadingOnItsOwnTick(t *testing.T) {
 	before := reads
 	mu.Unlock()
 
+	s.wakeGap = time.Hour
+	start := time.Now()
 	go s.PollLive(20 * time.Millisecond)
-	time.Sleep(400 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if reads-before < 3 {
-		t.Errorf("the poll read %d times in 400ms on a 20ms tick; a poll that only wakes reads once and stops",
-			reads-before)
+	waitFor(t, "3 readings on a 20ms tick; a poll that only wakes reads once and stops",
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return reads-before >= 3
+		})
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("the poll took %v to read 3 times on a 20ms tick, where every %dth tick reads",
+			took, HeavyEvery)
 	}
 }
 
@@ -1500,15 +1524,16 @@ func TestTheExpensiveReadingsSkipMostTicks(t *testing.T) {
 	const tick = 10 * time.Millisecond
 	start := time.Now()
 	go s.PollLive(tick)
-	time.Sleep(600 * time.Millisecond)
+	waitFor(t, "5 expensive readings; the tick is not reaching them at all", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads-before >= 5
+	})
 	ticks := int(time.Since(start) / tick)
 
 	mu.Lock()
 	defer mu.Unlock()
 	got := reads - before
-	if got == 0 {
-		t.Fatal("the poll never read; the tick is not reaching the expensive readings at all")
-	}
 	if got > ticks/2 {
 		t.Errorf("the expensive readings ran %d times in %d ticks, which is more than half of "+
 			"them; HeavyEvery is %d, so about a third is what it should be",
@@ -1560,7 +1585,11 @@ func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 	const tick = 10 * time.Millisecond
 	start := time.Now()
 	go s.PollLive(tick)
-	time.Sleep(600 * time.Millisecond)
+	waitFor(t, "5 expensive readings", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return heavy >= 5
+	})
 	ticks := int(time.Since(start) / tick)
 
 	mu.Lock()
@@ -1673,25 +1702,18 @@ func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
 	}
 	go s.PollLive(tick)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "continuous sound to be reported; a soundGap under the sample interval makes "+
+		"every reading look late, and the on clock never accumulates", func() bool {
 		s.mu.Lock()
-		gap, on := s.soundGap, s.published[s.keySound]
-		s.mu.Unlock()
-		if gap == tick*SoundEvery*2 && on.value == 1 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
+		defer s.mu.Unlock()
+		return s.published[s.keySound].value == 1
+	})
 	s.mu.Lock()
 	gap := s.soundGap
 	s.mu.Unlock()
 	if want := tick * SoundEvery * 2; gap != want {
 		t.Errorf("PollLive left soundGap at %v, want %v (twice the sample interval)", gap, want)
 	}
-	t.Errorf("continuous sound was never reported: soundGap is %v against a sample every %v, "+
-		"so every reading looks late and the on clock never accumulates", gap, tick*SoundEvery)
 }
 
 func TestTheSensorPollPublishesBeforeItsFirstTick(t *testing.T) {
@@ -1702,13 +1724,12 @@ func TestTheSensorPollPublishesBeforeItsFirstTick(t *testing.T) {
 	stubSensors(s)
 
 	go s.PollSensors(time.Hour)
-	time.Sleep(200 * time.Millisecond)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.published) == 0 {
-		t.Error("nothing was published before the first tick, so a subscriber arriving inside it is told nothing")
-	}
+	waitFor(t, "a publish before the first tick, or a subscriber arriving inside it is told "+
+		"nothing", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.published) > 0
+	})
 }
 
 func TestOnlyTheChangedReadingOfABatchIsSent(t *testing.T) {
@@ -1767,17 +1788,24 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
+	held, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
 	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
 		reads++
+		first := reads == 1
 		mu.Unlock()
+		if first {
+			close(held)
+			<-release
+		}
 		return 40, true
 	})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return reads }
 
 	s.wakeGap = 10 * time.Millisecond
 	go s.PollLive(time.Hour)
-	time.Sleep(100 * time.Millisecond)
+	liveCaughtUp(t, s)
 
 	subscribe := func(what string) *client {
 		t.Helper()
@@ -1793,20 +1821,33 @@ func TestASecondSubscriberCostsNoReading(t *testing.T) {
 				t.Fatalf("%s snapshot: %v", what, err)
 			}
 		}
-		time.Sleep(120 * time.Millisecond)
+		handled(t, c)
 		return c
 	}
 
-	before := count()
 	subscribe("the first subscriber")
-	first := count() - before
-	if first == 0 {
+	select {
+	case <-held:
+	case <-time.After(testTimeout):
 		t.Fatal("the first subscriber woke nothing, so the published volume it was answered from could be any age")
+	}
+	if len(s.sensorWake) != 1 {
+		t.Fatal("the first subscriber did not wake the sensor poll, so the check below would " +
+			"pass on a server that never wakes anything")
+	}
+	<-s.sensorWake
+	select {
+	case <-s.liveWake:
+	default:
 	}
 
 	after := count()
 	for i := 0; i < 3; i++ {
 		subscribe("a later subscriber")
+	}
+	if len(s.liveWake) != 0 || len(s.sensorWake) != 0 {
+		t.Error("a connection arriving after one was already subscribed woke the polls; the " +
+			"published state was already current")
 	}
 	if got := count() - after; got != 0 {
 		t.Errorf("three connections arriving after one was already subscribed drew %d readings; the published state was already current",
@@ -1835,8 +1876,9 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 
 	s.wakeGap = 2 * time.Second
 	go s.PollLive(time.Hour)
-	time.Sleep(100 * time.Millisecond)
+	liveCaughtUp(t, s)
 
+	before := count()
 	churn := func(round int) {
 		c, err := dial(t, s, psk)
 		if err != nil {
@@ -1845,28 +1887,20 @@ func TestWakingAgainInsideTheGapReadsNothing(t *testing.T) {
 		if err := c.send(msgSubscribeStates, nil); err != nil {
 			t.Fatalf("round %d: %v", round, err)
 		}
-		for n := 0; n < sensorCount; n++ {
-			if _, _, err := c.recv(); err != nil {
-				t.Fatalf("round %d snapshot: %v", round, err)
-			}
+		handled(t, c)
+		if round == 1 {
+			waitFor(t, "the first subscriber's reading, or this test would pass on a server "+
+				"that never reads", func() bool { return count() > before })
+		} else {
+			liveCaughtUp(t, s)
 		}
-		time.Sleep(80 * time.Millisecond)
 		c.conn.Close()
-		for i := 0; i < 100; i++ {
-			if !s.anyStateSubscriber() {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("round %d: the connection was never dropped", round)
+		waitFor(t, fmt.Sprintf("round %d's connection to be dropped", round),
+			func() bool { return !s.anyStateSubscriber() })
 	}
 
-	before := count()
 	churn(1)
 	first := count() - before
-	if first == 0 {
-		t.Fatal("the first subscriber read nothing, so this test would pass on a server that never reads")
-	}
 	churn(2)
 	churn(3)
 
@@ -1923,13 +1957,7 @@ func TestTheLivePollSurvivesATickThatIsNotPositive(t *testing.T) {
 	stubSensors(s)
 
 	go s.PollLive(0)
-	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		if strings.Contains(out.String(), "raised to") {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Errorf("a tick of zero was accepted; the log says %q", out.String())
+	waitForLog(t, &out, "raised to")
 }
 
 func TestAReadingThatIsZeroInEveryFieldIsStillPublished(t *testing.T) {
@@ -2145,15 +2173,12 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 	}
 
 	gone.conn.Close()
-	for time.Now().Before(deadline) {
+	waitFor(t, "the poll to forget the speaker once nobody is subscribed", func() bool {
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		_, held := s.published[s.keySound]
-		s.mu.Unlock()
-		if !held {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return !held
+	})
 
 	back, err := dial(t, s, psk)
 	if err != nil {
