@@ -56,7 +56,7 @@ func TestAStreamInAFormatThisPlayerCannotPlayDoesNotOpen(t *testing.T) {
 	}{
 		{"a codec nothing here decodes", func(p *streamPlayer) { p.Codec = "opus" }},
 		{"a sample rate the player is not open at", func(p *streamPlayer) { p.SampleRate = 44100 }},
-		{"stereo against one speaker", func(p *streamPlayer) { p.Channels = 2 }},
+		{"mono, which the player is not open for", func(p *streamPlayer) { p.Channels = 1 }},
 		{"a bit depth the mixer does not sum", func(p *streamPlayer) { p.BitDepth = 24 }},
 	} {
 		t.Run(tc.what, func(t *testing.T) {

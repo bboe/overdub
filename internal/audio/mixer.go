@@ -18,8 +18,9 @@ const (
 )
 
 const (
-	BlockFrames = 480
-	BlockBytes  = BlockFrames * 2
+	BlockFrames  = 480
+	BlockSamples = BlockFrames * ChimeChannels
+	BlockBytes   = BlockSamples * 2
 )
 
 type source interface {
@@ -47,7 +48,7 @@ type mixer struct {
 
 func newMixer() *mixer {
 	return &mixer{
-		scratch: make([]int16, BlockFrames),
+		scratch: make([]int16, BlockSamples),
 		woke:    make(chan struct{}, 1),
 	}
 }

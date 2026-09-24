@@ -23,12 +23,16 @@ Dot joins a synchronised group.
 - **Server-initiated.** The Dot advertises `_sendspin._tcp.local.` on 8928 and
   Music Assistant dials it. This reuses the mDNS responder and the firewall
   helpers, at the cost of the multi-server admission rules.
-- Role `player@v1`, formats **`flac`, then `pcm`**, both 48000 Hz, mono,
+- Role `player@v1`, formats **`flac`, then `pcm`**, both 48000 Hz, stereo,
   16-bit. A server takes the first it can encode.
-  - Mono: the Dot has one speaker, and the server downmixes better than
-    AudioFlinger. As PCM the stream is about 0.77 Mbit/s.
-  - FLAC is lossless, so it carries the same samples in fewer bytes: 60% and
-    68% of PCM on 2 test signals, a tone with light noise and one with more.
+  - Stereo on every output. The speaker path sums the channels: through a
+    2-channel AudioTrack, a sweep in either channel alone played, and one with
+    the right channel inverted was inaudible. A single-driver Bluetooth speaker
+    (JBL Go 3) did the same. So the Dot never mixes down.
+  - As PCM the stream is about 1.54 Mbit/s. FLAC is lossless, so it carries the
+    same samples in fewer bytes: 58% and 67% of PCM on 2 test signals, about 2.1
+    times mono FLAC. The signals put independent noise in each channel; music
+    shares more between them.
   - PCM stays second: every server must support it.
   - It is the chime's format, so the chime and the stream share one player.
 
@@ -207,7 +211,7 @@ the PSK matched in the handshake:
 Assistant play over a Sentinel-keyed connection once its operator approves the
 Dot.
 
-- `buffer_capacity` is 2 seconds of PCM, 192,000 bytes. The server counts FLAC
+- `buffer_capacity` is 2 seconds of PCM, 384,000 bytes. The server counts FLAC
   bytes against it too, so FLAC leads further: about 3 seconds at the ratios
   above, and up to `aiosendspin`'s 30-second `max_duration_us` through a quiet
   passage, where a block of silence is an 11-byte frame. `streamHold` is sized
@@ -309,39 +313,43 @@ buffer and keeps it open. Each reaches the player and the session.
 ### FLAC
 
 - `github.com/mewkiz/flac` decodes it. echolocal runs the same library on a
-  Dot. On a Dot, a 96 ms mono frame takes 3.4 to 4.4 ms, about 4% of one core,
-  and allocates 19 KB that nothing keeps.
-- Music Assistant sends it. On a Dot every chunk was placed, and the lead held
-  at 2.4 to 2.9 seconds after a first 30 seconds that reached 5.7. The daemon
-  used 14.6% of one core over 30 seconds of playback.
+  Dot. On a Dot, a 96 ms stereo frame takes 6.9 to 8.2 ms, about 8% of one
+  core, and allocates 56 KB that nothing keeps.
+- Music Assistant sends it. On a Dot, stereo FLAC of a real track took 0.99
+  Mbit/s of Wi-Fi: 65% of stereo PCM, and about 1.3 times the mono PCM stream it
+  replaced. Every chunk was placed, and the daemon used 19% of one core over 30
+  seconds, against 14.6% for mono FLAC on the speaker.
 - `codec_header` is base64 of `fLaC` and a STREAMINFO block, 42 bytes. A bare
   34-byte STREAMINFO is accepted too, as `aiosendspin`'s own decoder accepts it.
-  A header that does not describe 48000 Hz mono 16-bit refuses the stream.
+  A header that does not describe 48000 Hz stereo 16-bit refuses the stream.
 - The header is read by hand, not by the library. `flac.New` parses a whole
   metadata block before checking its type: a 40-byte header whose PICTURE block
   claimed 128 MB allocated 128 MB, and every `stream/start` is read.
 - `aiosendspin` encodes through ffmpeg at compression level 5, which picks
-  4,608-sample blocks: 96 ms. Each chunk is 1 frame. A chunk of several frames
+  4,608-frame blocks: 96 ms. Each chunk is 1 frame. A chunk of several frames
   decodes within the cap below; a frame split across chunks does not.
 - Stopping the group drops the encoder's partial block. In the interop test the
-  last 3,840 of 96,000 samples never arrived.
+  last 3,840 of 96,000 frames never arrived.
 - The frame's sync, rate, channel and bit-depth codes are read before the
-  library sees it. `mewkiz/flac` writes to the standard log for the 24 and 176.4
-  kHz codes, which would be a line a frame outside `untrustedlog`. It also
-  decodes a bit depth left to STREAMINFO as 0 bits.
+  library sees it. Any of FLAC's 4 stereo layouts passes; the library rebuilds
+  left and right from a side channel. `mewkiz/flac` writes to the standard log
+  for the 24 and 176.4 kHz codes, which would be a line a frame outside
+  `untrustedlog`. It also decodes a bit depth left to STREAMINFO as 0 bits.
 - Its errors carry the frame's numbers. A refusal is 1 of 3 fixed messages, for
   the once-per-message log above.
 - A chunk decodes to at most 4,608 frames: the streamable subset's largest
   block at 48 kHz, and what `aiosendspin` sends. Each frame's block size is read
   before its samples.
-- A 13-byte frame can claim 65,535 samples of silence. Uncapped, 1 message of
-  such frames decoded to 660 MB. On a Dot, 1 such frame took 4.0 ms and 393 KB
-  to decode, so about 250 a second held a core. A 4,608-sample one takes 0.34 ms
-  and 28 KB.
-- The cap bounds samples, not the library's allocations. It allocates up to
-  32,768 Rice partitions before reading them: a 9-byte frame allocated 256 KB on
-  ARM before failing, and 1 message of valid tiny frames 1 MB. It is garbage
-  nothing keeps, and costs less CPU than a real frame.
+- A 16-byte stereo frame can claim 65,535 frames of silence. Uncapped, 1 message
+  of such frames decodes to about 1 GB. On a Dot, 1 such frame took 5.6 ms and
+  787 KB to decode, so about 180 a second would hold a core. A 4,608-frame one
+  takes 0.36 ms and 56 KB.
+- The cap bounds frames, not the library's allocations. It allocates up to
+  32,768 Rice partitions for each channel before reading them. A 9-byte frame
+  allocated 256 KB on ARM before failing. 1 message of the smallest valid stereo
+  frames allocated 1.3 MB, and 1.6 MB with that 9-byte frame at its end. It is
+  garbage nothing keeps. Byte for byte it costs about the CPU of real audio:
+  0.85 times natively, and 1.2 times under ARM emulation.
 
 ### What the log says while a stream runs
 

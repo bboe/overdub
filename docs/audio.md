@@ -52,15 +52,15 @@ device until a reboot.
   Dot is silent for the rest of the boot.
 - OpenSL's queue holds the **pointer** it was given until the buffer plays. The
   C pool copies each block, so the caller's bytes stay ordinary Go memory.
-- A block is 10 ms (480 frames, 960 bytes), with 8 buffers: the queue holds
-  80 ms. That is also the scheduling quantum: a stream can start no more
-  finely than one buffer.
+- A block is 10 ms (480 frames, 1,920 bytes of stereo), with 8 buffers: the
+  queue holds 80 ms. That is also the scheduling quantum: a stream can start no
+  more finely than one buffer.
 - A full queue is ordinary. The writer retries every 2 ms and gives up after
   1 second, about 12 times the queue's depth. Only a queue that has stopped
   draining reaches that: a wedged track, an AudioFlinger restart, or the driver
   state above. Nothing else signals that failure.
 - The writer loops over short writes, because the Go block size and the C chunk
-  size are both 960 bytes with nothing tying them together.
+  size are both 1,920 bytes with nothing tying them together.
 - Any failed write stops the writer, and it logs once:
   `the writer stopped: ...; the Dot is silent until the daemon restarts`.
 - `Close` does not wait for a sound to end. The writer exits at its next refused
@@ -255,6 +255,9 @@ one at a time, as there is one player.
   undoing the other 303. At 5 ms: 168, all one direction.
 - `smoothOver` is **50 chunks**. At 400 the average lagged, overshot each
   crossing and oscillated: 1,163 edits in 30 seconds.
+- Every count and position here is in frames, and a copy, a trimmed or inserted
+  frame, or a smoothed seam moves both channels together. One sample moved
+  alone would swap left and right for the rest of the stream.
 
 ### Over Bluetooth
 
@@ -316,7 +319,7 @@ one at a time, as there is one player.
   chunk the mixer is partway through keeps its place.
 - `streamHold` is 30 seconds of frames, `aiosendspin`'s `max_duration_us`.
   `buffer_capacity` counts bytes, and FLAC through a quiet passage reaches that
-  cap; PCM fills to 2.4 seconds. 30 seconds of 16-bit mono is 2.9 MB, against
+  cap; PCM fills to 2.4 seconds. 30 seconds of 16-bit stereo is 5.8 MB, against
   a daemon resident at 9.3 MB and about 105 MB available on the Dot.
   `streamAhead` refuses a chunk due more than 30 seconds either way.
 - `streamChunks` (3,000) bounds entries, because a server picks the frames per
@@ -361,6 +364,8 @@ one at a time, as there is one player.
   Alexa's.
 - The chime is a mixer source so a stream plays through a press. A second press
   inside the first chime hears up to 80 ms of it before the restart.
+- The player is stereo, and the chime is the same in both channels. The
+  speaker sums them, so a chime in one channel would sound 6 dB quieter.
 - Alexa's `SpeechSynthesizer` takes 691 ms against 33 ms, and needs four quirks
   of `SpeechInteractionManager`, one exact mp3 encoding, and a stack a debloated
   Dot may not run.

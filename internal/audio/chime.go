@@ -6,7 +6,7 @@ import "math"
 
 const (
 	ChimeRate     = 48000
-	ChimeChannels = 1
+	ChimeChannels = 2
 
 	chimeSeconds = 0.40
 	chimeGain    = 0.22
@@ -29,7 +29,7 @@ var chimeNotes = []note{
 
 func chimePCM() []byte {
 	frames := int(chimeSeconds * ChimeRate)
-	buf := make([]byte, frames*2)
+	buf := make([]byte, frames*ChimeChannels*2)
 	for i := range frames {
 		t := float64(i) / ChimeRate
 		var v float64
@@ -52,8 +52,11 @@ func chimePCM() []byte {
 		}
 		v = min(max(v*chimeGain, -1), 1)
 		s := int16(v * math.MaxInt16)
-		buf[i*2] = byte(s)
-		buf[i*2+1] = byte(s >> 8)
+		for ch := range ChimeChannels {
+			at := (i*ChimeChannels + ch) * 2
+			buf[at] = byte(s)
+			buf[at+1] = byte(s >> 8)
+		}
 	}
 	return buf
 }

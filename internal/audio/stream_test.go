@@ -22,7 +22,7 @@ func anchorAt(s *Stream, when time.Time) {
 }
 
 func level(frames int, at int16) []byte {
-	block := make([]int16, frames)
+	block := make([]int16, frames*ChimeChannels)
 	for i := range block {
 		block[i] = at
 	}
@@ -32,13 +32,21 @@ func level(frames int, at int16) []byte {
 }
 
 func ramp(from, frames int) []byte {
-	block := make([]int16, frames)
+	block := make([]int16, frames*ChimeChannels)
 	for i := range block {
-		block[i] = int16((from + i) % 30000)
+		block[i] = int16((from + i/ChimeChannels) % 30000)
 	}
 	buf := make([]byte, frames*frameBytes)
 	encode(block, buf)
 	return buf
+}
+
+func left(block []int16) []int16 {
+	out := make([]int16, len(block)/ChimeChannels)
+	for i := range out {
+		out[i] = block[i*ChimeChannels]
+	}
+	return out
 }
 
 func TestAudioArrivingBeforeTheMappingWaitsForItRatherThanBeingSpent(t *testing.T) {
@@ -47,12 +55,12 @@ func TestAudioArrivingBeforeTheMappingWaitsForItRatherThanBeingSpent(t *testing.
 	if err := s.Write(now.Add(200*time.Millisecond), level(BlockFrames, 5000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for b := range anchorTake {
-		if n, more := s.read(block); n != BlockFrames || !more {
+		if n, more := s.read(block); n != BlockSamples || !more {
 			t.Fatalf("read returned %d, %v; an open stream keeps the writer fed", n, more)
 		}
-		for i, got := range block {
+		for i, got := range left(block) {
 			if got != 0 {
 				t.Fatalf("block %d sample %d is %d; audio was placed before anything said"+
 					" which frame the player was on", b, i, got)
@@ -72,7 +80,7 @@ func TestAudioArrivingBeforeTheMappingWaitsForItRatherThanBeingSpent(t *testing.
 
 func TestNoReadingIsTakenUntilThePipelineIsSteady(t *testing.T) {
 	s := quiet()
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 20 {
 		s.read(block)
 		if s.wants() {
@@ -104,7 +112,7 @@ func TestAStreamKeepsAskingUntilItIsPlacedAndSparinglyAfterwards(t *testing.T) {
 		t.Error("a placed stream asked for another reading at once; the status file costs" +
 			" about 300 us of every 10 ms block")
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range observeEvery {
 		s.read(block)
 	}
@@ -138,10 +146,10 @@ func TestAudioIsPlacedAtTheFrameItsTimestampNames(t *testing.T) {
 	if err := s.Write(now.Add(25*time.Millisecond), level(1200, 4000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for b := range 2 {
 		s.read(block)
-		for i, got := range block {
+		for i, got := range left(block) {
 			if got != 0 {
 				t.Fatalf("block %d sample %d is %d; audio due 25 ms out was played in the"+
 					" first %d ms, which is that far ahead of the rest of the group",
@@ -150,7 +158,7 @@ func TestAudioIsPlacedAtTheFrameItsTimestampNames(t *testing.T) {
 		}
 	}
 	s.read(block)
-	for i, got := range block {
+	for i, got := range left(block) {
 		want := int16(0)
 		if i >= 1200-2*BlockFrames {
 			want = 4000
@@ -174,10 +182,10 @@ func TestChunksThatDoNotDivideIntoBlocksStayContinuous(t *testing.T) {
 			t.Fatalf("Write %d: %v", i, err)
 		}
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for b := range 4 * chunk / BlockFrames {
 		s.read(block)
-		for i, got := range block {
+		for i, got := range left(block) {
 			frame := b*BlockFrames + i
 			if want := int16(frame % 30000); got != want {
 				t.Fatalf("frame %d is %d, want %d: a chunk boundary inside a block either"+
@@ -195,9 +203,9 @@ func TestAChunkAlreadyPastIsDroppedRatherThanPlayedLate(t *testing.T) {
 	if err := s.Write(now.Add(-100*time.Millisecond), level(1200, 6000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
-	for i, got := range block {
+	for i, got := range left(block) {
 		if got != 0 {
 			t.Fatalf("sample %d is %d; audio whose moment had passed was played anyway,"+
 				" so everything after it is late by as much", i, got)
@@ -215,9 +223,9 @@ func TestAChunkThatStartedInThePastPlaysTheRestOfItselfInPlace(t *testing.T) {
 	if err := s.Write(now.Add(-5*time.Millisecond), ramp(0, 1200)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
-	for i, got := range block {
+	for i, got := range left(block) {
 		if want := int16(240 + i); got != want {
 			t.Fatalf("frame %d is %d, want %d: the part of a chunk that is still due has"+
 				" to play where it belongs rather than from the chunk's own start",
@@ -236,10 +244,10 @@ func TestAGapIsSilenceRatherThanTheNextChunkPulledForward(t *testing.T) {
 	if err := s.Write(now.Add(30*time.Millisecond), level(480, 7000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for b := range 3 {
 		s.read(block)
-		for i, got := range block {
+		for i, got := range left(block) {
 			if got != 0 {
 				t.Fatalf("block %d sample %d is %d; a chunk due 30 ms out filled the hole"+
 					" in front of it, so every frame after the gap plays early", b, i, got)
@@ -286,10 +294,13 @@ func TestAudioDueBeyondAnyStreamIsRefused(t *testing.T) {
 }
 
 func TestAPartialFrameIsRefusedRatherThanPairedWithTheNextWrite(t *testing.T) {
-	s := quiet()
-	if err := s.Write(time.Now(), []byte{1, 2, 3}); err == nil {
-		t.Error("an odd number of bytes was taken, which pairs every later byte with the" +
-			" wrong neighbour for as long as the stream runs")
+	for _, n := range []int{3, 2, 6, 10} {
+		s := quiet()
+		if err := s.Write(time.Now(), make([]byte, n)); err == nil {
+			t.Errorf("%d bytes were taken, which is not whole %d-byte frames, and pairs"+
+				" every later sample with the wrong channel for as long as the stream runs",
+				n, frameBytes)
+		}
 	}
 }
 
@@ -301,8 +312,8 @@ func TestClearingAStreamKeepsItRunning(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	s.Clear()
-	block := make([]int16, BlockFrames)
-	if n, more := s.read(block); n != BlockFrames || !more {
+	block := make([]int16, BlockSamples)
+	if n, more := s.read(block); n != BlockSamples || !more {
 		t.Fatalf("read returned %d, %v after a clear; the stream is still the one the"+
 			" server announced", n, more)
 	}
@@ -321,7 +332,7 @@ func TestClearingAStreamKeepsItRunning(t *testing.T) {
 func TestAClosedStreamLetsTheWriterGoIdle(t *testing.T) {
 	s := quiet()
 	s.Close()
-	if n, more := s.read(make([]int16, BlockFrames)); n != 0 || more {
+	if n, more := s.read(make([]int16, BlockSamples)); n != 0 || more {
 		t.Errorf("read returned %d, %v after a close; the writer keeps feeding silence to"+
 			" the player, which holds the amp awake for the life of the daemon", n, more)
 	}
@@ -342,7 +353,7 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 	if err := s.Write(now.Add(-time.Second), level(240, 3000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
 	s.read(block)
 	if err := s.Write(now.Add(time.Second), level(720, 3000)); err != nil {
@@ -460,7 +471,7 @@ func TestAStreamIsWrittenToWhileItIsRead(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		block := make([]int16, BlockFrames)
+		block := make([]int16, BlockSamples)
 		for range 200 {
 			s.read(block)
 			s.wants()
@@ -552,7 +563,7 @@ func TestAFinishedStreamDropsWhatItStillHolds(t *testing.T) {
 	}
 	s.Finish()
 
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	if n, more := s.read(block); n != 0 || more {
 		t.Fatalf("a finished stream delivered %d frames and asked for more (%v); a pause"+
 			" then takes as long as the buffer to go quiet", n, more)
@@ -592,7 +603,7 @@ func TestAStreamThatCarriesOnKeepsItsMappingAndTakesAudioAgain(t *testing.T) {
 		t.Error("carrying on moved the mapping, which is the 150 ms of silence that" +
 			" opening a fresh stream costs")
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 6 {
 		s.read(block)
 	}
@@ -612,7 +623,7 @@ func TestAudioIsQueuedByWhenItIsDueRatherThanWhenItArrived(t *testing.T) {
 	if err := s.Write(now, level(BlockFrames, 6000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
 	if block[0] != 6000 {
 		t.Errorf("the first sample is %d, want the chunk that was due; one chunk stamped"+
@@ -629,7 +640,7 @@ func TestAPartlyPlayedChunkKeepsItsPlaceInTheQueue(t *testing.T) {
 	if err := s.Write(now, ramp(0, 2*BlockFrames)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
 
 	if err := s.Write(now.Add(-5*time.Millisecond), level(2*BlockFrames, 9000)); err != nil {
@@ -661,7 +672,7 @@ func TestAStreamThatHasPlayedOutRefusesToCarryOn(t *testing.T) {
 	s := quiet()
 	anchorAt(s, time.Now())
 	s.Finish()
-	s.read(make([]int16, BlockFrames))
+	s.read(make([]int16, BlockSamples))
 	if !s.Spent() {
 		t.Fatal("the stream did not retire itself with an empty queue")
 	}
@@ -723,7 +734,7 @@ func TestAChunkDueFurtherOffThanTheFrameCountFitsLeavesTheWriterRunning(t *testi
 	s.origin = s.origin.Add(-13 * time.Hour)
 	s.mu.Unlock()
 
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	ran := make(chan struct{})
 	go func() {
 		s.read(block)
@@ -736,10 +747,10 @@ func TestAChunkDueFurtherOffThanTheFrameCountFitsLeavesTheWriterRunning(t *testi
 			" frame count spins inside the lock the mixer and the chime both wait on,"+
 			" and this dot is silent until it reboots", 13*time.Hour)
 	}
-	if audio, silence := s.Placed(); audio != 0 || silence != int64(len(block)) {
+	if audio, silence := s.Placed(); audio != 0 || silence != BlockFrames {
 		t.Fatalf("the block placed %d frames of audio and %d of silence, want %d silent:"+
 			" a chunk that far out is a gap rather than something to play",
-			audio, silence, len(block))
+			audio, silence, BlockFrames)
 	}
 }
 
@@ -783,13 +794,13 @@ func TestATimingErrorIsCorrectedOneFrameAtATime(t *testing.T) {
 }
 
 func TestAnInsertedFrameRampsBetweenItsNeighbours(t *testing.T) {
-	block := make([]int16, 3)
-	blend(block, 0, 400)
-	for i, want := range []int16{100, 200, 300} {
-		if block[i] != want {
-			t.Errorf("inserted frame %d is %d, want %d: a repeated or silent frame is a"+
-				" step in the waveform, which is what a pure tone clicks on",
-				i, block[i], want)
+	block := make([]int16, 3*ChimeChannels)
+	blend(block, []int16{0, 800}, []int16{400, 0})
+	for i, want := range [][]int16{{100, 600}, {200, 400}, {300, 200}} {
+		if got := block[i*ChimeChannels : (i+1)*ChimeChannels]; !slices.Equal(got, want) {
+			t.Errorf("inserted frame %d is %v, want %v: a repeated or silent frame is a"+
+				" step in the waveform, which is what a pure tone clicks on, and each"+
+				" channel ramps between its own neighbours", i, got, want)
 		}
 	}
 }
@@ -799,7 +810,7 @@ func TestOneRevisionOfTheClockDoesNotMoveTheAudio(t *testing.T) {
 	now := time.Now()
 	anchorAt(s, now)
 	at := now
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for i := range 8 {
 		if i == 4 {
 			at = at.Add(-3 * time.Millisecond)
@@ -825,7 +836,7 @@ func TestAnEmptyChunkIsNotPlacedRatherThanIndexed(t *testing.T) {
 	if err := s.Write(now.Add(2*time.Millisecond), nil); err != nil {
 		t.Fatalf("Write of an empty chunk: %v", err)
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 10 {
 		s.read(block)
 	}
@@ -844,7 +855,7 @@ func TestFramesEasedOntoTheClockAreNotCountedLate(t *testing.T) {
 	now := time.Now()
 	anchorAt(s, now)
 	at := now
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 200 {
 		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
@@ -866,7 +877,7 @@ func TestAReanchorLeavesAPartPlayedChunkWhereItIs(t *testing.T) {
 	now := time.Now()
 	anchorAt(s, now)
 	at := now
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 3 {
 		if err := s.Write(at, level(2*BlockFrames, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
@@ -884,31 +895,34 @@ func TestAReanchorLeavesAPartPlayedChunkWhereItIs(t *testing.T) {
 	}
 }
 
-func TestFramesTrimmedToCatchUpAreNotSubtractedFromSilence(t *testing.T) {
-	s := quiet()
-	now := time.Now()
-	anchorAt(s, now)
-	at := now
-	block := make([]int16, BlockFrames)
-	for range 3 {
-		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
-			t.Fatalf("Write: %v", err)
+func TestFramesEasedInOrOutAreNotCountedAsSilence(t *testing.T) {
+	for _, drift := range []time.Duration{-40 * time.Microsecond, 40 * time.Microsecond} {
+		s := quiet()
+		now := time.Now()
+		anchorAt(s, now)
+		at := now
+		block := make([]int16, BlockSamples)
+		for range 3 {
+			if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			at = at.Add(frameTime(BlockFrames))
 		}
-		at = at.Add(frameTime(BlockFrames))
-	}
-	for range 300 {
-		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
-			t.Fatalf("Write: %v", err)
+		for range 300 {
+			if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			at = at.Add(frameTime(BlockFrames) + drift)
+			s.read(block)
 		}
-		at = at.Add(frameTime(BlockFrames) - 200*time.Microsecond)
-		s.read(block)
-	}
-	if s.eased == 0 {
-		t.Fatal("nothing was eased, so this says nothing")
-	}
-	if s.silence < 0 {
-		t.Errorf("silence is %s: a frame dropped from the queue never reached a block,"+
-			" so it cannot stand in for one", frameTime(s.silence))
+		if s.eased == 0 {
+			t.Fatalf("drifting %v: nothing was eased, so this says nothing", drift)
+		}
+		if s.silence < 0 {
+			t.Errorf("drifting %v: silence is %s; a trimmed frame never reached a block,"+
+				" and a blended frame is counted once, so neither stands in for silence",
+				drift, frameTime(s.silence))
+		}
 	}
 }
 
@@ -919,9 +933,9 @@ func TestABlockThatRanOutLeavesNothingToRampFrom(t *testing.T) {
 	if err := s.Write(now, level(BlockFrames/2, 3000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	s.read(make([]int16, BlockFrames))
-	if s.lastOut != 0 {
-		t.Errorf("the stream ramps from %d after a block that ended in silence; the"+
+	s.read(make([]int16, BlockSamples))
+	if s.lastOut != [ChimeChannels]int16{} {
+		t.Errorf("the stream ramps from %v after a block that ended in silence; the"+
 			" frames actually handed over were zeros, so an inserted frame would step"+
 			" half way out of nothing", s.lastOut)
 	}
@@ -933,7 +947,7 @@ func TestAShortChunkIsStillCorrected(t *testing.T) {
 	anchorAt(s, now)
 	at := now
 	short := BlockFrames / 8
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	for range 2000 {
 		if err := s.Write(at, level(short, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
@@ -1059,7 +1073,7 @@ func TestAJumpLongerThanAChunkCutsAllOfIt(t *testing.T) {
 			t.Fatalf("Write: %v", err)
 		}
 	}
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	s.read(block)
 
 	const cut = 40 * time.Millisecond
@@ -1069,7 +1083,7 @@ func TestAJumpLongerThanAChunkCutsAllOfIt(t *testing.T) {
 	var out []int16
 	for range 25 {
 		s.read(block)
-		out = append(out, block...)
+		out = append(out, left(block)...)
 	}
 	got := BlockFrames + slices.Index(out, 1000)
 	if want := 9*chunk - 1920; got != want {
@@ -1087,7 +1101,7 @@ func TestAJumpPlacesTheNextChunkWhereItsTimestampSays(t *testing.T) {
 		if err := s.Write(now, level(BlockFrames, 1000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		block := make([]int16, BlockFrames)
+		block := make([]int16, BlockSamples)
 		s.read(block)
 
 		s.jump = jump
@@ -1097,7 +1111,7 @@ func TestAJumpPlacesTheNextChunkWhereItsTimestampSays(t *testing.T) {
 		var out []int16
 		for range 4 {
 			s.read(block)
-			out = append(out, block...)
+			out = append(out, left(block)...)
 		}
 		first := slices.IndexFunc(out, func(v int16) bool { return v != 0 })
 		if jump && (first != 960 || s.jump) {
@@ -1268,5 +1282,173 @@ func TestARunOfSlipsDoesNotCarryAcrossAnOutputChange(t *testing.T) {
 	if s.slips != 0 {
 		t.Error("one reading after 2 output changes re-placed the stream, because the run" +
 			" of slips from before them was still counted")
+	}
+}
+
+func stereoRamp(from, frames int) []byte {
+	block := make([]int16, frames*ChimeChannels)
+	for i := range frames {
+		v := int16((from+i)%30000 + 1)
+		block[i*ChimeChannels], block[i*ChimeChannels+1] = v, -v
+	}
+	buf := make([]byte, frames*frameBytes)
+	encode(block, buf)
+	return buf
+}
+
+func TestEveryFrameKeepsItsChannelsInOrder(t *testing.T) {
+	for _, c := range []struct {
+		what   string
+		chunk  int
+		drift  time.Duration
+		chunks int
+		eases  bool
+	}{
+		{"chunks that do not divide into blocks", 1200, 0, 4, false},
+		{"a server clock running fast, eased by trimming", BlockFrames, -200 * time.Microsecond, 300, true},
+		{"a server clock running slow, eased by blending", BlockFrames, 200 * time.Microsecond, 300, true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			s := quiet()
+			now := time.Now()
+			anchorAt(s, now)
+			at := now
+			block := make([]int16, BlockSamples)
+			written, read := 0, 0
+			for k := range c.chunks {
+				if err := s.Write(at, stereoRamp(k*c.chunk, c.chunk)); err != nil {
+					t.Fatalf("Write %d: %v", k, err)
+				}
+				at = at.Add(frameTime(int64(c.chunk)) + c.drift)
+				for written += c.chunk; read+BlockFrames <= written; read += BlockFrames {
+					s.read(block)
+					for i := range BlockFrames {
+						l, r := block[i*ChimeChannels], block[i*ChimeChannels+1]
+						if r != -l {
+							t.Fatalf("frame %d is (%d, %d); every frame written was (v, -v),"+
+								" so a channel moved against the other", read+i, l, r)
+						}
+					}
+				}
+			}
+			if c.eases && s.eased == 0 {
+				t.Fatal("nothing was eased, so the edits this checks never ran")
+			}
+			if s.placed == 0 {
+				t.Fatal("no audio was placed, so there was nothing to check")
+			}
+		})
+	}
+}
+
+func slowRamp(from, frames int) []byte {
+	block := make([]int16, frames*ChimeChannels)
+	for i := range frames {
+		v := int16((from+i)/32 + 1)
+		block[i*ChimeChannels], block[i*ChimeChannels+1] = v, -v
+	}
+	buf := make([]byte, frames*frameBytes)
+	encode(block, buf)
+	return buf
+}
+
+func TestEasingNeverStepsEitherChannel(t *testing.T) {
+	for _, c := range []struct {
+		chunk int
+		drift time.Duration
+	}{
+		{BlockFrames, 40 * time.Microsecond},
+		{BlockFrames, -40 * time.Microsecond},
+		{1200, 40 * time.Microsecond},
+		{1200, -40 * time.Microsecond},
+		{1000, 40 * time.Microsecond},
+		{1000, -40 * time.Microsecond},
+	} {
+		s := quiet()
+		now := time.Now()
+		anchorAt(s, now)
+		at := now
+		block := make([]int16, BlockSamples)
+		written, read := 0, 0
+		prev, started := int16(0), false
+		for k := range 600 {
+			if err := s.Write(at, slowRamp(k*c.chunk, c.chunk)); err != nil {
+				t.Fatalf("Write %d: %v", k, err)
+			}
+			at = at.Add(frameTime(int64(c.chunk)) + c.drift)
+			for written += c.chunk; read+BlockFrames+ChimeRate/2 <= written; read += BlockFrames {
+				s.read(block)
+				for i := range BlockFrames {
+					l, r := block[i*ChimeChannels], block[i*ChimeChannels+1]
+					if !started && l == 0 {
+						continue
+					}
+					started = true
+					if r != -l || l == 0 || l < prev {
+						t.Fatalf("%d-frame chunks drifting %v: frame %d is (%d, %d) after %d;"+
+							" each channel only rises, so an inserted or trimmed frame stepped"+
+							" one of them or left a hole", c.chunk, c.drift, read+i, l, r, prev)
+					}
+					prev = l
+				}
+			}
+		}
+		if s.eased == 0 {
+			t.Errorf("%d-frame chunks drifting %v: nothing was eased, so no edit was checked",
+				c.chunk, c.drift)
+		}
+	}
+}
+
+func TestATrimCutsOneFrameAndSmoothsTheCut(t *testing.T) {
+	for _, chunk := range []int{BlockFrames, 1200, 1000} {
+		s := quiet()
+		now := time.Now()
+		anchorAt(s, now)
+		at := now
+		block := make([]int16, BlockSamples)
+		written, read, halfway := 0, 0, 0
+		counts := map[int16]int{}
+		var first, last int16
+		for k := range 600 {
+			if err := s.Write(at, level(chunk, int16(50*(k+1)))); err != nil {
+				t.Fatalf("Write %d: %v", k, err)
+			}
+			at = at.Add(frameTime(int64(chunk)) - 40*time.Microsecond)
+			for written += chunk; read+BlockFrames+ChimeRate/2 <= written; read += BlockFrames {
+				s.read(block)
+				for i := range BlockFrames {
+					l, r := block[i*ChimeChannels], block[i*ChimeChannels+1]
+					switch {
+					case r != l:
+						t.Fatalf("%d-frame chunks: frame %d is (%d, %d); every frame written"+
+							" was the same in both channels", chunk, read+i, l, r)
+					case l == 0:
+					case l%50 != 0:
+						halfway++
+					default:
+						if first == 0 {
+							first = l
+						}
+						counts[l]++
+						last = l
+					}
+				}
+			}
+		}
+		if s.eased == 0 {
+			t.Fatalf("%d-frame chunks: nothing was eased, so no edit was checked", chunk)
+		}
+		if int64(halfway) != s.eased {
+			t.Errorf("%d-frame chunks: %d frames sit halfway across a cut, for %d edits;"+
+				" each edit smooths exactly one", chunk, halfway, s.eased)
+		}
+		for l, n := range counts {
+			if l != first && l != last && n != chunk && n != chunk-2 {
+				t.Errorf("%d-frame chunks: the chunk at level %d played %d frames; a chunk"+
+					" plays whole, or loses the trimmed frame and the one smoothed after it",
+					chunk, l, n)
+			}
+		}
 	}
 }

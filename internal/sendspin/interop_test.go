@@ -3,7 +3,6 @@ package sendspin
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"log"
 	"os"
 	"os/exec"
@@ -79,7 +78,7 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 	player := &fakePlayer{}
 	said := runInterop(t, player, "--play-seconds=2")
-	if !strings.Contains(said, "started a flac 48000 Hz 1 ch 16 bit stream") {
+	if !strings.Contains(said, "started a flac 48000 Hz 2 ch 16 bit stream") {
 		t.Errorf("the reference server did not pick flac, the first format offered. The"+
 			" daemon said:\n%s", said)
 	}
@@ -89,10 +88,7 @@ func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 	if player.count() == 0 {
 		t.Fatal("no stream reached the player")
 	}
-	want := make([]byte, 0, 4*StreamRate)
-	for _, v := range flacPattern(2 * StreamRate) {
-		want = binary.LittleEndian.AppendUint16(want, uint16(v))
-	}
+	want := pcmOf(flacStereo(2 * StreamRate))
 	got := player.last().audio()
 	whole := len(want) - len(want)%(flacVectorBlock*frameBytes)
 	n := min(len(got), len(want))

@@ -18,7 +18,7 @@ func chunkBody(stamp int64, pcm []byte) []byte {
 }
 
 func TestAChunkCarriesItsTimestampBigEndianAheadOfTheAudio(t *testing.T) {
-	pcm := []byte{1, 2, 3, 4}
+	pcm := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	c, err := parseChunk(chunkBody(987_654_321, pcm))
 	if err != nil {
 		t.Fatalf("parseChunk: %v", err)
@@ -45,9 +45,11 @@ func TestAChunkTooShortToHoldATimestampIsRefused(t *testing.T) {
 }
 
 func TestAChunkThatIsNotWholeFramesIsRefused(t *testing.T) {
-	if _, err := parseChunk(chunkBody(1, []byte{1, 2, 3})); err == nil {
-		t.Error("a half sample was accepted, and every frame after it in the stream is" +
-			" built from the wrong pair of bytes")
+	for _, n := range []int{3, 2, 6, 10} {
+		if _, err := parseChunk(chunkBody(1, make([]byte, n))); err == nil {
+			t.Errorf("%d bytes were accepted, which is not whole %d-byte frames, and every"+
+				" frame after it in the stream is built from the wrong channels", n, frameBytes)
+		}
 	}
 }
 
@@ -77,7 +79,7 @@ func TestAChunkArrivingOnAnOpenStreamIsRead(t *testing.T) {
 	s := held()
 	p := ours()
 	startWith(t, s, &p)
-	c, err := s.AudioChunk(chunkBody(7, []byte{1, 2}))
+	c, err := s.AudioChunk(chunkBody(7, []byte{1, 2, 3, 4}))
 	if err != nil {
 		t.Fatalf("AudioChunk: %v", err)
 	}
@@ -146,8 +148,8 @@ func TestAChunkRunCountsWhatArrivedAndStartsOverAfterReporting(t *testing.T) {
 		}
 		run.took(peer, "server", s, c)
 	}
-	if run.chunks != 3 || run.frames != 6 || run.bytes != 12 {
-		t.Errorf("the run counted %d chunks, %d frames, %d bytes; want 3, 6, 12",
+	if run.chunks != 3 || run.frames != 3 || run.bytes != 12 {
+		t.Errorf("the run counted %d chunks, %d frames, %d bytes; want 3, 3, 12",
 			run.chunks, run.frames, run.bytes)
 	}
 

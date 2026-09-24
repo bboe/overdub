@@ -30,7 +30,7 @@ func (s *fakeStream) Write(at time.Time, pcm []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.at = append(s.at, at)
-	s.frames = append(s.frames, len(pcm)/(StreamBitDepth/8))
+	s.frames = append(s.frames, len(pcm)/frameBytes)
 	s.pcm = append(s.pcm, pcm...)
 	return nil
 }

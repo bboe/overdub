@@ -19,7 +19,7 @@ func samples(t *testing.T) []int16 {
 }
 
 func TestChimeIsTheLengthItClaims(t *testing.T) {
-	want := int(chimeSeconds*ChimeRate) * 2
+	want := int(chimeSeconds*ChimeRate) * ChimeChannels * 2
 	if got := len(chimePCM()); got != want {
 		t.Errorf("got %d bytes, want %d", got, want)
 	}
@@ -52,6 +52,19 @@ func TestChimeIsAudibleWithoutRailing(t *testing.T) {
 	}
 	if railed > 0 {
 		t.Errorf("%d samples are at full scale, so the gain clips", railed)
+	}
+}
+
+func TestTheChimeSoundsTheSameInEveryChannel(t *testing.T) {
+	s := samples(t)
+	for i := 0; i < len(s); i += ChimeChannels {
+		for ch := 1; ch < ChimeChannels; ch++ {
+			if s[i+ch] != s[i] {
+				t.Fatalf("frame %d is %v; the chime is one voice, and a speaker that sums"+
+					" the channels would play it at the wrong level", i/ChimeChannels,
+					s[i:i+ChimeChannels])
+			}
+		}
 	}
 }
 

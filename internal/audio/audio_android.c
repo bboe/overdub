@@ -6,7 +6,7 @@
 
 #include <string.h>
 
-#define CHUNK 960
+#define CHUNK 1920
 #define NUM_BUFFERS 8
 
 static unsigned char pool[NUM_BUFFERS][CHUNK];

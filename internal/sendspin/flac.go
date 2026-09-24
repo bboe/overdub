@@ -20,6 +20,9 @@ const (
 	flacRateFromHeader  = 0x0
 	flacRate48kHz       = 0xa
 	flacDepth16Bit      = 0x4
+	flacTwoChannels     = 0x1
+	flacLeftSide        = 0x8
+	flacMidSide         = 0xa
 	flacChunkFrames     = 4608 // the streamable subset's largest block at 48 kHz
 )
 
@@ -60,7 +63,8 @@ func flacFrameInStreamFormat(head []byte) bool {
 	channels := head[3] >> 4     // channel assignment
 	depth := head[3] >> 1 & 0x07 // sample size
 	return (rate == flacRateFromHeader || rate == flacRate48kHz) &&
-		int(channels) == StreamChannels-1 && depth == flacDepth16Bit
+		(channels == flacTwoChannels || channels >= flacLeftSide && channels <= flacMidSide) &&
+		depth == flacDepth16Bit
 }
 
 func decodeFLAC(audio []byte) ([]byte, error) {

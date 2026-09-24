@@ -17,22 +17,23 @@ import (
 
 const flacVectorBlock = 4608
 
-func flacPattern(n int) []int16 {
-	out := make([]int16, n)
-	x := uint32(1)
-	for i := range out {
+func flacStereo(frames int) []int16 {
+	out := make([]int16, 0, 2*frames)
+	x, y := uint32(1), uint32(12345)
+	for i := range frames {
 		x = x*1103515245 + 12345
+		y = y*1103515245 + 12345
 		tri := i % 200
 		if tri >= 100 {
 			tri = 200 - tri
 		}
-		out[i] = int16(tri*160 - 8000 + int(x>>24) - 128)
+		left := tri*160 - 8000 + int(x>>24) - 128
+		out = append(out, int16(left), int16(left>>1+int(y>>25)-64))
 	}
 	return out
 }
 
-func flacVectorPCM() []byte {
-	samples := append(flacPattern(2*flacVectorBlock), make([]int16, flacVectorBlock)...)
+func pcmOf(samples []int16) []byte {
 	pcm := make([]byte, 0, 2*len(samples))
 	for _, v := range samples {
 		pcm = binary.LittleEndian.AppendUint16(pcm, uint16(v))
@@ -40,9 +41,18 @@ func flacVectorPCM() []byte {
 	return pcm
 }
 
+func flacVectorPCM() []byte {
+	return pcmOf(append(flacStereo(2*flacVectorBlock), make([]int16, 2*flacVectorBlock)...))
+}
+
 func flacVector(t testing.TB) (header []byte, frames [][]byte) {
 	t.Helper()
-	b, err := os.ReadFile("testdata/aiosendspin-mono.flac")
+	return flacFile(t, "aiosendspin-stereo.flac")
+}
+
+func flacFile(t testing.TB, name string) (header []byte, frames [][]byte) {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,12 +137,14 @@ func flacCRC16(b []byte) uint16 {
 func constantFrame(rate byte, block int, value int16) []byte {
 	f := []byte{0xff, 0xf8,
 		0x70 | rate, // block size in 16 bits after the header
-		0x08,        // mono, 16-bit
+		0x18,        // 2 independent channels, 16-bit
 		0x00}        // frame number 0
 	f = binary.BigEndian.AppendUint16(f, uint16(block-1))
 	f = append(f, flacCRC8(f))
-	f = append(f, 0x00) // a constant subframe
-	f = binary.BigEndian.AppendUint16(f, uint16(value))
+	for range 2 {
+		f = append(f, 0x00) // a constant subframe
+		f = binary.BigEndian.AppendUint16(f, uint16(value))
+	}
 	return binary.BigEndian.AppendUint16(f, flacCRC16(f))
 }
 
@@ -162,11 +174,35 @@ func TestAFLACStreamDecodesToTheSamplesThatWereEncoded(t *testing.T) {
 	}
 }
 
+func TestEveryStereoLayoutDecodesToTheSamplesThatWereEncoded(t *testing.T) {
+	for name, code := range map[string]byte{
+		"independent": flacTwoChannels,
+		"left-side":   flacLeftSide,
+		"right-side":  flacLeftSide + 1,
+		"mid-side":    flacMidSide,
+	} {
+		header, frames := flacFile(t, "stereo-"+name+".flac")
+		if got := frames[0][3] >> 4; got != code {
+			t.Fatalf("%s: the vector's frame uses layout %d, want %d, so it tests another"+
+				" layout", name, got, code)
+		}
+		s := flacStarted(t, base64.StdEncoding.EncodeToString(header))
+		c, err := s.AudioChunk(chunkBody(1, frames[0]))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if want := pcmOf(flacStereo(c.Frames())); !bytes.Equal(c.PCM, want) {
+			t.Errorf("%s: the decoded audio differs from what was encoded; a layout rebuilt"+
+				" wrongly swaps or smears the channels", name)
+		}
+	}
+}
+
 func TestSeveralFLACFramesInOneChunkAllDecode(t *testing.T) {
 	var chunk, want []byte
 	for v := range int16(4) {
 		chunk = append(chunk, constantFrame(flacRate48kHz, flacChunkFrames/4, 100*v)...)
-		for range flacChunkFrames / 4 {
+		for range 2 * flacChunkFrames / 4 {
 			want = binary.LittleEndian.AppendUint16(want, uint16(100*v))
 		}
 	}
@@ -193,7 +229,9 @@ func TestAFLACFrameInAnotherFormatIsRefusedBeforeTheDecoderSeesIt(t *testing.T) 
 		{"a bit depth left to STREAMINFO, which the decoder reads as 0 bits",
 			func(b []byte) { b[3] &^= 0x0e }},
 		{"24-bit", func(b []byte) { b[3] = b[3]&^0x0e | 0x6<<1 }},
-		{"stereo", func(b []byte) { b[3] = b[3]&0x0f | 0x1<<4 }},
+		{"mono", func(b []byte) { b[3] = b[3] & 0x0f }},
+		{"3 channels", func(b []byte) { b[3] = b[3]&0x0f | 0x2<<4 }},
+		{"a reserved channel layout", func(b []byte) { b[3] = b[3]&0x0f | 0xb<<4 }},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			var out lockedLog
@@ -263,11 +301,11 @@ func TestAFLACStreamStartNeedsAHeaderForItsOwnFormat(t *testing.T) {
 		{"a bare STREAMINFO block", b64(good), true},
 		{"no header", "", false},
 		{"a header that is not base64", "fLaC!!", false},
-		{"a STREAMINFO at 44.1 kHz", b64(wrapped(streamInfo(44100, 1, 16))), false},
-		{"a stereo STREAMINFO", b64(wrapped(streamInfo(StreamRate, 2, 16))), false},
+		{"a STREAMINFO at 44.1 kHz", b64(wrapped(streamInfo(44100, StreamChannels, 16))), false},
+		{"a mono STREAMINFO", b64(wrapped(streamInfo(StreamRate, 1, 16))), false},
 		{"a 5-channel STREAMINFO", b64(wrapped(streamInfo(StreamRate, 5, 16))), false},
-		{"a 24-bit STREAMINFO", b64(wrapped(streamInfo(StreamRate, 1, 24))), false},
-		{"a 32-bit STREAMINFO", b64(wrapped(streamInfo(StreamRate, 1, 32))), false},
+		{"a 24-bit STREAMINFO", b64(wrapped(streamInfo(StreamRate, StreamChannels, 24))), false},
+		{"a 32-bit STREAMINFO", b64(wrapped(streamInfo(StreamRate, StreamChannels, 32))), false},
 		{"a STREAMINFO cut short", b64(wrapped(good)[:20]), false},
 		{"a bare block of the wrong length", b64(good[:33]), false},
 		{"a bare block 1 byte long", b64(append(slices.Clone(good), 0)), false},
@@ -325,9 +363,9 @@ func TestAFLACFrameLeavingItsRateToTheHeaderDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a frame naming no rate of its own was refused: %v", err)
 	}
-	for i := range c.Frames() {
+	for i := range len(c.PCM) / 2 {
 		if v := int16(binary.LittleEndian.Uint16(c.PCM[2*i:])); v != 1234 {
-			t.Fatalf("frame %d decoded as %d, want 1234", i, v)
+			t.Fatalf("sample %d decoded as %d, want 1234", i, v)
 		}
 	}
 	if c.Frames() != 16 {
@@ -361,8 +399,8 @@ func TestAFLACChunkDecodesToNoMoreThanTheSubsetsLargestBlock(t *testing.T) {
 	}
 	tiny := constantFrame(flacRate48kHz, 1<<16-1, 0)
 	if _, err := s.AudioChunk(chunkBody(1, tiny)); !errors.Is(err, errFLACLong) {
-		t.Errorf("a %d-byte frame claiming 65535 samples came back as %v; on a Dot it"+
-			" costs 4.0 ms to decode, 12 times a subset block", len(tiny), err)
+		t.Errorf("a %d-byte frame claiming 65535 frames came back as %v; on a Dot it"+
+			" costs 5.6 ms to decode, 16 times a subset block", len(tiny), err)
 	}
 	bomb := slices.Repeat(tiny, (maxMessage-1-chunkStampBytes)/len(tiny))
 	if _, err := s.AudioChunk(chunkBody(1, bomb)); !errors.Is(err, errFLACLong) {
@@ -379,11 +417,11 @@ func TestAPCMStreamAfterAFLACOneTakesPCMAgain(t *testing.T) {
 	}
 	p := ours()
 	startWith(t, s, &p)
-	c, err := s.AudioChunk(chunkBody(1, []byte{1, 2}))
+	c, err := s.AudioChunk(chunkBody(1, []byte{1, 2, 3, 4}))
 	if err != nil {
 		t.Fatalf("a pcm stream after a flac one still decodes flac: %v", err)
 	}
-	if !bytes.Equal(c.PCM, []byte{1, 2}) {
+	if !bytes.Equal(c.PCM, []byte{1, 2, 3, 4}) {
 		t.Errorf("the pcm came back as %v", c.PCM)
 	}
 }

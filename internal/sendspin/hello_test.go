@@ -327,8 +327,8 @@ func TestClientHelloIsExactlyThisOnTheWire(t *testing.T) {
 		`"device_info":{"product_name":"Echo Dot (2nd Generation)","manufacturer":"Amazon",` +
 		`"mac_address":"00:00:00:00:00:01"},` +
 		`"supported_roles":["player@v1"],` +
-		`"player@v1_support":{"supported_formats":[{"codec":"flac","channels":1,` +
-		`"sample_rate":48000,"bit_depth":16},{"codec":"pcm","channels":1,` +
+		`"player@v1_support":{"supported_formats":[{"codec":"flac","channels":2,` +
+		`"sample_rate":48000,"bit_depth":16},{"codec":"pcm","channels":2,` +
 		`"sample_rate":48000,"bit_depth":16}],"buffer_capacity":65536,` +
 		`"supported_commands":[]},"unpaired_access":{"enabled":true}}}`
 	if string(got) != want {
@@ -362,7 +362,7 @@ func TestTheDeclaredNamesAreFixed(t *testing.T) {
 		got, want int
 	}{
 		{"sample rate", StreamRate, 48000},
-		{"channels", StreamChannels, 1},
+		{"channels", StreamChannels, 2},
 		{"bit depth", StreamBitDepth, 16},
 	} {
 		if c.got != c.want {

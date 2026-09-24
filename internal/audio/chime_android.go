@@ -107,7 +107,7 @@ func (c *Chime) look() {
 
 func (c *Chime) write() {
 	defer close(c.done)
-	block := make([]int16, BlockFrames)
+	block := make([]int16, BlockSamples)
 	buf := make([]byte, BlockBytes)
 	for {
 		c.look()

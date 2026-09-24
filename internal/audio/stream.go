@@ -60,13 +60,20 @@ type queued struct {
 	place int64
 }
 
-func blend(block []int16, from, to int16) {
-	n := int64(len(block)) + 1
-	for i := range block {
-		step := (int64(to) - int64(from)) * int64(i+1) / n
-		block[i] = int16(int64(from) + step)
+func blend(block []int16, from, to []int16) {
+	frames := len(block) / ChimeChannels
+	n := int64(frames) + 1
+	for i := range frames {
+		for ch := range ChimeChannels {
+			step := (int64(to[ch]) - int64(from[ch])) * int64(i+1) / n
+			block[i*ChimeChannels+ch] = int16(int64(from[ch]) + step)
+		}
 	}
 }
+
+func (c *queued) frames() int { return len(c.pcm) / ChimeChannels }
+
+func (c *queued) frame(i int) []int16 { return c.pcm[i*ChimeChannels : (i+1)*ChimeChannels] }
 
 func (s *Stream) smoothed(err int64) int64 {
 	s.smooth += ((err << smoothBits) - s.smooth) / smoothOver
@@ -123,7 +130,7 @@ type Stream struct {
 	slips   int
 
 	began   bool
-	lastOut int16
+	lastOut [ChimeChannels]int16
 	smooth  int64
 	easedAt int64
 }
@@ -261,22 +268,24 @@ func (s *Stream) read(block []int16) (int, bool) {
 		s.first = time.Now()
 	}
 	clear(block)
+	frames := len(block) / ChimeChannels
 	filled := 0
 	blended, trimmed := 0, 0
 	if s.anchored {
 		filled, blended, trimmed = s.fill(block)
 	}
 	s.placed += int64(filled)
-	s.silence += int64(len(block) - filled - blended)
+	s.silence += int64(frames - filled - blended)
 	s.eased += int64(blended + trimmed)
-	s.index += int64(len(block))
+	s.index += int64(frames)
 	s.blocks++
 	return len(block), true
 }
 
 func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
+	frames := len(block) / ChimeChannels
 	pos := 0
-	for pos < len(block) && len(s.queue) > 0 {
+	for pos < frames && len(s.queue) > 0 {
 		c := &s.queue[0]
 		if len(c.pcm) == 0 {
 			s.queue = s.queue[1:]
@@ -294,14 +303,14 @@ func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
 			}
 			if !s.began || s.jump || err > snapAbove || err < -snapAbove {
 				step, s.smooth = err, 0
-				s.jump = s.jump && err <= -int64(len(c.pcm))
+				s.jump = s.jump && err <= -int64(c.frames())
 			}
 			c.eased = true
 			c.soft = step != err
 			c.place = want + step
 		}
 		start := c.place + int64(c.off)
-		left := int64(len(c.pcm) - c.off)
+		left := int64(c.frames() - c.off)
 		switch {
 		case start+left <= want:
 			s.drop(left)
@@ -314,29 +323,34 @@ func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
 			}
 			s.skip(want - start)
 		case start > want:
-			n := min(start-want, int64(len(block)-pos))
+			n := int(min(start-want, int64(frames-pos)))
 			if c.soft {
-				blend(block[pos:pos+int(n)], s.lastOut, c.pcm[c.off])
-				blended += int(n)
+				blend(block[pos*ChimeChannels:(pos+n)*ChimeChannels], s.lastOut[:],
+					c.frame(c.off))
+				blended += n
 			}
-			pos += int(n)
+			pos += n
 		default:
-			n := copy(block[pos:], c.pcm[c.off:])
+			n := copy(block[pos*ChimeChannels:], c.pcm[c.off*ChimeChannels:]) / ChimeChannels
 			if c.soft && c.seam && n > 0 {
 				c.seam = false
-				block[pos] = int16((int64(s.lastOut) + int64(block[pos])) / 2)
+				for ch := range ChimeChannels {
+					at := pos*ChimeChannels + ch
+					block[at] = int16((int64(s.lastOut[ch]) + int64(block[at])) / 2)
+				}
 			}
-			s.lastOut, s.began = block[pos+n-1], true
+			copy(s.lastOut[:], block[(pos+n-1)*ChimeChannels:])
+			s.began = true
 			c.off += n
 			s.held -= int64(n)
 			pos, filled = pos+n, filled+n
-			if c.off == len(c.pcm) {
+			if c.off == c.frames() {
 				s.queue = s.queue[1:]
 			}
 		}
 	}
-	if pos < len(block) {
-		s.lastOut = 0
+	if pos < frames {
+		s.lastOut = [ChimeChannels]int16{}
 	}
 	return filled, blended, trimmed
 }

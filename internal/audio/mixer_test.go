@@ -140,6 +140,10 @@ func TestABlockIsTenMillisecondsOfTheFormatTheChimeDeclares(t *testing.T) {
 		t.Errorf("a block is %d bytes against %d frames of %d channel 16-bit audio",
 			BlockBytes, BlockFrames, ChimeChannels)
 	}
+	if BlockSamples != BlockFrames*ChimeChannels {
+		t.Errorf("a block is %d samples against %d frames of %d channels", BlockSamples,
+			BlockFrames, ChimeChannels)
+	}
 }
 
 func TestWriteAllHandsOverEveryByteInOrder(t *testing.T) {

@@ -28,7 +28,7 @@ POLL_S = 0.1
 WANTED_EXCHANGES = 3
 CHUNK_FRAMES = RATE // 50
 BUFFER_US = 2_000_000
-FORMAT = AudioFormat(sample_rate=RATE, bit_depth=16, channels=1)
+FORMAT = AudioFormat(sample_rate=RATE, bit_depth=16, channels=2)
 
 
 def count_time_exchanges() -> list[int]:
@@ -59,12 +59,12 @@ class _Complaints(logging.Handler):
 async def play(client, seconds: float) -> None:
     samples = pattern(int(RATE * seconds))
     stream = client.group.start_stream()
-    for at in range(0, len(samples), CHUNK_FRAMES):
-        part = samples[at : at + CHUNK_FRAMES]
+    for at in range(0, len(samples), 2 * CHUNK_FRAMES):
+        part = samples[at : at + 2 * CHUNK_FRAMES]
         stream.prepare_audio(struct.pack(f"<{len(part)}h", *part), FORMAT)
         await stream.commit_audio()
         await stream.sleep_to_limit_buffer(BUFFER_US)
-    print(f"streamed            = {len(samples)} samples")
+    print(f"streamed            = {len(samples) // 2} frames")
     await asyncio.sleep(BUFFER_US / 1_000_000 + 1)
     await client.group.stop()
 

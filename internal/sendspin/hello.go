@@ -331,6 +331,6 @@ func (s *Session) Goodbye(reason string) error {
 
 const (
 	StreamRate     = 48000
-	StreamChannels = 1
+	StreamChannels = 2
 	StreamBitDepth = 16
 )
