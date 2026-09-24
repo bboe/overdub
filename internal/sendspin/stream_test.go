@@ -54,7 +54,7 @@ func TestAStreamInAFormatThisPlayerCannotPlayDoesNotOpen(t *testing.T) {
 		what string
 		with func(*streamPlayer)
 	}{
-		{"a codec nothing here decodes", func(p *streamPlayer) { p.Codec = "flac" }},
+		{"a codec nothing here decodes", func(p *streamPlayer) { p.Codec = "opus" }},
 		{"a sample rate the player is not open at", func(p *streamPlayer) { p.SampleRate = 44100 }},
 		{"stereo against one speaker", func(p *streamPlayer) { p.Channels = 2 }},
 		{"a bit depth the mixer does not sum", func(p *streamPlayer) { p.BitDepth = 24 }},
@@ -90,7 +90,7 @@ func TestARefusedFormatDoesNotCloseAStreamThatWasPlaying(t *testing.T) {
 	startWith(t, s, &p)
 
 	bad := ours()
-	bad.Codec = "flac"
+	bad.Codec = "opus"
 	startWith(t, s, &bad)
 	if s.Streaming() {
 		t.Error("the session still reports a stream it cannot play, so audio would be" +
@@ -287,6 +287,9 @@ func TestTheFormatThisClientAdvertisesIsOneItAccepts(t *testing.T) {
 			SampleRate: f.SampleRate,
 			Channels:   f.Channels,
 			BitDepth:   f.BitDepth,
+		}
+		if f.Codec == codecFLAC {
+			p.CodecHeader = flacHeaderB64(t)
 		}
 		if !p.playable() {
 			t.Errorf("client/hello advertises %s and stream/start refuses it, so a server"+

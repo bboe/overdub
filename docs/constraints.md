@@ -47,9 +47,9 @@
 
 ## Dependencies
 
-- There are two direct dependencies, flynn/noise and x/net. Everything else is
-  hand-rolled where that is checkable in isolation, including the protobuf in
-  `internal/esphome/proto.go`.
+- There are 3 direct dependencies: flynn/noise, x/net and mewkiz/flac.
+  Everything else is hand-rolled where that is checkable in isolation,
+  including the protobuf in `internal/esphome/proto.go`.
 
 | dependency | why | licence | linked | size |
 |---|---|---|---|---|
@@ -57,6 +57,9 @@
 | `golang.org/x/crypto` | the Noise ciphers | BSD-3-Clause | yes | -- |
 | `golang.org/x/net` | `dns/dnsmessage`, for mDNS | BSD-3-Clause | yes | 69 KB |
 | `golang.org/x/sys` | required, indirect | BSD-3-Clause | no | -- |
+| `github.com/mewkiz/flac` | FLAC from a Sendspin server | Unlicense | yes | 71 KB |
+| `github.com/icza/bitio` | required, indirect | Apache-2.0 | no | -- |
+| `github.com/mewkiz/pkg`, `github.com/mewpkg/term` | required, indirect | Unlicense | no | -- |
 | Go standard library | every Go binary | BSD-3-Clause | yes | -- |
 
 - flynn/noise: the standard library has X25519 (`crypto/ecdh`) but no
@@ -74,6 +77,10 @@
 - Its closure outside the standard library is itself. Every mDNS library routes
   through `github.com/miekg/dns`: about 22,000 lines, and the smallest such
   library adds 11 packages.
+- mewkiz/flac: FLAC is lossless, so a decode is checked sample for sample
+  against what was encoded, which is the test a hand-rolled decoder would need
+  too. Only its decoder is linked: its 3 indirect modules serve the encoder, and
+  the binary holds no symbol from them. docs/sendspin.md has its 2 traps.
 
 ## Licences
 

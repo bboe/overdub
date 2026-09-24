@@ -8,7 +8,10 @@ import (
 	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
-const codecPCM = "pcm"
+const (
+	codecPCM  = "pcm"
+	codecFLAC = "flac"
+)
 
 type streamPlayer struct {
 	Codec       string `json:"codec"`
@@ -29,13 +32,26 @@ type streamRoles struct {
 }
 
 func (p *streamPlayer) playable() bool {
-	return p.Codec == codecPCM && p.SampleRate == StreamRate &&
-		p.Channels == StreamChannels && p.BitDepth == StreamBitDepth
+	if p.SampleRate != StreamRate || p.Channels != StreamChannels ||
+		p.BitDepth != StreamBitDepth {
+		return false
+	}
+	switch p.Codec {
+	case codecPCM:
+		return true
+	case codecFLAC:
+		return flacHeaderPlayable(p.CodecHeader)
+	}
+	return false
 }
 
 func (p *streamPlayer) String() string {
-	return fmt.Sprintf("%s %d Hz %d ch %d bit", untrustedlog.Cut(p.Codec), p.SampleRate,
+	format := fmt.Sprintf("%s %d Hz %d ch %d bit", untrustedlog.Cut(p.Codec), p.SampleRate,
 		p.Channels, p.BitDepth)
+	if p.Codec == codecFLAC && !flacHeaderPlayable(p.CodecHeader) {
+		format += " with a codec_header this player cannot read"
+	}
+	return format
 }
 
 func family(role string) string {
@@ -72,6 +88,7 @@ func (s *Session) StartStream(payload json.RawMessage) (*streamPlayer, error) {
 		return start.Player, nil
 	}
 	s.streaming = true
+	s.flac = start.Player.Codec == codecFLAC
 	return start.Player, nil
 }
 

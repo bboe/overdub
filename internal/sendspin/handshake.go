@@ -127,6 +127,7 @@ type Session struct {
 	roles    []string
 
 	streaming bool
+	flac      bool
 
 	clock *clock
 }

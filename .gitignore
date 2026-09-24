@@ -3,3 +3,4 @@ build/
 deploy/mapdump/mapdump.jar
 deploy/mapdump/classes/
 deploy/mapdump/out/
+__pycache__/

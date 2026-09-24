@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ type fakeStream struct {
 	mu        sync.Mutex
 	at        []time.Time
 	frames    []int
+	pcm       []byte
 	cleared   int
 	closed    int
 	finished  int
@@ -29,7 +31,14 @@ func (s *fakeStream) Write(at time.Time, pcm []byte) error {
 	defer s.mu.Unlock()
 	s.at = append(s.at, at)
 	s.frames = append(s.frames, len(pcm)/(StreamBitDepth/8))
+	s.pcm = append(s.pcm, pcm...)
 	return nil
+}
+
+func (s *fakeStream) audio() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.pcm)
 }
 
 func (s *fakeStream) Clear() {

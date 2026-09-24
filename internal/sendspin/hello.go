@@ -259,6 +259,11 @@ func (c Config) hello() clientHello {
 		SupportedPairMethods: offeredPairMethods(),
 		PlayerSupport: &playerSupport{
 			SupportedFormats: []audioFormat{{
+				Codec:      codecFLAC,
+				Channels:   StreamChannels,
+				SampleRate: StreamRate,
+				BitDepth:   StreamBitDepth,
+			}, {
 				Codec:      codecPCM,
 				Channels:   StreamChannels,
 				SampleRate: StreamRate,

@@ -119,6 +119,9 @@ A warm restart hides all of this.
   with `%v` are bounded only by the 512-byte line cut.
 - Counters are per `Log`, so each subsystem has its own budget and the disk
   sees the sum.
+- A library can log past all of this. `mewkiz/flac` writes to the standard log
+  for 2 sample-rate codes, so a FLAC frame's codes are checked before it is
+  decoded. docs/sendspin.md has the rest.
 - The rate alone is not enough: 21 lines a minute at the measured 311-byte
   worst case is 9 MB a day. After the 5,000th line one line says so, and then
   nothing a peer does is logged until restart, not even a dropped count.

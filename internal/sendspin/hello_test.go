@@ -170,12 +170,16 @@ func TestHelloDeclaresPlayerAndTheFormatWeCanPlay(t *testing.T) {
 	if h.PlayerSupport == nil {
 		t.Fatal("player@v1 is listed with no player@v1_support object")
 	}
-	if len(h.PlayerSupport.SupportedFormats) == 0 {
-		t.Fatal("no supported formats")
+	var codecs []string
+	for _, f := range h.PlayerSupport.SupportedFormats {
+		if f.SampleRate != StreamRate || f.Channels != StreamChannels || f.BitDepth != StreamBitDepth {
+			t.Errorf("offered format = %+v", f)
+		}
+		codecs = append(codecs, f.Codec)
 	}
-	f := h.PlayerSupport.SupportedFormats[0]
-	if f.Codec != "pcm" || f.SampleRate != StreamRate || f.Channels != StreamChannels || f.BitDepth != StreamBitDepth {
-		t.Errorf("preferred format = %+v", f)
+	if !slices.Equal(codecs, []string{codecFLAC, codecPCM}) {
+		t.Errorf("supported_formats offers %v, want flac first for the bandwidth and pcm"+
+			" after it, which every server must be able to send", codecs)
 	}
 	if len(h.SupportedPairMethods) != 0 {
 		t.Error("no pairing method is implemented yet, so none may be advertised")
@@ -186,11 +190,12 @@ func TestHelloDeclaresPlayerAndTheFormatWeCanPlay(t *testing.T) {
 }
 
 func TestHelloMatchesTheChimeFormat(t *testing.T) {
-	f := testConfig().hello().PlayerSupport.SupportedFormats[0]
-	if f.SampleRate != audio.ChimeRate || f.Channels != audio.ChimeChannels {
-		t.Errorf("stream format is %d Hz / %d channel(s) and the chime is %d Hz / %d; "+
-			"they share one player, so a mismatch is silence or a chime at the wrong pitch",
-			f.SampleRate, f.Channels, audio.ChimeRate, audio.ChimeChannels)
+	for _, f := range testConfig().hello().PlayerSupport.SupportedFormats {
+		if f.SampleRate != audio.ChimeRate || f.Channels != audio.ChimeChannels {
+			t.Errorf("%s is %d Hz / %d channel(s) and the chime is %d Hz / %d; they share"+
+				" one player, so a mismatch is silence or a chime at the wrong pitch",
+				f.Codec, f.SampleRate, f.Channels, audio.ChimeRate, audio.ChimeChannels)
+		}
 	}
 }
 
@@ -322,7 +327,8 @@ func TestClientHelloIsExactlyThisOnTheWire(t *testing.T) {
 		`"device_info":{"product_name":"Echo Dot (2nd Generation)","manufacturer":"Amazon",` +
 		`"mac_address":"00:00:00:00:00:01"},` +
 		`"supported_roles":["player@v1"],` +
-		`"player@v1_support":{"supported_formats":[{"codec":"pcm","channels":1,` +
+		`"player@v1_support":{"supported_formats":[{"codec":"flac","channels":1,` +
+		`"sample_rate":48000,"bit_depth":16},{"codec":"pcm","channels":1,` +
 		`"sample_rate":48000,"bit_depth":16}],"buffer_capacity":65536,` +
 		`"supported_commands":[]},"unpaired_access":{"enabled":true}}}`
 	if string(got) != want {

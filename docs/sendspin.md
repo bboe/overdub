@@ -23,10 +23,13 @@ Dot joins a synchronised group.
 - **Server-initiated.** The Dot advertises `_sendspin._tcp.local.` on 8928 and
   Music Assistant dials it. This reuses the mDNS responder and the firewall
   helpers, at the cost of the multi-server admission rules.
-- Role `player@v1`, format **`pcm`, 48000 Hz, mono, 16-bit**.
+- Role `player@v1`, formats **`flac`, then `pcm`**, both 48000 Hz, mono,
+  16-bit. A server takes the first it can encode.
   - Mono: the Dot has one speaker, and the server downmixes better than
-    AudioFlinger. The stream is about 0.77 Mbit/s.
-  - PCM: every server must support it, so nothing here decodes.
+    AudioFlinger. As PCM the stream is about 0.77 Mbit/s.
+  - FLAC is lossless, so it carries the same samples in fewer bytes: 60% and
+    68% of PCM on 2 test signals, a tone with light noise and one with more.
+  - PCM stays second: every server must support it.
   - It is the chime's format, so the chime and the stream share one player.
 
 ### The WebSocket is hand-rolled
@@ -200,11 +203,15 @@ the PSK matched in the handshake:
 
 ### What the Dot declares
 
-`player@v1`, one format, and `unpaired_access` enabled. The last lets Music
+`player@v1`, 2 formats, and `unpaired_access` enabled. The last lets Music
 Assistant play over a Sentinel-keyed connection once its operator approves the
 Dot.
 
-- `buffer_capacity` is 2 seconds of the format, 192,000 bytes.
+- `buffer_capacity` is 2 seconds of PCM, 192,000 bytes. The server counts FLAC
+  bytes against it too, so FLAC leads further: about 3 seconds at the ratios
+  above, and up to `aiosendspin`'s 30-second `max_duration_us` through a quiet
+  passage, where a block of silence is an 11-byte frame. `streamHold` is sized
+  for that cap.
 - `min_buffer_ms` is `sendspinBuffer`, 500.
 - `static_delay_ms` starts at **0**. It is not the place for the ~95 ms
   docs/audio.md measures: the spec says it is the delay *past* the audio port,
@@ -296,8 +303,45 @@ buffer and keeps it open. Each reaches the player and the session.
 - **`send_ahead` is not a wire field.** The server computes it from
   `min_buffer_ms`, `static_delay_ms` and `required_lead_time_ms`. The first
   chunk follows `stream/start` by about 1 ms.
-- `stream/request-format` is not implemented. With one format it is
-  unreachable.
+- `stream/request-format` is not implemented. The server picks from
+  `supported_formats` without it.
+
+### FLAC
+
+- `github.com/mewkiz/flac` decodes it. echolocal runs the same library on a
+  Dot. On a Dot, a 96 ms mono frame takes 3.4 to 4.4 ms, about 4% of one core,
+  and allocates 19 KB that nothing keeps.
+- Music Assistant sends it. On a Dot every chunk was placed, and the lead held
+  at 2.4 to 2.9 seconds after a first 30 seconds that reached 5.7. The daemon
+  used 14.6% of one core over 30 seconds of playback.
+- `codec_header` is base64 of `fLaC` and a STREAMINFO block, 42 bytes. A bare
+  34-byte STREAMINFO is accepted too, as `aiosendspin`'s own decoder accepts it.
+  A header that does not describe 48000 Hz mono 16-bit refuses the stream.
+- The header is read by hand, not by the library. `flac.New` parses a whole
+  metadata block before checking its type: a 40-byte header whose PICTURE block
+  claimed 128 MB allocated 128 MB, and every `stream/start` is read.
+- `aiosendspin` encodes through ffmpeg at compression level 5, which picks
+  4,608-sample blocks: 96 ms. Each chunk is 1 frame. A chunk of several frames
+  decodes within the cap below; a frame split across chunks does not.
+- Stopping the group drops the encoder's partial block. In the interop test the
+  last 3,840 of 96,000 samples never arrived.
+- The frame's sync, rate, channel and bit-depth codes are read before the
+  library sees it. `mewkiz/flac` writes to the standard log for the 24 and 176.4
+  kHz codes, which would be a line a frame outside `untrustedlog`. It also
+  decodes a bit depth left to STREAMINFO as 0 bits.
+- Its errors carry the frame's numbers. A refusal is 1 of 3 fixed messages, for
+  the once-per-message log above.
+- A chunk decodes to at most 4,608 frames: the streamable subset's largest
+  block at 48 kHz, and what `aiosendspin` sends. Each frame's block size is read
+  before its samples.
+- A 13-byte frame can claim 65,535 samples of silence. Uncapped, 1 message of
+  such frames decoded to 660 MB. On a Dot, 1 such frame took 4.0 ms and 393 KB
+  to decode, so about 250 a second held a core. A 4,608-sample one takes 0.34 ms
+  and 28 KB.
+- The cap bounds samples, not the library's allocations. It allocates up to
+  32,768 Rice partitions before reading them: a 9-byte frame allocated 256 KB on
+  ARM before failing, and 1 message of valid tiny frames 1 MB. It is garbage
+  nothing keeps, and costs less CPU than a real frame.
 
 ### What the log says while a stream runs
 
@@ -595,8 +639,7 @@ Each is refused, and each has a test that fails without it.
   ms plus the 1,500 adopted, and the ceiling to 3.473 seconds.
 - **The buffer does not pay for the delay.** A larger delay moves completion
   earlier, so the lead can reach `buffer_capacity + output_delay_ms`, and the
-  jitter buffer holds that lead less the delay. `bufferSeconds` stays 2 and
-  `streamHold` 4 seconds.
+  jitter buffer holds that lead less the delay. `bufferSeconds` stays 2.
 - A change logs 1 line per connection; the current figure rides on the
   30-second summary. Music Assistant's control is `immediate_apply`: one drag
   sent 23 values, 1.268 down to 1.097 seconds. A line each spent the 20-a-minute

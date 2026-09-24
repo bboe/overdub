@@ -2,6 +2,9 @@
 
 Run through internal/sendspin/interop_test.go, which passes the Dot's
 WebSocket URL and client_id. Exits non-zero with a reason on any mismatch.
+With --play-seconds, the client must have a player: the server streams that
+much of flac_vector.pattern in whatever format the client prefers, and the Go
+side checks what arrived.
 """
 
 from __future__ import annotations
@@ -9,17 +12,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import struct
 import sys
 
+from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ClientTimeMessage
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
+from flac_vector import RATE, pattern
 
 SETTLE_TIMEOUT_S = 15.0
 POLL_S = 0.1
 WANTED_EXCHANGES = 3
+CHUNK_FRAMES = RATE // 50
+BUFFER_US = 2_000_000
+FORMAT = AudioFormat(sample_rate=RATE, bit_depth=16, channels=1)
 
 
 def count_time_exchanges() -> list[int]:
@@ -47,7 +56,20 @@ class _Complaints(logging.Handler):
         self.lines.append(record.getMessage())
 
 
-async def run(url: str, client_id: str) -> int:
+async def play(client, seconds: float) -> None:
+    samples = pattern(int(RATE * seconds))
+    stream = client.group.start_stream()
+    for at in range(0, len(samples), CHUNK_FRAMES):
+        part = samples[at : at + CHUNK_FRAMES]
+        stream.prepare_audio(struct.pack(f"<{len(part)}h", *part), FORMAT)
+        await stream.commit_audio()
+        await stream.sleep_to_limit_buffer(BUFFER_US)
+    print(f"streamed            = {len(samples)} samples")
+    await asyncio.sleep(BUFFER_US / 1_000_000 + 1)
+    await client.group.stop()
+
+
+async def run(url: str, client_id: str, play_seconds: float) -> int:
     loop = asyncio.get_running_loop()
     exchanges = count_time_exchanges()
     complaints = _Complaints()
@@ -74,6 +96,7 @@ async def run(url: str, client_id: str) -> int:
                 client.is_connected
                 and client.info_or_none is not None
                 and exchanges[0] >= WANTED_EXCHANGES
+                and (not play_seconds or client.available)
             ):
                 break
             await asyncio.sleep(POLL_S)
@@ -103,7 +126,12 @@ async def run(url: str, client_id: str) -> int:
                 f"the client asked the time {exchanges[0]} times in {SETTLE_TIMEOUT_S}s,"
                 f" want {WANTED_EXCHANGES}"
             )
-        if client.available:
+        if play_seconds:
+            if not client.available:
+                failures.append("a client with a player never reported available")
+            else:
+                await play(client, play_seconds)
+        elif client.available:
             failures.append("the client reported available while it has no clock or audio")
         for line in complaints.lines:
             if "non-compliant" in line or "Malformed" in line:
@@ -123,8 +151,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--client-id", required=True)
+    ap.add_argument("--play-seconds", type=float, default=0)
     args = ap.parse_args()
-    return asyncio.run(run(args.url, args.client_id))
+    return asyncio.run(run(args.url, args.client_id, args.play_seconds))
 
 
 if __name__ == "__main__":

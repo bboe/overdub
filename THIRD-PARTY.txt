@@ -137,6 +137,15 @@ the copy-of-the-licence and NOTICE requirements. So they are named here and
 their licence is not reproduced.
 
 ---------------------------------------------------------------------------
+github.com/mewkiz/flac -- the FLAC decoder in internal/sendspin/flac.go
+Unlicense: dedicated to the public domain, so it needs no notice.
+
+It requires 3 modules indirectly. github.com/mewkiz/pkg and github.com/mewpkg/term
+are Unlicense too. github.com/icza/bitio is Apache-2.0. The binary's build info
+lists all 3, and none contributes a symbol: only the encoder calls them, and the
+linker drops it.
+
+---------------------------------------------------------------------------
 golang.org/x/sys is required indirectly by go.mod and carries this same Go
 Authors licence. It is not linked into the ARM build: the binary's own build
 info does not list it, and it contributes no symbols.

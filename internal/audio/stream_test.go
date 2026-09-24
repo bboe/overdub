@@ -259,9 +259,11 @@ func TestAGapIsSilenceRatherThanTheNextChunkPulledForward(t *testing.T) {
 func TestTheStreamHoldsABoundedAmountOfAudio(t *testing.T) {
 	s := quiet()
 	now := time.Now()
-	for i := range streamHold / ChimeRate {
+	for i := range 30 {
 		if err := s.Write(now, level(ChimeRate, 100)); err != nil {
-			t.Fatalf("second %d of %s: %v", i, frameTime(streamHold), err)
+			t.Fatalf("second %d of the 30 aiosendspin may send ahead: %v; buffer_capacity"+
+				" counts bytes, so a FLAC stream through a quiet passage reaches that cap",
+				i, err)
 		}
 	}
 	if err := s.Write(now, level(1, 100)); err == nil {

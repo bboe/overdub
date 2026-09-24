@@ -28,15 +28,23 @@ func playerBinary(kind byte) bool {
 	return kind >= binaryPlayerFirst && kind <= binaryPlayerLast
 }
 
-func parseChunk(body []byte) (*audioChunk, error) {
+func chunkStamp(body []byte) (int64, error) {
 	if len(body) < chunkStampBytes {
-		return nil, fmt.Errorf("%w: an audio chunk too short to carry its timestamp",
+		return 0, fmt.Errorf("%w: an audio chunk too short to carry its timestamp",
 			errTransport)
 	}
 	stamp := int64(binary.BigEndian.Uint64(body[:chunkStampBytes]))
 	if !onAClock(stamp) {
-		return nil, fmt.Errorf("%w: an audio chunk due off any clock this player keeps",
+		return 0, fmt.Errorf("%w: an audio chunk due off any clock this player keeps",
 			errTransport)
+	}
+	return stamp, nil
+}
+
+func parseChunk(body []byte) (*audioChunk, error) {
+	stamp, err := chunkStamp(body)
+	if err != nil {
+		return nil, err
 	}
 	pcm := body[chunkStampBytes:]
 	if len(pcm)%frameBytes != 0 {
@@ -46,9 +54,24 @@ func parseChunk(body []byte) (*audioChunk, error) {
 	return &audioChunk{ServerTime: stamp, PCM: pcm}, nil
 }
 
+func parseFLACChunk(body []byte) (*audioChunk, error) {
+	stamp, err := chunkStamp(body)
+	if err != nil {
+		return nil, err
+	}
+	pcm, err := decodeFLAC(body[chunkStampBytes:])
+	if err != nil {
+		return nil, err
+	}
+	return &audioChunk{ServerTime: stamp, PCM: pcm}, nil
+}
+
 func (s *Session) AudioChunk(body []byte) (*audioChunk, error) {
 	if !s.streaming {
 		return nil, nil
+	}
+	if s.flac {
+		return parseFLACChunk(body)
 	}
 	return parseChunk(body)
 }

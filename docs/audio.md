@@ -314,9 +314,12 @@ one at a time, as there is one player.
 - The queue is ordered by due time. Only the head is examined, so one chunk
   stamped far ahead would otherwise hold everything behind it, silently. A
   chunk the mixer is partway through keeps its place.
-- `streamHold` is 4 seconds of frames; Music Assistant fills to 2.4 seconds.
+- `streamHold` is 30 seconds of frames, `aiosendspin`'s `max_duration_us`.
+  `buffer_capacity` counts bytes, and FLAC through a quiet passage reaches that
+  cap; PCM fills to 2.4 seconds. 30 seconds of 16-bit mono is 2.9 MB, against
+  a daemon resident at 9.3 MB and about 105 MB available on the Dot.
   `streamAhead` refuses a chunk due more than 30 seconds either way.
-- `streamChunks` (400) bounds entries, because a server picks the frames per
+- `streamChunks` (3,000) bounds entries, because a server picks the frames per
   chunk. With 1-frame chunks, an earliest-stamped insert walks the whole queue
   under the mutex the mixer takes for every block. On a development machine:
   10,000 chunks cost 0.26 seconds, 50,000 cost 7.3 seconds, 200,000 reached

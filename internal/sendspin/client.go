@@ -537,8 +537,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			default:
 				play.stop()
 				c.Play.Printf("sendspin: %q offered a %s stream, and this player takes %s"+
-					" %d Hz %d ch %d bit", name, offered, codecPCM, StreamRate,
-					StreamChannels, StreamBitDepth)
+					" or %s %d Hz %d ch %d bit", name, offered, codecFLAC, codecPCM,
+					StreamRate, StreamChannels, StreamBitDepth)
 			}
 		case typeStreamEnd:
 			ours, err := session.EndStream(payload)

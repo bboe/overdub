@@ -13,7 +13,7 @@ const (
 	frameBytes = ChimeChannels * 2
 
 	streamAhead  = 30 * time.Second
-	streamHold   = 4 * ChimeRate
+	streamHold   = 30 * ChimeRate
 	streamChunks = streamHold / BlockFrames
 
 	anchorSettle = 100 * time.Millisecond
