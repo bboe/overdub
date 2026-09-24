@@ -63,6 +63,12 @@ device until a reboot.
   size are both 1,920 bytes with nothing tying them together.
 - Any failed write stops the writer, and it logs once:
   `the writer stopped: ...; the Dot is silent until the daemon restarts`.
+- Seen once, 4 minutes after a Bluetooth speaker dropped mid-stream. The next
+  stream opened the idle speaker output, which took 1.2 seconds to start its
+  amp. 0.7 seconds after that, AudioFlinger logged
+  `BUFFER TIMEOUT: remove(4096) from active list`, and 67 ms later the writer
+  gave up. Alexa kept playing, and a daemon restart cleared it. The cause is
+  not known: the same drop, idle gaps and restarts did not repeat it.
 - `Close` does not wait for a sound to end. The writer exits at its next refused
   write, and the player is destroyed with up to 80 ms queued. The wait only
   stops anything writing into a destroyed player.
