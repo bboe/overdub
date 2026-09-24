@@ -3,6 +3,7 @@ package sendspin
 import (
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -27,18 +28,7 @@ func serveOn(t *testing.T, c *Client, ln net.Listener) {
 	go func() { _ = c.Serve(ln) }()
 	t.Cleanup(func() {
 		ln.Close()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			n := c.conns()
-			if n == 0 {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Errorf("%d connections were still being served when the test ended", n)
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		waitForConns(t, c, 0, "connections were still being served when the test ended")
 	})
 }
 
@@ -61,6 +51,25 @@ func nextJSON(t *testing.T, peer *wsPeer, server *serverSide) (string, json.RawM
 		kind, payload := readJSON(t, peer, server)
 		if kind != typeClientTime {
 			return kind, payload
+		}
+	}
+}
+
+func handled(t *testing.T, peer *wsPeer, server *serverSide) {
+	t.Helper()
+	if _, err := peer.conn.Write(frame(true, opPing, []byte("handled"))); err != nil {
+		t.Fatalf("writing a ping: %v", err)
+	}
+	for {
+		if _, err := peer.r.Peek(1); err != nil {
+			t.Fatalf("the client never answered a ping sent after everything else, so it"+
+				" stopped reading or dropped the connection: %v", err)
+		}
+		switch op, body := peer.read(); {
+		case op == opPong && string(body) == "handled":
+			return
+		case op == opBinary:
+			server.open(t, body)
 		}
 	}
 }
@@ -189,19 +198,11 @@ func TestServeAdmitsANewServerAfterTheFirstGoesAway(t *testing.T) {
 	peer, _, _ := bringUp(t, c, ln)
 	peer.conn.Close()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(t, "the slot to be released after the server went away", func() bool {
 		c.mu.Lock()
-		held := c.held
-		c.mu.Unlock()
-		if held == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the slot was never released after the server went away")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer c.mu.Unlock()
+		return c.held == nil
+	})
 	if _, _, state := bringUp(t, c, ln); state.Player == nil {
 		t.Error("the second server was not brought up")
 	}
@@ -346,13 +347,8 @@ func TestSwitchingOffWhileAPeerIsMidHandshakeDoesNotPanic(t *testing.T) {
 	}
 	defer nc.Close()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for c.conns() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the connection was never tracked, so the nil session is not reached")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, "the connection to be tracked, or the nil session is not reached",
+		func() bool { return c.conns() > 0 })
 
 	c.Close()
 }
@@ -388,7 +384,7 @@ func TestTheGoodbyeIsBoundedByItsOwnDeadlineNotTheIdleOne(t *testing.T) {
 }
 
 func TestTheGoodbyeIsBoundedEvenWhenAWriteIsAlreadyBlocked(t *testing.T) {
-	session, _, _ := pairedSession(t)
+	session, _, peer := pairedSession(t)
 	session.ws.setIdle(3 * time.Second)
 
 	c := &Client{Config: testConfig(), goodbyeAfter: 100 * time.Millisecond}
@@ -404,7 +400,10 @@ func TestTheGoodbyeIsBoundedEvenWhenAWriteIsAlreadyBlocked(t *testing.T) {
 		_ = session.Goodbye(goodbyeShutdown)
 	}()
 	<-started
-	time.Sleep(100 * time.Millisecond)
+	var first [1]byte
+	if _, err := io.ReadFull(peer.conn, first[:]); err != nil {
+		t.Fatalf("the goodbye never began its write: %v", err)
+	}
 
 	done := make(chan time.Duration, 1)
 	go func() {

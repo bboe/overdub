@@ -56,17 +56,8 @@ func TestServeRefusesPastTheConnectionCap(t *testing.T) {
 		t.Cleanup(func() { nc.Close() })
 		held = append(held, nc)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		n := c.conns()
-		if n >= maxConns {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d connections were accepted", n, maxConns)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, "every connection up to the cap to be accepted",
+		func() bool { return c.conns() >= maxConns })
 
 	extra, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -99,13 +90,8 @@ func TestPeerLinesSayWhichSurfaceSpentTheBudget(t *testing.T) {
 	client := &Client{Config: Config{Name: "kitchen"}}
 	serveOn(t, client, ln)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for client.subject() == "" {
-		if time.Now().After(deadline) {
-			t.Fatal("Serve never named the subject its peer lines are spent under")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, "Serve to name the subject its peer lines are spent under",
+		func() bool { return client.subject() != "" })
 	if got := client.subject(); got != "sendspin" {
 		t.Errorf("peer lines are spent under %q, want %q: an unattributed suppressed-count"+
 			" line does not say which surface a peer was spending against", got, "sendspin")
@@ -139,7 +125,7 @@ func TestAnActivationSpendsThePeerBudget(t *testing.T) {
 			ActiveRoles: roles(rolePlayerV1),
 		}))
 	}
-	time.Sleep(200 * time.Millisecond)
+	handled(t, peer, server)
 
 	if wrote := len(out.String()) - before; wrote > 0 {
 		t.Errorf("twenty activations wrote %d bytes past the budget; a peer can repeat"+
@@ -166,7 +152,7 @@ func TestManyRolesCannotStretchOneLogLine(t *testing.T) {
 		Activities:  []string{activityPlayback},
 		ActiveRoles: &repeated,
 	}))
-	time.Sleep(200 * time.Millisecond)
+	handled(t, peer, server)
 
 	for _, line := range strings.Split(out.String(), "\n") {
 		if len(line) > 512 {
@@ -187,20 +173,12 @@ func TestGivingUpEveryRoleGivesUpTheSlot(t *testing.T) {
 		ActiveRoles: &none,
 	}))
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(t, "a session holding no role to give up the slot, or no other server can"+
+		" ever be admitted while it stays connected", func() bool {
 		c.mu.Lock()
-		held := c.held
-		c.mu.Unlock()
-		if held == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("a session holding no role still holds the slot, so no other server can" +
-				" ever be admitted while it stays connected")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer c.mu.Unlock()
+		return c.held == nil
+	})
 }
 
 func TestAnAbsentRoleListLeavesTheSlotAlone(t *testing.T) {
@@ -212,7 +190,7 @@ func TestAnAbsentRoleListLeavesTheSlotAlone(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
 		Activities: []string{activityPlayback},
 	}))
-	time.Sleep(200 * time.Millisecond)
+	handled(t, peer, server)
 
 	c.mu.Lock()
 	held := c.held
@@ -246,7 +224,7 @@ func TestAPeerStringInAnErrorCannotForgeLogLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer.writeText(frame)
-	time.Sleep(200 * time.Millisecond)
+	waitForConns(t, c, 0, "a server/error in place of server/init did not end the handshake")
 
 	got := out.String()
 	if strings.Contains(got, "handshake with \"evil\" complete") {
@@ -272,7 +250,7 @@ func TestAGroupNameCannotStretchOrForgeALogLine(t *testing.T) {
 		GroupName:     strings.Repeat("a", 3000),
 		PlaybackState: "playing\nsendspin: forged",
 	}))
-	time.Sleep(200 * time.Millisecond)
+	handled(t, peer, server)
 
 	saw := false
 	for _, line := range strings.Split(out.String(), "\n") {
@@ -304,21 +282,8 @@ func TestASessionHoldingNoRoleDoesNotKeepItsConnectionSlot(t *testing.T) {
 		ActiveRoles: &none,
 	}))
 
-	time.Sleep(400 * time.Millisecond)
-	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "any"}))
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		conns := c.conns()
-		if conns == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("a session that gave up every role kept its connection slot; eight such" +
-				" peers fill maxConns and Serve refuses music assistant before it handshakes")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForConns(t, c, 0, "a session that gave up every role kept its connection slot; eight"+
+		" such peers fill maxConns and Serve refuses music assistant before it handshakes")
 }
 
 func TestAPeerThatNeverHandshakesLosesItsSlot(t *testing.T) {
@@ -480,22 +445,17 @@ func TestALongServerNameCannotStretchOrForgeALogLine(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{
 		Name: "ma\nsendspin: forged" + strings.Repeat("n", 3000),
 	}))
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, "the handshake line to be written, or nothing here is tested", func() bool {
+		return strings.Contains(out.String(), "handshake with")
+	})
 
-	saw := false
 	for _, line := range strings.Split(out.String(), "\n") {
-		if strings.Contains(line, "handshake with") {
-			saw = true
-		}
 		if len(line) > 300 {
 			t.Errorf("a peer's own name stretched a log line to %d bytes", len(line))
 		}
 		if strings.HasPrefix(line, "sendspin: forged") {
 			t.Error("a newline in the server's name forged a log line")
 		}
-	}
-	if !saw {
-		t.Fatal("the handshake line was never written, so nothing here was tested")
 	}
 }
 
@@ -532,8 +492,7 @@ func TestAnAudioChunkDoesNotDropTheSession(t *testing.T) {
 	for range 3 {
 		peer.writeBinary(server.seal(t, chunkFrame(t, 64)))
 	}
-	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 
 	conns := c.conns()
 	c.mu.Lock()
@@ -569,7 +528,7 @@ func TestOrdinaryTrafficDoesNotSpendThePeerBudget(t *testing.T) {
 			ActiveRoles: roles(rolePlayerV1),
 		}))
 	}
-	time.Sleep(500 * time.Millisecond)
+	handled(t, peer, server)
 
 	if spent := c.Peer.Written() - before; spent > 6 {
 		t.Errorf("1000 ordinary messages spent %d lines of the peer budget; one per"+
@@ -637,7 +596,7 @@ func TestTimeHoldingARoleIsNotChargedAsRoleless(t *testing.T) {
 	narrow()
 	time.Sleep(100 * time.Millisecond) // 200ms spent in total, still inside it
 	widen()
-	time.Sleep(100 * time.Millisecond)
+	handled(t, peer, server)
 
 	conns := c.conns()
 	c.mu.Lock()
@@ -647,6 +606,9 @@ func TestTimeHoldingARoleIsNotChargedAsRoleless(t *testing.T) {
 		t.Errorf("conns = %d, held = %v; the time it spent holding a role was charged"+
 			" against its roleless allowance", conns, held != nil)
 	}
+
+	narrow()
+	handled(t, peer, server)
 }
 
 func TestALeavingSessionDoesNotReleaseAnotherServersHold(t *testing.T) {
@@ -681,7 +643,7 @@ func TestALeavingSessionDoesNotReleaseAnotherServersHold(t *testing.T) {
 		t.Fatalf("second server got %s, want %s", kind, typeClientGoodbye)
 	}
 	other.conn.Close()
-	time.Sleep(300 * time.Millisecond)
+	waitForConns(t, c, 1, "the refused server's connection was never torn down")
 
 	c.mu.Lock()
 	still := c.held
@@ -780,7 +742,7 @@ func TestAnEnvelopeTypeCannotForgeALogLine(t *testing.T) {
 	long := strings.Repeat("a", 3000)
 	peer.writeBinary(server.sealJSON(t,
 		long+"\nsendspin: handshake with \"forged\" complete on the sn psk", struct{}{}))
-	time.Sleep(200 * time.Millisecond)
+	handled(t, peer, server)
 
 	allowed := strings.TrimSuffix(untrustedlog.Cut(long), "...")
 	if strings.Contains(out.String(), allowed+"a") {
@@ -861,7 +823,7 @@ func TestEveryStreamIsLoggedRatherThanOnlyTheFirst(t *testing.T) {
 			}}))
 		peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
 	}
-	time.Sleep(500 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := strings.Count(out.String(), "started a"); got != 3 {
 		t.Errorf("three streams were logged %d times; a track after the first says"+
@@ -891,9 +853,9 @@ func TestAConnectionThatDropsMidStreamSaysWhatItHeard(t *testing.T) {
 	for range 3 {
 		peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
 	}
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 	peer.conn.Close()
-	time.Sleep(500 * time.Millisecond)
+	waitForConns(t, c, 0, "the dropped connection was never torn down")
 
 	if !strings.Contains(out.String(), "3 chunks") {
 		t.Error("a connection that dropped mid-stream threw away what it had counted," +
@@ -918,10 +880,8 @@ func TestAChunkThisPlayerCannotReadDoesNotDropTheSession(t *testing.T) {
 	bad[0] = binaryAudioChunk
 	binary.BigEndian.PutUint64(bad[1:9], uint64(stampCeiling+1))
 	peer.writeBinary(server.seal(t, bad))
-	time.Sleep(200 * time.Millisecond)
-
 	peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 3}))
-	time.Sleep(400 * time.Millisecond)
+	handled(t, peer, server)
 
 	if !strings.Contains(out.String(), "cannot read") {
 		t.Error("a chunk this player could not read was dropped with nothing said")
@@ -957,7 +917,7 @@ func TestClearingMidStreamDoesNotReadAsAnotherStreamStarting(t *testing.T) {
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
 	peer.writeBinary(server.sealJSON(t, typeStreamClear, streamRoles{ServerTransmitted: 2}))
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
-	time.Sleep(400 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := strings.Count(out.String(), "its first chunk"); got != 1 {
 		t.Errorf("one stream announced a first chunk %d times; a clear leaves the stream"+
@@ -978,12 +938,11 @@ func TestLosingThePlayerRoleSummarisesTheStreamItAbandoned(t *testing.T) {
 
 	playing(t, peer, server)
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
-	time.Sleep(200 * time.Millisecond)
 
 	none := []string{}
 	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
 		Activities: []string{}, ActiveRoles: &none}))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 
 	said := out.String()
 	at := strings.Index(said, "1 chunks")
@@ -1020,10 +979,8 @@ func TestAServerStampingEveryChunkWrongDoesNotBlindTheLog(t *testing.T) {
 	for i := range 40 {
 		peer.writeBinary(server.seal(t, badChunk(t, stampCeiling+1+int64(i))))
 	}
-	time.Sleep(400 * time.Millisecond)
-
 	peer.writeBinary(server.seal(t, []byte{0x40, 1, 2}))
-	time.Sleep(400 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := strings.Count(out.String(), "cannot read"); got != 1 {
 		t.Errorf("forty unreadable chunks were reported %d times; each carried the"+
@@ -1050,7 +1007,7 @@ func TestAStreamForAnotherRoleDoesNotSplitThePlayersSummary(t *testing.T) {
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
 	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{ServerTransmitted: 2}))
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
-	time.Sleep(400 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := strings.Count(out.String(), "its first chunk"); got != 1 {
 		t.Errorf("the player's stream announced a first chunk %d times; a stream/start"+
@@ -1076,14 +1033,15 @@ func TestAStreamThatStoppedSendingAudioIsStillSummarised(t *testing.T) {
 
 	playing(t, peer, server)
 	peer.writeBinary(server.seal(t, chunkFrame(t, 8)))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
+	time.Sleep(2 * c.reportEvery)
 
 	if strings.Contains(out.String(), "1 chunks") {
 		t.Fatal("a summary arrived with no message to carry it, so nothing here is tested")
 	}
 	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{
 		PlaybackState: "playing", GroupID: "g1", GroupName: "kitchen"}))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 
 	if !strings.Contains(out.String(), "1 chunks") {
 		t.Error("a stream that stopped sending audio said nothing more, which is the" +
@@ -1102,7 +1060,7 @@ func TestPlaybackCannotSpendTheBudgetTheHandshakeNeeds(t *testing.T) {
 		playing(t, peer, server)
 		peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
 	}
-	time.Sleep(700 * time.Millisecond)
+	handled(t, peer, server)
 
 	if spent := c.Peer.Written() - before; spent > 2 {
 		t.Errorf("a server flapping its stream spent %d lines of the budget the roles,"+

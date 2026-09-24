@@ -253,21 +253,15 @@ func TestAnsweredExchangesConvergeTheHeldSession(t *testing.T) {
 		}))
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	var held *Session
+	waitFor(t, "the clock to converge once the exchanges were answered", func() bool {
 		c.mu.Lock()
-		held := c.held
+		held = c.held
 		c.mu.Unlock()
-		if held != nil && held.clock.filter.Converged() {
-			got := held.clock.filter.ServerTime(0)
-			if got < offset-100_000 || got > offset+100_000 {
-				t.Errorf("the session puts the server %d us away, want about %d", got, offset)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the exchanges were answered and the clock never converged")
-		}
-		time.Sleep(5 * time.Millisecond)
+		return held != nil && held.clock.filter.Converged()
+	})
+	got := held.clock.filter.ServerTime(0)
+	if got < offset-100_000 || got > offset+100_000 {
+		t.Errorf("the session puts the server %d us away, want about %d", got, offset)
 	}
 }

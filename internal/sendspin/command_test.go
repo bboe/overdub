@@ -550,7 +550,7 @@ func TestEachDelayGetsItsOwnAttemptsAtThePropertyRatherThanTheRunsLeftovers(t *t
 	waitFor(t, "the second figure to spend its own attempts", func() bool {
 		return count(second) >= KeepTries
 	})
-	time.Sleep(20 * c.keepEvery)
+	keeperCaughtUp(t, c)
 	if got := count(second); got != KeepTries {
 		t.Errorf("a figure that arrived after another had already been refused was"+
 			" written %d times, want %d: the attempts are what one figure is worth, and"+
@@ -613,7 +613,7 @@ func TestADelayThePropertyKeepsRefusingIsGivenUpOn(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
 
 	waitFor(t, "the writes to be given up on", func() bool { return count() >= KeepTries })
-	time.Sleep(20 * c.keepEvery)
+	keeperCaughtUp(t, c)
 	if got := count(); got != KeepTries {
 		t.Errorf("a property that refuses every write was written %d times in %d windows,"+
 			" want the %d this keeper gives up after: a figure that cannot be stored is"+
@@ -661,7 +661,11 @@ func TestADelayWrittenOnceIsNotWrittenAgainWhenThePlayerStops(t *testing.T) {
 		defer mu.Unlock()
 		return slices.Clone(saved)
 	}
-	serveOn(t, c, ln)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = c.Serve(ln)
+	}()
 	peer, server, _ := bringUp(t, c, ln)
 
 	asked := 700
@@ -672,7 +676,12 @@ func TestADelayWrittenOnceIsNotWrittenAgainWhenThePlayerStops(t *testing.T) {
 	})
 	_ = peer.conn.Close()
 	ln.Close()
-	time.Sleep(4 * c.keepEvery)
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("this client was still serving five seconds after its listener closed")
+	}
+	waitForConns(t, c, 0, "the connection was still being served after this client stopped")
 
 	if got := kept(); len(got) != 2 {
 		t.Errorf("the unread figure and the one a server set were written %v, want the"+
@@ -719,10 +728,8 @@ func TestADelayAlreadyOnDiskIsNotWrittenAgain(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&other)))
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&same)))
 
-	waitFor(t, "the delay to settle back where it started", func() bool {
-		return int(c.delay.Load()) == same
-	})
-	time.Sleep(3 * c.keepEvery)
+	handled(t, peer, server)
+	keeperCaughtUp(t, c)
 	if got := kept(); len(got) != 0 {
 		t.Errorf("a delay that ended where the disk already had it wrote %v: a server"+
 			" that re-asserts its own figure, or an operator who nudges a control and"+

@@ -37,6 +37,26 @@ func delayState(t *testing.T, peer *wsPeer, server *serverSide) (ms int, availab
 	return state.Player.StaticDelayMS, state.Available
 }
 
+func keeperCaughtUp(t *testing.T, c *Client) {
+	t.Helper()
+	var wake chan struct{}
+	waitFor(t, "a keeper to be running", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		wake = c.keepWake
+		return wake != nil
+	})
+	for range 2 {
+		select {
+		case wake <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the keeper never took the wake it already had")
+		}
+		waitFor(t, "the keeper to take a wake, which it does only between writes",
+			func() bool { return len(wake) == 0 })
+	}
+}
+
 func TestADelayHomeAssistantSetsIsReportedToTheServerAtOnce(t *testing.T) {
 	ln := listenLocal(t)
 	c, _ := playingClient(t)
@@ -134,7 +154,7 @@ func TestADelaySetAgainToWhatItAlreadyIsIsNotReportedTwice(t *testing.T) {
 		defer mu.Unlock()
 		return len(saved) > 0
 	})
-	time.Sleep(4 * c.keepEvery)
+	keeperCaughtUp(t, c)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(saved) != 1 || saved[0] != 900 {
@@ -209,10 +229,9 @@ func TestADelaySetFromHomeAssistantDoesNotTakeThePlayerAway(t *testing.T) {
 	serveOn(t, c, ln)
 	peer, server, _ := bringUp(t, c, ln)
 	syncClock(t, peer, server, 0)
-	waitFor(t, "the player to be reported available", func() bool {
-		_, available := c.reporting()
-		return available
-	})
+	if _, available := delayState(t, peer, server); !available {
+		t.Fatal("the state sent once the clock agreed reported the player unavailable")
+	}
 
 	c.SetDelay(600)
 
@@ -299,7 +318,7 @@ func TestADelaySetBeforeThisClientServesSurvivesItStartingUp(t *testing.T) {
 
 	c.SetDelay(0)
 	serveOn(t, c, ln)
-	time.Sleep(200 * time.Millisecond)
+	waitFor(t, "this client to be listening", func() bool { return c.subject() != "" })
 
 	if got := c.Delay(); got != 0 {
 		t.Errorf("a delay set to %d ms before this client started serving came back as the"+
@@ -387,7 +406,7 @@ func TestAFigureAlreadyOnDiskIsNotWrittenAgainWhenThisClientStartsServing(t *tes
 
 	c.SetDelay(300)
 	serveOn(t, c, ln)
-	time.Sleep(400 * time.Millisecond)
+	keeperCaughtUp(t, c)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -439,7 +458,7 @@ func TestAFigureTheKeeperWroteIsNotWrittenAgainByALaterStart(t *testing.T) {
 	mu.Unlock()
 
 	serveOn(t, c, listenLocal(t))
-	time.Sleep(400 * time.Millisecond)
+	keeperCaughtUp(t, c)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -487,10 +506,9 @@ func TestADelaySetWhileAServerHoldsNoRoleIsReportedWhenTheRoleComesBack(t *testi
 	serveOn(t, c, ln)
 	peer, server, _ := bringUp(t, c, ln)
 	syncClock(t, peer, server, 0)
-	waitFor(t, "the player to be reported available", func() bool {
-		_, available := c.reporting()
-		return available
-	})
+	if _, available := delayState(t, peer, server); !available {
+		t.Fatal("the state sent once the clock agreed reported the player unavailable")
+	}
 
 	c.SetDelay(123)
 	for {

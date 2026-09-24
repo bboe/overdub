@@ -5,7 +5,6 @@ import (
 	"log"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAPeerSuppliedNumberCannotStretchALogLine(t *testing.T) {
@@ -24,18 +23,13 @@ func TestAPeerSuppliedNumberCannotStretchALogLine(t *testing.T) {
 	peer.writeText([]byte(fmt.Sprintf(
 		`{"type":"server/init","payload":{"server_id":"x","version":%s}}`,
 		strings.Repeat("9", 1900))))
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, "the handshake failure to be logged, or this proves nothing", func() bool {
+		return strings.Contains(out.String(), "server/init")
+	})
 
-	saw := false
 	for _, line := range strings.Split(out.String(), "\n") {
-		if strings.Contains(line, "server/init") {
-			saw = true
-		}
 		if len(line) > 700 {
 			t.Errorf("a peer wrote a %d-byte log line with one number", len(line))
 		}
-	}
-	if !saw {
-		t.Fatal("the handshake failure was never logged, so this proves nothing")
 	}
 }

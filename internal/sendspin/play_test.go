@@ -158,7 +158,7 @@ func playingClient(t *testing.T) (*Client, *fakePlayer) {
 
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if ok() {
 			return
@@ -356,8 +356,7 @@ func TestASecondStreamStartDoesNotOpenASecondStream(t *testing.T) {
 	playing(t, peer, server)
 	waitFor(t, "a stream to be opened", func() bool { return player.count() == 1 })
 	playing(t, peer, server)
-	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 
 	if player.count() != 1 {
 		t.Errorf("%d streams were opened over two stream/starts; the player holds one, so"+
@@ -461,8 +460,7 @@ func TestAudioBeforeTheClockAgreesIsDroppedAndSaidOnce(t *testing.T) {
 	for range 5 {
 		peer.writeBinary(server.seal(t, chunkAt(nowMicros()+100_000, 1200)))
 	}
-	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
-	time.Sleep(300 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := player.last().wrote(); got != 0 {
 		t.Errorf("%d chunks were placed against a clock that had not converged; the"+
@@ -492,8 +490,7 @@ func TestAPlayerThatWillNotOpenAStreamIsSaidOnce(t *testing.T) {
 		playing(t, peer, server)
 		peer.writeBinary(server.sealJSON(t, typeStreamEnd, streamRoles{ServerTransmitted: 2}))
 	}
-	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
-	time.Sleep(400 * time.Millisecond)
+	handled(t, peer, server)
 
 	if got := strings.Count(out.String(), "would not open a stream"); got != 1 {
 		t.Errorf("a player that refuses every stream drew %d lines over four tracks,"+
