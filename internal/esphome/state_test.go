@@ -11,6 +11,7 @@ import (
 
 func TestSoundIsReportedOnlyAfterItHasLasted(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	playing := false
 	s.sound = func() (bool, bool) { return playing, true }
@@ -24,17 +25,18 @@ func TestSoundIsReportedOnlyAfterItHasLasted(t *testing.T) {
 		t.Error("sound was reported by the sample that first saw it, so a 0.6s chime would report")
 	}
 
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("sound lasting longer than the delay was still not reported")
 	}
 
 	playing = false
+	clock.pass(s.offDelay / 2)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("sound was withdrawn by the first silent sample, so a pause reads as the end")
 	}
 
-	time.Sleep(s.offDelay + 5*time.Millisecond)
+	clock.pass(s.offDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("silence lasting longer than the off delay was still reported as sound")
 	}
@@ -42,6 +44,7 @@ func TestSoundIsReportedOnlyAfterItHasLasted(t *testing.T) {
 
 func TestABlipDoesNotAccumulate(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	playing := false
 	s.sound = func() (bool, bool) { return playing, true }
@@ -49,7 +52,7 @@ func TestABlipDoesNotAccumulate(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		playing = true
 		s.readSound()
-		time.Sleep(s.onDelay / 2)
+		clock.pass(s.onDelay / 2)
 		playing = false
 		if got := s.readSound(); got.value != 0 {
 			t.Fatalf("blip %d reported sound; the delay is accumulating across gaps", i)
@@ -59,11 +62,12 @@ func TestABlipDoesNotAccumulate(t *testing.T) {
 
 func TestAnUnreadableSoundIsMissingAndResetsTheClock(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	state, ok := true, true
 	s.sound = func() (bool, bool) { return state, ok }
 
 	s.readSound()
-	time.Sleep(s.onDelay / 2)
+	clock.pass(s.onDelay / 2)
 
 	ok = false
 	got := s.readSound()
@@ -76,7 +80,7 @@ func TestAnUnreadableSoundIsMissingAndResetsTheClock(t *testing.T) {
 
 	ok = true
 	s.readSound()
-	time.Sleep(s.onDelay/2 + 20*time.Millisecond)
+	clock.pass(s.onDelay/2 + 20*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("the clock survived a failed reading, so a gap counts as sound")
 	}
@@ -84,12 +88,13 @@ func TestAnUnreadableSoundIsMissingAndResetsTheClock(t *testing.T) {
 
 func TestAFailedReadDoesNotBringTheWithdrawalForward(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	playing, ok := true, true
 	s.sound = func() (bool, bool) { return playing, ok }
 
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatalf("sound was not reported after the on delay, so there is nothing to withdraw")
 	}
@@ -100,12 +105,13 @@ func TestAFailedReadDoesNotBringTheWithdrawalForward(t *testing.T) {
 	}
 
 	ok, playing = true, false
+	clock.pass(s.offDelay / 2)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("the silent sample after a failed read withdrew it at once; the off delay was " +
 			"measured from the zero time rather than from the last sighting of sound")
 	}
 
-	time.Sleep(s.offDelay + 5*time.Millisecond)
+	clock.pass(s.offDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("silence past the off delay was still reported as sound")
 	}
@@ -113,6 +119,7 @@ func TestAFailedReadDoesNotBringTheWithdrawalForward(t *testing.T) {
 
 func TestTheShippedDelaysIgnoreTheChimeAndReportSpeech(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	if s.onDelay != SoundOnDelay || s.offDelay != SoundOffDelay {
 		t.Fatalf("a new server has delays of %v/%v, want the shipped %v/%v",
 			s.onDelay, s.offDelay, SoundOnDelay, SoundOffDelay)
@@ -126,7 +133,7 @@ func TestTheShippedDelaysIgnoreTheChimeAndReportSpeech(t *testing.T) {
 		playing = sounding
 		var last float32
 		for spent := time.Duration(0); spent < d; spent += sample {
-			time.Sleep(sample)
+			clock.pass(sample)
 			last = s.readSound().value
 		}
 		return last
@@ -156,30 +163,31 @@ func TestTheShippedDelaysIgnoreTheChimeAndReportSpeech(t *testing.T) {
 
 func TestASamplingGapDoesNotDecideAnEdgeOnItsOwn(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing := true
 	s.sound = func() (bool, bool) { return playing, true }
 
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatal("sound was not reported after the on delay")
 	}
 
 	playing = false
-	time.Sleep(s.soundGap + 50*time.Millisecond)
+	clock.pass(s.soundGap + 50*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("the first silent sample after a gap withdrew it; the gap was counted as silence")
 	}
-	time.Sleep(s.offDelay + 5*time.Millisecond)
+	clock.pass(s.offDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("silence past the off delay after a gap was still reported as sound")
 	}
 
 	playing = true
 	s.readSound()
-	time.Sleep(s.soundGap + 50*time.Millisecond)
+	clock.pass(s.soundGap + 50*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("one sample after a gap reported sound; the on clock measured across the gap")
 	}
@@ -187,28 +195,30 @@ func TestASamplingGapDoesNotDecideAnEdgeOnItsOwn(t *testing.T) {
 
 func TestASamplingGapDoesNotWithdrawSoundThatIsStillPlaying(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing := true
 	s.sound = func() (bool, bool) { return playing, true }
 
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatal("sound was not reported after the on delay")
 	}
 
-	time.Sleep(s.soundGap + 50*time.Millisecond)
+	clock.pass(s.soundGap + 50*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("a gap withdrew sound that was still playing on both sides of it")
 	}
 
 	playing = false
+	clock.pass(s.offDelay / 2)
 	if got := s.readSound(); got.value != 1 {
 		t.Error("the first silent sample after the gap withdrew it at once; the withdrawal " +
 			"was measured from before the gap")
 	}
-	time.Sleep(s.offDelay + 5*time.Millisecond)
+	clock.pass(s.offDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 0 {
 		t.Error("silence past the off delay was still reported as sound")
 	}
@@ -216,20 +226,21 @@ func TestASamplingGapDoesNotWithdrawSoundThatIsStillPlaying(t *testing.T) {
 
 func TestAGapAcrossAFailedReadDoesNotReportSoundAgain(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	s.soundGap = 200 * time.Millisecond
 	playing, ok := true, true
 	s.sound = func() (bool, bool) { return playing, ok }
 
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatal("sound was not reported after the on delay")
 	}
 
 	playing = false
 	ok = false
-	time.Sleep(s.soundGap + 50*time.Millisecond)
+	clock.pass(s.soundGap + 50*time.Millisecond)
 	if got := s.readSound(); got.ok {
 		t.Fatal("the failed read was sent as a reading")
 	}
@@ -246,13 +257,14 @@ func TestAGapAcrossAFailedReadDoesNotReportSoundAgain(t *testing.T) {
 
 func TestResumingAfterNobodyWasListeningForgetsTheReading(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	clock := soundClock(s)
 	shortSoundDelays(s)
 	s.soundGap = 100 * time.Millisecond
 	playing := true
 	s.sound = func() (bool, bool) { return playing, true }
 
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatal("sound was not reported after the on delay")
 	}
@@ -266,7 +278,7 @@ func TestResumingAfterNobodyWasListeningForgetsTheReading(t *testing.T) {
 
 	playing = true
 	s.readSound()
-	time.Sleep(s.onDelay + 5*time.Millisecond)
+	clock.pass(s.onDelay + 5*time.Millisecond)
 	if got := s.readSound(); got.value != 1 {
 		t.Fatal("sound after the resume was never reported at all")
 	}
@@ -340,6 +352,18 @@ func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 
 func shortSoundDelays(s *Server) {
 	s.onDelay, s.offDelay = 30*time.Millisecond, 60*time.Millisecond
+}
+
+type fakeClock struct{ at time.Time }
+
+func (c *fakeClock) now() time.Time { return c.at }
+
+func (c *fakeClock) pass(d time.Duration) { c.at = c.at.Add(d) }
+
+func soundClock(s *Server) *fakeClock {
+	c := &fakeClock{at: time.Unix(1_000_000, 0)}
+	s.clock = c.now
+	return c
 }
 
 func TestARouteChangeWakesTheNameRead(t *testing.T) {

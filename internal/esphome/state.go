@@ -70,7 +70,7 @@ func (s *Server) forgetSound() {
 
 func (s *Server) readSound() reading {
 	playing, ok := s.sound()
-	now := time.Now()
+	now := s.clock()
 	gapped := s.soundGap > 0 && !s.soundSeen.IsZero() && now.Sub(s.soundSeen) > s.soundGap
 	s.soundSeen = now
 	if !ok {

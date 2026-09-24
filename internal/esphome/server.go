@@ -182,6 +182,7 @@ type Server struct {
 	cmdQueue   []string
 
 	soundOn     bool
+	clock       func() time.Time
 	soundGap    time.Duration
 	onDelay     time.Duration
 	offDelay    time.Duration
@@ -296,6 +297,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		wakeGap:       minLiveReadGap,
 		adbSettle:     adbSettleFor,
 		micSettle:     micSettleFor,
+		clock:         time.Now,
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
