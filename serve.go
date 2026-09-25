@@ -38,8 +38,9 @@ const (
 	noiseKeyPath    = "/data/local/bin/.overdub-noise-key"
 	sendspinKeyPath = "/data/local/bin/.overdub-sendspin-key"
 
-	sendspinBuffer = 500
-	sendspinLead   = 350
+	sendspinBuffer        = 500
+	sendspinLead          = 350
+	sendspinBluetoothLead = 1100
 
 	nodeWait    = 60 * time.Second
 	guardWait   = 2 * time.Second
@@ -1066,15 +1067,16 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 		}
 	}
 	return &sendspin.Client{
-		Config:         config,
-		Keys:           keys,
-		PSKs:           sendspin.PSKSet{Pairing: keys.PairingPSK},
-		MinBufferMS:    sendspinBuffer,
-		RequiredLeadMS: sendspinLead,
-		DelayMS:        delay,
-		DelayUnknown:   unknown,
-		SaveDelay:      save,
-		Player:         player,
-		Peer:           peer,
+		Config:          config,
+		Keys:            keys,
+		PSKs:            sendspin.PSKSet{Pairing: keys.PairingPSK},
+		MinBufferMS:     sendspinBuffer,
+		RequiredLeadMS:  sendspinLead,
+		BluetoothLeadMS: sendspinBluetoothLead,
+		DelayMS:         delay,
+		DelayUnknown:    unknown,
+		SaveDelay:       save,
+		Player:          player,
+		Peer:            peer,
 	}
 }

@@ -113,15 +113,17 @@ type Client struct {
 	Keys   Keys
 	PSKs   PSKSet
 
-	MinBufferMS    int
-	RequiredLeadMS int
-	DelayMS        int
-	DelayUnknown   bool
-	SaveDelay      func(ms int) error
+	MinBufferMS     int
+	RequiredLeadMS  int
+	BluetoothLeadMS int
+	DelayMS         int
+	DelayUnknown    bool
+	SaveDelay       func(ms int) error
 
 	Player Player
 
 	delay      atomic.Int64
+	bluetooth  atomic.Bool
 	toldVolume atomic.Int64
 	toldMute   atomic.Int64
 	onDisk     atomic.Int64
@@ -812,9 +814,23 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 	tick := time.NewTicker(waitOr(c.outputEvery, outputEvery))
 	defer tick.Stop()
 	asked := StreamRate
+	told := c.lead()
 	for {
 		rate := c.Config.OutputRate()
-		if held, _ := c.reporting(); held == session && rate != asked {
+		held, available := c.reporting()
+		if held == session {
+			c.bluetooth.Store(rate == BluetoothRate)
+		}
+		if held == session && c.lead() != told {
+			if err := c.state(session, available); err != nil {
+				c.Peer.Printf("sendspin: this player could not declare the lead its output"+
+					" needs, so its connection goes: %v", err)
+				nc.Close()
+				return
+			}
+			told = c.lead()
+		}
+		if held == session && rate != asked {
 			err := session.WriteJSON(typeStreamRequestFormat,
 				requestFormat{Player: formatRequest{SampleRate: rate}})
 			if err != nil {
@@ -842,7 +858,7 @@ func (c *Client) state(session *Session, available bool) error {
 	defer c.stating.Unlock()
 	player := &playerState{
 		StaticDelayMS:      int(c.heldDelay() / time.Millisecond),
-		RequiredLeadTimeMS: c.RequiredLeadMS,
+		RequiredLeadTimeMS: c.lead(),
 		MinBufferMS:        c.MinBufferMS,
 		SupportedCommands:  []string{commandStaticDelay},
 	}
@@ -860,6 +876,13 @@ func (c *Client) state(session *Session, available bool) error {
 		Available: available,
 		Player:    player,
 	})
+}
+
+func (c *Client) lead() int {
+	if c.bluetooth.Load() {
+		return c.BluetoothLeadMS
+	}
+	return c.RequiredLeadMS
 }
 
 func (c *Client) level() (percent int, muted, ok bool) {

@@ -2,6 +2,7 @@ package sendspin
 
 import (
 	"encoding/json"
+	"net"
 	"slices"
 	"sync"
 	"testing"
@@ -39,7 +40,47 @@ func outputClient(t *testing.T, rate int) (*Client, *fakeOutput) {
 	o := &fakeOutput{rate: rate}
 	c.Config.OutputRate = o.at
 	c.outputEvery = 10 * time.Millisecond
+	c.RequiredLeadMS = 350
+	c.BluetoothLeadMS = 1100
 	return c, o
+}
+
+func activatedOnBluetooth(t *testing.T, c *Client, ln net.Listener) (*wsPeer, *serverSide) {
+	t.Helper()
+	peer := dialLocal(t, ln)
+	server := driveServer(t, peer, serverPlan{
+		clientPublic: c.Keys.Identity.Public,
+		psk:          SentinelPSK(),
+		cat:          categorySentinel,
+	})
+	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "music assistant"}))
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{activityPlayback},
+		ActiveRoles: roles(rolePlayerV1),
+	}))
+	return peer, server
+}
+
+func leadThenRate(t *testing.T, peer *wsPeer, server *serverSide) (lead, rate int) {
+	t.Helper()
+	lead = -1
+	for {
+		kind, payload := nextJSON(t, peer, server)
+		switch kind {
+		case typeClientState:
+			var s clientState
+			if err := json.Unmarshal(payload, &s); err != nil {
+				t.Fatalf("decoding %s: %v", typeClientState, err)
+			}
+			lead = s.Player.RequiredLeadTimeMS
+		case typeStreamRequestFormat:
+			var r requestFormat
+			if err := json.Unmarshal(payload, &r); err != nil {
+				t.Fatalf("decoding %s: %v", typeStreamRequestFormat, err)
+			}
+			return lead, r.Player.SampleRate
+		}
+	}
 }
 
 func askedFor(t *testing.T, peer *wsPeer, server *serverSide) int {
@@ -163,9 +204,13 @@ func TestADotWithNoPlayerRoleAsksForNothing(t *testing.T) {
 	o.move(BluetoothRate)
 	polled := o.read()
 	waitFor(t, "the output to be read 3 more times", func() bool { return o.read() >= polled+3 })
-	if sent := sentBeforeAPong(t, peer, server); slices.Contains(sent, typeStreamRequestFormat) {
+	sent := sentBeforeAPong(t, peer, server)
+	if slices.Contains(sent, typeStreamRequestFormat) {
 		t.Errorf("a dot holding no player role asked for a format, which aiosendspin"+
 			" flags as a payload for a role that is not active: %v", sent)
+	}
+	if slices.Contains(sent, typeClientState) {
+		t.Errorf("a dot holding no player role declared a lead for its new output: %v", sent)
 	}
 
 	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
@@ -174,5 +219,56 @@ func TestADotWithNoPlayerRoleAsksForNothing(t *testing.T) {
 	}))
 	if got := askedFor(t, peer, server); got != BluetoothRate {
 		t.Errorf("the player role taken again asked for %d Hz, want %d", got, BluetoothRate)
+	}
+}
+
+func TestADotOnBluetoothDeclaresTheLongerLeadBeforeAskingForItsRate(t *testing.T) {
+	ln := listenLocal(t)
+	c, _ := outputClient(t, BluetoothRate)
+	serveOn(t, c, ln)
+	peer, server := activatedOnBluetooth(t, c, ln)
+	lead, rate := leadThenRate(t, peer, server)
+	if rate != BluetoothRate {
+		t.Fatalf("the dot asked for %d Hz, want %d", rate, BluetoothRate)
+	}
+	if lead != 1100 {
+		t.Errorf("before asking for %d Hz the dot declared a %d ms lead, want 1100:"+
+			" the new stream is stamped from the lead the server holds when it opens,"+
+			" and a Bluetooth output is about 430 ms deep", rate, lead)
+	}
+}
+
+func TestADotBackOnItsSpeakerDeclaresTheSpeakersLead(t *testing.T) {
+	ln := listenLocal(t)
+	c, o := outputClient(t, StreamRate)
+	serveOn(t, c, ln)
+	peer, server, state := bringUp(t, c, ln)
+	if state.Player.RequiredLeadTimeMS != 350 {
+		t.Fatalf("a dot on its speaker declared a %d ms lead, want 350",
+			state.Player.RequiredLeadTimeMS)
+	}
+
+	o.move(BluetoothRate)
+	if lead, _ := leadThenRate(t, peer, server); lead != 1100 {
+		t.Errorf("a speaker connecting declared a %d ms lead, want 1100", lead)
+	}
+	o.move(StreamRate)
+	if lead, _ := leadThenRate(t, peer, server); lead != 350 {
+		t.Errorf("a speaker going away declared a %d ms lead, want 350: the longer"+
+			" lead makes every stream start later, and the whole group waits for it", lead)
+	}
+}
+
+func TestADotDeclaresItsLeadOnceWhileItsOutputHolds(t *testing.T) {
+	ln := listenLocal(t)
+	c, o := outputClient(t, BluetoothRate)
+	serveOn(t, c, ln)
+	peer, server := activatedOnBluetooth(t, c, ln)
+	leadThenRate(t, peer, server)
+
+	polled := o.read()
+	waitFor(t, "the output to be read 3 more times", func() bool { return o.read() >= polled+3 })
+	if sent := sentBeforeAPong(t, peer, server); slices.Contains(sent, typeClientState) {
+		t.Errorf("a dot whose output did not change declared its lead again: %v", sent)
 	}
 }

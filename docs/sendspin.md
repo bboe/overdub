@@ -236,12 +236,49 @@ Dot.
   Before the first chunk can be placed, the frame-to-moment mapping needs 134 to
   164 ms of silence to settle, and the player and HAL hold 131 to 144 ms. At a
   200 ms lead the first 118.7 ms of a track was lost.
-- Today it changes nothing on the wire. For a **buffered** stream the server
-  sends `max(min_buffer_ms, required_lead_time_ms) + static_delay_ms` ahead, so
-  500 governs. For a **live** stream `aiosendspin` uses
+- On the speaker it changes nothing on the wire. For a **buffered** stream the
+  server sends `max(min_buffer_ms, required_lead_time_ms) + static_delay_ms`
+  ahead, so 500 governs. For a **live** stream `aiosendspin` uses
   `min_buffer_ms + static_delay_ms` and ignores the lead.
   `DEFAULT_INITIAL_DELAY_US` (250 ms) applies only with no audio roles. The
   field keeps a smaller `min_buffer_ms` from taking the start of every track.
+
+#### Over Bluetooth
+
+- Over a Bluetooth speaker the lead is `sendspinBluetoothLead`, **1,100**.
+  With a JBL Go 3 the player read 429 to 494 ms ahead of the speaker, where
+  the Dot's own speaker reads 131 to 144 ms. The mapping then needs its settle
+  as well, so a new stream needs about 650 ms of lead.
+- At a lead of 350, 500 governs. Across 8 streams the first chunk came 390 to
+  476 ms before it was due, and once 26 ms after: the server spends about 25 to
+  110 ms before the first chunk goes out. `aiosendspin` stamps it
+  `now + send_ahead` in `_resolve_channel_play_start`, before the encode, and
+  the stamp does not move.
+- So each new stream lost its start: 142 to 679 ms dropped as late. With debug
+  lines in, one start dropped its first 2 chunks whole and 48 ms of the third,
+  257 ms in all.
+- At 1,100 the first chunk of a Plex track came 974 ms before it was due, and
+  nothing at the start was dropped. That is 1 stream.
+- A skip loses nothing at either lead. Music Assistant ends the stream and
+  starts the next at once, the Dot keeps its stream open, and the mapping holds.
+  The loss is at a stream the Dot opens: the first play, after a pause, after a
+  restart.
+- A live stream is not fixed. `aiosendspin` ignores the lead there, and only
+  `min_buffer_ms` would move it, which holds the stream that much later for its
+  whole length. Music Assistant counts radio, audio sources and plugin sources
+  as live, and any track whose provider marks `is_realtime`. Spotify's soloist
+  backend does. A Spotify stream still lost 257 ms at its start at 1,100.
+- The cost: every buffered stream to this Dot starts about 600 ms later over
+  Bluetooth. The send-ahead is the largest across the group, so every member
+  waits the same. The lead adds no latency after the start: the queue grows
+  past it within seconds.
+- `watchOutput` declares the lead in `client/state` before it sends
+  `stream/request-format`. `aiosendspin` reads both in order, and joins the
+  role at the new rate `max(100 ms, send_ahead)` ahead, from the new lead. A
+  speaker connecting mid-stream should open a gap of about 1.1 seconds and drop
+  nothing. That is not measured.
+- The declared lead follows each read of the output, and is sent again only
+  when it changes. The speaker's lead comes back when the speaker disconnects.
 
 ### The messages that bracket a stream
 
@@ -446,7 +483,8 @@ buffer and keeps it open. Each reaches the player and the session.
   toward the ceiling after: 1.97 seconds by the end of that window.
 - So the buffer waits for no quantity of audio. A stream is placed against the
   player's own reading and plays what is due. It needs lead, not depth, which
-  `required_lead_time_ms` declares.
+  `required_lead_time_ms` declares. "Over Bluetooth" above says where a
+  shortfall goes.
 - Across 5 streams the first chunk was due 481 to 493 ms ahead and the lead
   grew to about 2.4 seconds: `min_buffer_ms`, then that plus
   `buffer_capacity`.

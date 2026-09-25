@@ -804,6 +804,10 @@ func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 			" send a first chunk sooner than the mapping can be placed",
 			client.RequiredLeadMS, sendspinLead)
 	}
+	if client.BluetoothLeadMS != sendspinBluetoothLead {
+		t.Fatalf("the client declares a %d ms lead over Bluetooth where this dot needs %d",
+			client.BluetoothLeadMS, sendspinBluetoothLead)
+	}
 }
 
 func TestEverySettingThisDotKeepsFitsAPropertyName(t *testing.T) {
