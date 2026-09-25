@@ -1692,6 +1692,7 @@ func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
 
 	const tick = 20 * time.Millisecond
 	s.onDelay, s.offDelay = 40*time.Millisecond, 40*time.Millisecond
+	steadySoundClock(s, tick)
 
 	c, err := dial(t, s, psk)
 	if err != nil {
