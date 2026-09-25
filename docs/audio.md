@@ -379,6 +379,10 @@ one at a time, as there is one player.
   `int`, it goes negative and `fill` spins for ever inside the mixer's lock: the
   Dot is silent with nothing logged until reboot. `streamAhead` does not bound
   that gap: it bounds a chunk against now, not against the mapping's origin.
+- `frameCount` splits a duration into whole seconds and the rest before it
+  multiplies by the rate. Nanoseconds times 48,000 overflow `int64` after 53
+  hours, and the time since the origin grows for as long as one stream is open.
+  Past that, every chunk was placed wrongly.
 - Queued audio keeps its monotonic reading. `Round(0)` would make `frameAt`
   fall back to the wall clock, and a wall-clock step would move every frame
   while the slip check reads zero.

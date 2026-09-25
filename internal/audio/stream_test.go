@@ -251,6 +251,36 @@ func TestAChunkPastTheSnapIsPlacedWhereItIsDueAtItsOwnRate(t *testing.T) {
 	}
 }
 
+func TestAStreamAnchoredDaysAgoStillPlacesAudio(t *testing.T) {
+	for _, rate := range Rates() {
+		s := quiet()
+		s.rate = rate
+		now := time.Now()
+		anchorAt(s, now)
+		const open = 60 * time.Hour
+		s.origin, s.originIndex = s.origin.Add(-open), s.originIndex-frameCount(rate, open)
+		if got := frameCount(rate, open); got != int64(rate)*60*3600 {
+			t.Fatalf("at %d Hz, 60 hours came back as %d frames, want %d", rate, got,
+				int64(rate)*60*3600)
+		}
+		if err := s.Write(now.Add(25*time.Millisecond), level(1200, 4000)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		block := make([]int16, BlockSamples)
+		var played []int16
+		for range 6 {
+			s.read(block)
+			played = append(played, left(block)...)
+		}
+		want := int(frameCount(rate, 25*time.Millisecond))
+		if got := slices.IndexFunc(played, func(v int16) bool { return v != 0 }); got != want {
+			t.Errorf("at %d Hz, on a stream anchored %s ago, audio due 25 ms out began at"+
+				" frame %d, want %d: the nanoseconds since the anchor times the rate"+
+				" overflow int64 after about 53 hours", rate, open, got, want)
+		}
+	}
+}
+
 func TestChunksThatDoNotDivideIntoBlocksStayContinuous(t *testing.T) {
 	s := quiet()
 	now := time.Now()

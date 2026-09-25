@@ -49,7 +49,8 @@ func frameTime(rate int, n int64) time.Duration {
 }
 
 func frameCount(rate int, d time.Duration) int64 {
-	return int64(d) * int64(rate) / int64(time.Second)
+	r := int64(rate)
+	return int64(d/time.Second)*r + int64(d%time.Second)*r/int64(time.Second)
 }
 
 type queued struct {
