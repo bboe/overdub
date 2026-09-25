@@ -343,19 +343,21 @@ one at a time, as there is one player.
 - A change of output drops the mapping and any readings toward one, and the
   next 5 readings anchor it again, without the 100 ms settle a new stream
   waits. The depth moves by about 330 ms.
-- **Switching back to the speaker mid-stream is not handled.** The speaker's
-  output had been idle, and the re-anchor read 82 ms against a warm 141. The
-  mapping was then placed again 3 times in 15 seconds, and the stream stayed
-  off until the next one. A switch with the output already awake read 141.
-- A server that changes format replaces the stream instead. The Dot asks for
-  48 kHz once the speaker goes, and the new stream is placed afresh. Twice it
-  was placed at 142 and 143 ms and played on.
+- **Within one stream, switching back to the speaker is not handled.** The
+  speaker's output had been idle, and the re-anchor read 82 ms against a warm
+  141. The mapping was then placed again 3 times in 15 seconds, and the stream
+  stayed off until the next one. A switch with the output already awake read
+  141.
+- A server that honours `stream/request-format` replaces the stream instead. The
+  Dot asks for 48 kHz once the speaker goes, and the new stream is placed
+  afresh. Twice it was placed at 142 and 143 ms and played on.
 - That costs about 1 second of audio at each disconnect: the new streams were
   placed 0.93 and 1.08 seconds after they opened. It is the route change, not
   the reopen or standby: a stream on a speaker idle for 3 minutes was placed in
   143 ms.
-- Connecting costs about 0.3 seconds. The new 44.1 kHz stream's first chunk was
-  due 343 ms ahead, and 320 ms was dropped as late.
+- At a lead of 350, connecting cost about 0.3 seconds. The new 44.1 kHz
+  stream's first chunk was due 343 ms ahead, and 320 ms was dropped as late.
+  docs/sendspin.md has the cost at the Bluetooth lead, under "Over Bluetooth".
 - A stream opening over Bluetooth loses its start the same way. Music
   Assistant's first chunk was due 141 ms ahead of a 429 ms pipeline, and 548 ms
   was dropped. A 48 kHz stream over Bluetooth dropped 495 ms the same way.

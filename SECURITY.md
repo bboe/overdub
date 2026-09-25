@@ -11,7 +11,7 @@ than a schedule.
 
 ## Supported
 
-The tip of `main`. There are no releases, and nothing is backported.
+The tip of `main`. A release is a snapshot of it, and nothing is backported.
 
 ## What is not a finding
 

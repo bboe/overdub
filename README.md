@@ -27,8 +27,8 @@ keeps running.
 - **Sendspin over Bluetooth needs a strong Wi-Fi link.** The Dot's Wi-Fi and
   Bluetooth share one radio, and a weak link starves the stream (see
   [docs/pitfalls.md](docs/pitfalls.md)). A stream settles in sync about 2
-  seconds after it starts. Turning the speaker off mid-stream leaves the Dot
-  out of step until playback is stopped and started again.
+  seconds after it starts. A speaker connecting or disconnecting mid-stream
+  costs up to about 1 second of audio.
 - Taking the action button takes it from Alexa. While the daemon holds it, the
   button does not stop timers or alarms, talk, or enter setup mode. The
   `Action button mode` select gives it back without stopping anything else.

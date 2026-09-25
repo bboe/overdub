@@ -210,9 +210,9 @@ the PSK matched in the handshake:
 
 ### What the Dot declares
 
-`player@v1`, 2 formats, and `unpaired_access` enabled. The last lets Music
-Assistant play over a Sentinel-keyed connection once its operator approves the
-Dot.
+`player@v1`, 4 formats (FLAC and PCM at 48 and 44.1 kHz), and `unpaired_access`
+enabled. The last lets Music Assistant play over a Sentinel-keyed connection
+once its operator approves the Dot.
 
 - `buffer_capacity` is 2 seconds of 48 kHz PCM, 384,000 bytes. The server counts
   FLAC bytes against it too, so FLAC leads further: about 3 seconds at the
@@ -284,9 +284,10 @@ Dot.
 - `watchOutput` declares both in `client/state` before it sends
   `stream/request-format`. `aiosendspin` reads both in order, and joins the
   role at the new rate `max(100 ms, send_ahead)` ahead, from the new figures.
-  A speaker connecting mid-stream should open a gap of about 1.1 seconds on a
-  buffered stream and 0.9 seconds on a live one, and drop nothing. That is not
-  measured.
+- A speaker connected mid-stream on Spotify, once. The old 48 kHz stream
+  dropped 288 ms as late when the mapping moved to the new output. The new
+  44.1 kHz stream's first chunk came 699 ms ahead, it played 436 ms of silence
+  first, and it dropped nothing: about 0.7 seconds in all.
 - `aiosendspin` moves a timeline only forward: `_resolve_channel_play_start`
   shifts every channel up to `now + send_ahead` at each commit. A stream fed at
   exactly playback pace sits at its floor, so a speaker connecting mid-stream
@@ -461,9 +462,10 @@ buffer and keeps it open. Each reaches the player and the session.
   for a buffered one. The Dot closes the old stream and opens one at the new
   rate.
 - Measured with Music Assistant and a JBL Go 3: the new `stream/start` came 163
-  to 349 ms after the request, 3 times. Connecting the speaker lost about 0.3
-  seconds of audio, about what a change of output costs the mapping on its own
-  (330 ms), and disconnecting it about 1 second (docs/audio.md).
+  to 349 ms after the request, 3 times. At a lead of 350, before "Over
+  Bluetooth", connecting the speaker lost about 0.3 seconds of audio, about what
+  a change of output costs the mapping on its own (330 ms), and disconnecting it
+  about 1 second (docs/audio.md).
 - `TestInteropStreamsAt44kToADotThatAsks` runs the request against the
   reference server: the stream arrives as 44.1 kHz FLAC, 2 seconds of it about
   88,200 frames.
@@ -509,9 +511,9 @@ buffer and keeps it open. Each reaches the player and the session.
   player's own reading and plays what is due. It needs lead, not depth, which
   `required_lead_time_ms` declares. "Over Bluetooth" above says where a
   shortfall goes.
-- Across 5 streams the first chunk was due 481 to 493 ms ahead and the lead
-  grew to about 2.4 seconds: `min_buffer_ms`, then that plus
-  `buffer_capacity`.
+- Across 5 PCM streams the first chunk was due 481 to 493 ms ahead and the
+  lead grew to about 2.4 seconds: `min_buffer_ms`, then that plus
+  `buffer_capacity`. FLAC leads further ("What the Dot declares").
 - A `stream/start` with nothing for a player flushes nothing, so a visualizer
   stream does not split a summary. `stream/clear` flushes the summary and keeps
   the stream. Giving up the player role flushes it then.
@@ -532,7 +534,8 @@ buffer and keeps it open. Each reaches the player and the session.
   `arrival - compute_client_time(timestamp - send_ahead)`, discarding samples
   from before convergence. `required_lead_time_ms` cannot be derived that way:
   chunks after `stream/start` arrive in a burst.
-- So 500 is a placeholder, and the wire can correct it without reconnecting.
+- So the speaker's 500 is a placeholder, and the wire can correct it without
+  reconnecting.
 - **No pairing method is advertised**, against the spec's "at least Pairing
   PSK". Claiming one the client cannot honour is worse. `offeredPairMethods`
   feeds both `client/hello` and the admission rules.
@@ -913,7 +916,7 @@ Each is refused, and each has a test that fails without it.
 - A browser's is not. Web Audio to CoreAudio is tens of ms on a Mac, varies
   with device and buffer size, and must be declared through
   `AudioContext.outputLatency`. The browser was also sent FLAC stereo, the Dots
-  PCM mono.
+  PCM mono, before the Dots took FLAC and stereo.
 - To resolve it: nudge `CONF_SENDSPIN_STATIC_DELAY` until aligned, which sizes
   the gap but not its owner. 1 metre of path difference is 2.9 ms.
 - Measured with a microphone: each speaker in its own group, the same chirp
