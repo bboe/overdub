@@ -2118,6 +2118,7 @@ func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
 	s := testServer(t, psk)
 	stubSensors(s)
 	shortSoundDelays(s)
+	steadySoundClock(s, 5*time.Millisecond)
 	s.sound = func() (bool, bool) { return true, true }
 
 	go s.PollLive(5 * time.Millisecond)

@@ -271,6 +271,12 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - `PollLive` is serial, so on a heavy tick the forks can push the next sample
   out: up to 2.3 seconds between the volume, the microphone and the sound read.
   `soundGap`, twice the interval, catches that.
+- The tests run `PollLive` on a 5 ms tick, so `soundGap` is 10 ms. In an ARM
+  container on a loaded CPU, the tick stalled past that about 20 times in 2
+  seconds, for up to 97 ms. At half a CPU, the 2 tests that wait for sound
+  failed 48 and 41 times in 50, and CI failed that way once. So a test that
+  runs the poll gives the sound read a clock that moves exactly 1 tick per
+  read. Both then passed 50 of 50.
 - With nothing subscribed the poll does not sample, for an unbounded time. So
   the reading and its clocks are forgotten as soon as nobody is subscribed.
   A carried reading reported the speaker playing after Home Assistant came back.

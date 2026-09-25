@@ -292,6 +292,7 @@ func TestResumingAfterNobodyWasListeningForgetsTheReading(t *testing.T) {
 func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	shortSoundDelays(s)
+	steadySoundClock(s, 5*time.Millisecond)
 	s.sound = func() (bool, bool) { return true, true }
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	s.memory = func() (float32, bool) { return 126.5, true }
@@ -364,6 +365,14 @@ func soundClock(s *Server) *fakeClock {
 	c := &fakeClock{at: time.Unix(1_000_000, 0)}
 	s.clock = c.now
 	return c
+}
+
+func steadySoundClock(s *Server, every time.Duration) {
+	at := time.Unix(1_000_000, 0)
+	s.clock = func() time.Time {
+		at = at.Add(every)
+		return at
+	}
 }
 
 func TestARouteChangeWakesTheNameRead(t *testing.T) {
