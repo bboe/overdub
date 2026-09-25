@@ -895,9 +895,14 @@ func TestAChunkThisPlayerCannotReadDoesNotDropTheSession(t *testing.T) {
 
 func playing(t *testing.T, peer *wsPeer, server *serverSide) {
 	t.Helper()
+	playingAt(t, peer, server, StreamRate)
+}
+
+func playingAt(t *testing.T, peer *wsPeer, server *serverSide, rate int) {
+	t.Helper()
 	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{
 		ServerTransmitted: 1, Player: &streamPlayer{
-			Codec: codecPCM, SampleRate: StreamRate,
+			Codec: codecPCM, SampleRate: rate,
 			Channels: StreamChannels, BitDepth: StreamBitDepth,
 		}}))
 }

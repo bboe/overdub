@@ -14,7 +14,7 @@ func (c *Chime) Play() error {
 	return errors.New("audio: built without OpenSL ES")
 }
 
-func (c *Chime) OpenStream(func(string, ...any)) (*Stream, error) {
+func (c *Chime) OpenStream(int, func(string, ...any)) (*Stream, error) {
 	return nil, errors.New("audio: built without OpenSL ES")
 }
 

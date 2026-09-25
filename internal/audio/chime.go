@@ -16,6 +16,8 @@ const (
 	chimeFade = 0.10
 )
 
+func Rates() []int { return []int{ChimeRate, BluetoothRate} }
+
 type note struct {
 	freq  float64
 	start float64
@@ -27,11 +29,11 @@ var chimeNotes = []note{
 	{freq: 1320.0, start: 0.18, dur: 0.22}, // E6
 }
 
-func chimePCM() []byte {
-	frames := int(chimeSeconds * ChimeRate)
+func chimePCM(rate int) []byte {
+	frames := int(chimeSeconds * float64(rate))
 	buf := make([]byte, frames*ChimeChannels*2)
 	for i := range frames {
-		t := float64(i) / ChimeRate
+		t := float64(i) / float64(rate)
 		var v float64
 		for _, n := range chimeNotes {
 			if t < n.start || t >= n.start+n.dur {

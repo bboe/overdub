@@ -225,7 +225,7 @@ func TestAFLACFrameInAnotherFormatIsRefusedBeforeTheDecoderSeesIt(t *testing.T) 
 	}{
 		{"24 kHz, a rate the decoder logs", func(b []byte) { b[2] = b[2]&0xf0 | 0x7 }},
 		{"176.4 kHz, a rate the decoder logs", func(b []byte) { b[2] = b[2]&0xf0 | 0x2 }},
-		{"44.1 kHz", func(b []byte) { b[2] = b[2]&0xf0 | 0x9 }},
+		{"44.1 kHz in a 48 kHz stream", func(b []byte) { b[2] = b[2]&0xf0 | 0x9 }},
 		{"a bit depth left to STREAMINFO, which the decoder reads as 0 bits",
 			func(b []byte) { b[3] &^= 0x0e }},
 		{"24-bit", func(b []byte) { b[3] = b[3]&^0x0e | 0x6<<1 }},
@@ -301,7 +301,8 @@ func TestAFLACStreamStartNeedsAHeaderForItsOwnFormat(t *testing.T) {
 		{"a bare STREAMINFO block", b64(good), true},
 		{"no header", "", false},
 		{"a header that is not base64", "fLaC!!", false},
-		{"a STREAMINFO at 44.1 kHz", b64(wrapped(streamInfo(44100, StreamChannels, 16))), false},
+		{"a STREAMINFO at 44.1 kHz for a 48 kHz stream",
+			b64(wrapped(streamInfo(BluetoothRate, StreamChannels, 16))), false},
 		{"a mono STREAMINFO", b64(wrapped(streamInfo(StreamRate, 1, 16))), false},
 		{"a 5-channel STREAMINFO", b64(wrapped(streamInfo(StreamRate, 5, 16))), false},
 		{"a 24-bit STREAMINFO", b64(wrapped(streamInfo(StreamRate, StreamChannels, 24))), false},
@@ -331,6 +332,36 @@ func TestAFLACStreamStartNeedsAHeaderForItsOwnFormat(t *testing.T) {
 
 func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
+func TestAFLACStreamAt44kTakesFramesAtItsOwnRate(t *testing.T) {
+	p := ours()
+	p.Codec, p.SampleRate = codecFLAC, BluetoothRate
+	p.CodecHeader = b64(wrapped(streamInfo(BluetoothRate, StreamChannels, StreamBitDepth)))
+	s := held()
+	startWith(t, s, &p)
+	if !s.Streaming() {
+		t.Fatal("a flac stream/start at 44.1 kHz with a header saying so was refused")
+	}
+	for _, code := range []byte{flacRate44kHz, flacRateFromHeader} {
+		c, err := s.AudioChunk(chunkBody(1, constantFrame(code, 16, 1234)))
+		if err != nil || c.Frames() != 16 {
+			t.Errorf("a 16-frame 44.1 kHz frame with rate code %#x came back as %v, %v",
+				code, c, err)
+		}
+	}
+	if _, err := s.AudioChunk(chunkBody(1, constantFrame(flacRate48kHz, 16, 1234))); !errors.Is(err, errFLACFormat) {
+		t.Errorf("a 48 kHz frame in a 44.1 kHz stream came back as %v, want the format"+
+			" refusal: played, it is the right audio at the wrong pitch", err)
+	}
+
+	p.CodecHeader = b64(wrapped(streamInfo(StreamRate, StreamChannels, StreamBitDepth)))
+	s = held()
+	startWith(t, s, &p)
+	if s.Streaming() {
+		t.Error("a 44.1 kHz stream/start with a 48 kHz header was taken, so a frame that" +
+			" leaves its rate to the header plays at a rate nothing agreed on")
+	}
+}
+
 func TestAFLACHeaderIsReadWithoutTheSizesItClaims(t *testing.T) {
 	picture := slices.Concat(flacMagic, []byte{0x86, 0, 0, 0x24}, // PICTURE, 36 bytes
 		[]byte{0, 0, 0, 3},                     // picture type
@@ -345,7 +376,7 @@ func TestAFLACHeaderIsReadWithoutTheSizesItClaims(t *testing.T) {
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		playable := flacHeaderPlayable(b64(header))
+		playable := flacHeaderPlayable(b64(header), StreamRate)
 		runtime.ReadMemStats(&after)
 		if playable {
 			t.Errorf("%s was taken for a STREAMINFO", what)
@@ -434,7 +465,7 @@ func FuzzFLACChunk(f *testing.F) {
 	f.Add(slices.Concat(frames...))
 	f.Add(constantFrame(flacRate48kHz, flacChunkFrames, 0))
 	f.Fuzz(func(t *testing.T, audio []byte) {
-		pcm, err := decodeFLAC(audio)
+		pcm, err := decodeFLAC(audio, StreamRate)
 		switch {
 		case err == nil && len(pcm)%frameBytes != 0:
 			t.Fatalf("decoded %d bytes, which is not whole frames", len(pcm))

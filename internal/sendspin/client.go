@@ -36,6 +36,7 @@ const (
 	provisionalWait = 30 * time.Second
 	pingAfter       = 60 * time.Second
 	volumeEvery     = 2500 * time.Millisecond
+	outputEvery     = 2500 * time.Millisecond
 	idleWait        = pingAfter * 5 / 2
 
 	typeClientState = "client/state"
@@ -46,6 +47,8 @@ const (
 	typeStreamClear = "stream/clear"
 	typeStreamEnd   = "stream/end"
 	typeServerTime  = "server/time"
+
+	typeStreamRequestFormat = "stream/request-format"
 )
 
 const bootIDPath = "/proc/sys/kernel/random/boot_id"
@@ -91,6 +94,14 @@ type clientState struct {
 	Player    *playerState `json:"player,omitempty"`
 }
 
+type formatRequest struct {
+	SampleRate int `json:"sample_rate"`
+}
+
+type requestFormat struct {
+	Player formatRequest `json:"player"`
+}
+
 type groupUpdate struct {
 	PlaybackState string `json:"playback_state"`
 	GroupID       string `json:"group_id"`
@@ -126,6 +137,7 @@ type Client struct {
 	timeEvery        time.Duration
 	reportEvery      time.Duration
 	volumeEvery      time.Duration
+	outputEvery      time.Duration
 	answerAfter      time.Duration
 
 	Peer *untrustedlog.Log
@@ -484,9 +496,14 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				go c.keepTime(session, nc, stop)
 				go c.reportDelays(session, nc, stop)
 				go c.watchVolume(stop)
+				go c.watchOutput(session, nc, stop, name)
 				stated = true
 			} else if regained {
 				c.tellServer()
+				select {
+				case session.reformat <- struct{}{}:
+				default:
+				}
 			}
 			once("sendspin: %q activated %s", name, strings.Join(roles, ","))
 		case typeGroupUpdate:
@@ -529,7 +546,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				c.Play.Printf("sendspin: %q started a stream carrying nothing for a player",
 					name)
 			case session.Streaming():
-				play.open()
+				play.open(offered.SampleRate)
 				c.Play.Printf("sendspin: %q started a %s stream", name, offered)
 			case !holdsPlayer(session.roles):
 				c.Play.Printf("sendspin: %q started a stream for a role this client does"+
@@ -537,8 +554,8 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			default:
 				play.stop()
 				c.Play.Printf("sendspin: %q offered a %s stream, and this player takes %s"+
-					" or %s %d Hz %d ch %d bit", name, offered, codecFLAC, codecPCM,
-					StreamRate, StreamChannels, StreamBitDepth)
+					" or %s at %d or %d Hz, %d ch %d bit", name, offered, codecFLAC, codecPCM,
+					StreamRate, BluetoothRate, StreamChannels, StreamBitDepth)
 			}
 		case typeStreamEnd:
 			ours, err := session.EndStream(payload)
@@ -784,6 +801,39 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written 
 		case <-time.After(apart):
 		}
 		pending = !settled()
+	}
+}
+
+func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{},
+	name string) {
+	if c.Config.OutputRate == nil {
+		return
+	}
+	tick := time.NewTicker(waitOr(c.outputEvery, outputEvery))
+	defer tick.Stop()
+	asked := StreamRate
+	for {
+		rate := c.Config.OutputRate()
+		if held, _ := c.reporting(); held == session && rate != asked {
+			err := session.WriteJSON(typeStreamRequestFormat,
+				requestFormat{Player: formatRequest{SampleRate: rate}})
+			if err != nil {
+				c.Peer.Printf("sendspin: this player could not ask for audio at %d Hz, so"+
+					" its connection goes: %v", rate, err)
+				nc.Close()
+				return
+			}
+			asked = rate
+			c.Play.Printf("sendspin: this dot's output runs at %d Hz, so it asked %q for"+
+				" audio at that rate", rate, name)
+		}
+		select {
+		case <-stop:
+			return
+		case <-session.reformat:
+			asked = StreamRate
+		case <-tick.C:
+		}
 	}
 }
 

@@ -418,8 +418,8 @@ type sendspinServer interface {
 
 type chimePlayer struct{ chime *audio.Chime }
 
-func (p chimePlayer) OpenStream(say func(string, ...any)) (sendspin.Stream, error) {
-	stream, err := p.chime.OpenStream(say)
+func (p chimePlayer) OpenStream(rate int, say func(string, ...any)) (sendspin.Stream, error) {
+	stream, err := p.chime.OpenStream(rate, say)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,6 +1055,9 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 		MACAddress:     strings.ToLower(mac),
 		UnpairedAccess: true,
 		BufferCapacity: sendspin.BufferCapacity,
+	}
+	if player != nil {
+		config.OutputRate = audio.OutputRate
 	}
 	if server := api.Load(); server != nil && server.CanSetVolume() {
 		config.Level, config.SetVolume = speakerLevel, setSpeakerVolume

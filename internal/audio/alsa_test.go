@@ -93,7 +93,7 @@ func running(delay int64) pcmStatus { return pcmStatus{State: "RUNNING", Delay: 
 
 func TestWhatIsAheadIsOurQueueAndTheHALTogether(t *testing.T) {
 	at := time.Now()
-	pt, err := point(3840, running(3056), at)
+	pt, err := point(3840, running(3056), at, ChimeRate)
 	if err != nil {
 		t.Fatalf("point: %v", err)
 	}
@@ -106,22 +106,43 @@ func TestWhatIsAheadIsOurQueueAndTheHALTogether(t *testing.T) {
 	}
 }
 
+func TestTheHALsDelayIsCountedInThePlayersFrames(t *testing.T) {
+	pt, err := point(3840, running(3072), time.Now(), BluetoothRate)
+	if err != nil {
+		t.Fatalf("point: %v", err)
+	}
+	if pt.Ahead != 3840+2822 {
+		t.Errorf("a full queue at %d Hz over a HAL holding 3,072 frames at %d Hz came back"+
+			" as %d, want %d: the HAL's 64 ms is 2,822 of the player's frames",
+			BluetoothRate, ChimeRate, pt.Ahead, 3840+2822)
+	}
+}
+
+func TestThePipelineCeilingIsOneSecondAtThePlayersRate(t *testing.T) {
+	if _, err := point(0, running(ChimeRate), time.Now(), BluetoothRate); err != nil {
+		t.Errorf("a pipeline of exactly 1 second at %d Hz was refused: %v", BluetoothRate, err)
+	}
+	if _, err := point(1, running(ChimeRate), time.Now(), BluetoothRate); err == nil {
+		t.Errorf("a pipeline 1 frame past 1 second at %d Hz was believed", BluetoothRate)
+	}
+}
+
 func TestAPlayerThatWillNotSayWhatItHoldsIsRefused(t *testing.T) {
-	if _, err := point(-1, running(0), time.Now()); err == nil {
+	if _, err := point(-1, running(0), time.Now(), ChimeRate); err == nil {
 		t.Error("a player that would not report its queue was believed, and a stream is" +
 			" then placed against a pipeline of nothing but the HAL")
 	}
 }
 
 func TestAReadingIsRefusedWhenTheOutputIsNotRunning(t *testing.T) {
-	if _, err := point(3840, pcmStatus{State: "XRUN"}, time.Now()); err == nil {
+	if _, err := point(3840, pcmStatus{State: "XRUN"}, time.Now(), ChimeRate); err == nil {
 		t.Error("a delay of zero from a stopped output was taken for a drained queue," +
 			" which places our frames about 57 ms early")
 	}
 }
 
 func TestAPipelineDeeperThanTheQueueAndAnyBufferIsRefused(t *testing.T) {
-	if _, err := point(3840, running(aheadCeiling), time.Now()); err == nil {
+	if _, err := point(3840, running(aheadCeiling), time.Now(), ChimeRate); err == nil {
 		t.Errorf("a pipeline past %d frames was believed. Nothing here can hold that"+
 			" much: the queue is eight blocks and the HAL buffer measured 58 to 64 ms,"+
 			" so a bigger number is a broken instrument -- and believing one places"+
@@ -143,7 +164,7 @@ func TestAStatusNamingNoDelayIsRefused(t *testing.T) {
 }
 
 func TestANegativeDelayIsRefusedWithNothingInOurQueueToHideIt(t *testing.T) {
-	if _, err := point(0, running(-3000), time.Now()); err == nil {
+	if _, err := point(0, running(-3000), time.Now(), ChimeRate); err == nil {
 		t.Error("a negative delay was believed with an empty queue, which places the" +
 			" stream that far late -- consistently, which is the one shape the slip" +
 			" check cannot see")
@@ -151,7 +172,7 @@ func TestANegativeDelayIsRefusedWithNothingInOurQueueToHideIt(t *testing.T) {
 }
 
 func TestANegativeDelayIsRefusedEvenWhenOurOwnQueueCoversItUp(t *testing.T) {
-	if _, err := point(3840, running(-3000), time.Now()); err == nil {
+	if _, err := point(3840, running(-3000), time.Now(), ChimeRate); err == nil {
 		t.Error("a full queue over a delay of -3,000 was believed, and it reads as a" +
 			" shallow pipeline rather than as a refusal: the stream then anchors 62.5 ms" +
 			" short and places every frame that far late, consistently, which is the one" +
@@ -160,7 +181,7 @@ func TestANegativeDelayIsRefusedEvenWhenOurOwnQueueCoversItUp(t *testing.T) {
 }
 
 func TestADelaySoLargeThatTheSumWrapsIsRefused(t *testing.T) {
-	if _, err := point(3840, running(math.MaxInt64), time.Now()); err == nil {
+	if _, err := point(3840, running(math.MaxInt64), time.Now(), ChimeRate); err == nil {
 		t.Error("a delay of the largest int64 was believed: the sum wraps negative, which" +
 			" is under the ceiling rather than over it, and the stream is then placed" +
 			" against a pipeline it reads as being behind the speaker")
@@ -221,6 +242,16 @@ func TestOnlyAConnectedA2DPDataSocketMeansBluetooth(t *testing.T) {
 	}
 }
 
+func TestTheOutputRateIsTheRateOfTheOutputInUse(t *testing.T) {
+	if got := outputRate(writeFile(t, "unix", socketsA2DP)); got != BluetoothRate {
+		t.Errorf("with a speaker taking audio the output rate is %d, want %d", got,
+			BluetoothRate)
+	}
+	if got := outputRate(writeFile(t, "unix", socketsIdle)); got != ChimeRate {
+		t.Errorf("with no speaker connected the output rate is %d, want %d", got, ChimeRate)
+	}
+}
+
 func TestBluetoothTakesTheA2DPDelayWhateverThePCMSays(t *testing.T) {
 	sockets := writeFile(t, "unix", socketsA2DP)
 	for _, pcm := range []string{
@@ -237,11 +268,11 @@ func TestBluetoothTakesTheA2DPDelayWhateverThePCMSays(t *testing.T) {
 }
 
 func TestAReadingSaysWhetherItsOutputTakesAudioInBursts(t *testing.T) {
-	pt, err := point(3840, pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}, time.Now())
+	pt, err := point(3840, pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}, time.Now(), ChimeRate)
 	if err != nil || !pt.Bursty {
 		t.Errorf("a Bluetooth reading came back as %+v, %v; want it marked bursty", pt, err)
 	}
-	if pt, _ := point(3840, running(3056), time.Now()); pt.Bursty {
+	if pt, _ := point(3840, running(3056), time.Now(), ChimeRate); pt.Bursty {
 		t.Error("a reading of the speaker's PCM was marked bursty")
 	}
 }

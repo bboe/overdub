@@ -66,10 +66,20 @@ func (m *mixer) add(s source) {
 		m.srcs = append(m.srcs, s)
 	}
 	m.mu.Unlock()
+	m.wake()
+}
+
+func (m *mixer) wake() {
 	select {
 	case m.woke <- struct{}{}:
 	default:
 	}
+}
+
+func (m *mixer) remove(s source) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.srcs = slices.DeleteFunc(m.srcs, func(held source) bool { return held == s })
 }
 
 func (m *mixer) sounding() bool {

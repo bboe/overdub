@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,7 +17,7 @@ const interopEnv = "SENDSPIN_INTEROP"
 
 const interopWait = 90 * time.Second
 
-func runInterop(t *testing.T, player Player, args ...string) string {
+func runInterop(t *testing.T, player Player, outputRate func() int, args ...string) string {
 	t.Helper()
 	if os.Getenv(interopEnv) == "" {
 		t.Skipf("set %s=1 to run the reference-server interop test (needs uv)", interopEnv)
@@ -35,6 +36,7 @@ func runInterop(t *testing.T, player Player, args ...string) string {
 	volume := &fakeVolume{at: 40, ok: true}
 	cfg := testConfig()
 	cfg.Level, cfg.SetVolume, cfg.SetMute = volume.level, volume.set, volume.mute
+	cfg.OutputRate = outputRate
 	client := &Client{
 		Config:      cfg,
 		Keys:        keys,
@@ -68,7 +70,7 @@ func runInterop(t *testing.T, player Player, args ...string) string {
 }
 
 func TestInteropWithTheReferenceServer(t *testing.T) {
-	said := runInterop(t, nil)
+	said := runInterop(t, nil, nil)
 	if !strings.Contains(said, "clock agreed with") {
 		t.Errorf("the reference server answered every question and no answer was a"+
 			" measurement, so the clock never converged. The daemon said:\n%s", said)
@@ -77,7 +79,7 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 
 func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 	player := &fakePlayer{}
-	said := runInterop(t, player, "--play-seconds=2")
+	said := runInterop(t, player, func() int { return StreamRate }, "--play-seconds=2")
 	if !strings.Contains(said, "started a flac 48000 Hz 2 ch 16 bit stream") {
 		t.Errorf("the reference server did not pick flac, the first format offered. The"+
 			" daemon said:\n%s", said)
@@ -96,5 +98,23 @@ func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 		t.Errorf("the player got %d bytes; the server streamed %d, and the %d in whole FLAC"+
 			" blocks must arrive unchanged. The encoder holds a partial block, and"+
 			" stopping the group drops it", len(got), len(want), whole)
+	}
+}
+
+func TestInteropStreamsAt44kToADotThatAsks(t *testing.T) {
+	player := &fakePlayer{}
+	said := runInterop(t, player, func() int { return BluetoothRate }, "--play-seconds=2")
+	if !strings.Contains(said, "started a flac 44100 Hz 2 ch 16 bit stream") {
+		t.Errorf("the reference server did not send 44.1 kHz to a dot that asked for it."+
+			" The daemon said:\n%s", said)
+	}
+	if got := player.openedAt(); !slices.Equal(got, []int{BluetoothRate}) {
+		t.Fatalf("the player was opened at %v Hz, want once at %d", got, BluetoothRate)
+	}
+	want := 2 * BluetoothRate
+	if got := len(player.last().audio()) / frameBytes; got > want || got < want-flacChunkFrames {
+		t.Errorf("the player got %d frames for 2 seconds at %d Hz, want %d less at most"+
+			" the encoder's partial block: 48 kHz audio labelled 44.1 would be about %d",
+			got, BluetoothRate, want, 2*StreamRate)
 	}
 }

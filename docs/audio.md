@@ -43,6 +43,31 @@ device until a reboot.
   going", and stops a second `close(c.stop)` panicking the daemon.
 - `SLAndroidConfigurationItf` is optional; it only sets the stream type.
 
+### The rate
+
+- Each output runs at one rate. `/system/etc/audio_policy.conf` gives the A2DP
+  output `sampling_rates 44100` and nothing else. The primary output (speaker
+  and jack) lists `48000|44100`, but it opens at 48 kHz at boot, and every dump
+  read 48,000.
+- AudioFlinger converts a track at another rate. A 48 kHz stream to a Bluetooth
+  speaker was resampled on the Dot, and a 44.1 kHz track twice: by the server,
+  then by AudioFlinger.
+- So the player opens at the stream's rate, and `internal/sendspin` asks the
+  server for the output's rate (docs/sendspin.md). Over a JBL Go 3 the daemon's
+  track then read 44,100 Hz on the 44.1 kHz output, where it had read 48,000.
+  Back on the speaker it read 48,000 and `F`, a fast track, which AudioFlinger
+  grants only to a track at its output's rate.
+- Not 44.1 kHz everywhere: the speaker would then resample every stream, and a
+  48 kHz source twice.
+- A stream at another rate joins the mixer only after the writer closes the
+  player and opens it again at that rate. No block of it plays at the old rate,
+  and its 100 ms settle starts on the new player.
+- Over Bluetooth, 2 streams that reopened the player were placed 220 and 255 ms
+  after they opened.
+- A chime sounding when the rate changes is cut off. At the new rate it would
+  play off pitch.
+- A player that will not open again stops the writer, as a failed write does.
+
 ### The writer and the queue
 
 - Sounds are added to a mixer, not played. A second press rewinds the chime
@@ -54,7 +79,8 @@ device until a reboot.
   C pool copies each block, so the caller's bytes stay ordinary Go memory.
 - A block is 10 ms (480 frames, 1,920 bytes of stereo), with 8 buffers: the
   queue holds 80 ms. That is also the scheduling quantum: a stream can start no
-  more finely than one buffer.
+  more finely than one buffer. At 44.1 kHz the same block is 10.9 ms, and the
+  queue 87 ms.
 - A full queue is ordinary. The writer retries every 2 ms and gives up after
   1 second, about 12 times the queue's depth. Only a queue that has stopped
   draining reaches that: a wedged track, an AudioFlinger restart, or the driver
@@ -196,6 +222,10 @@ empty.
   8.9 ms late), while later samples agree to 90 us. The first frame count is
   always exactly **-3,056**; the variation is in the HAL's delay.
 - The HAL's `delay` holds 2,768 to 3,072 frames: 58 to 64 ms.
+- The HAL's `delay` counts 48 kHz frames whatever the stream's rate, and
+  `a2dpDelay` is kept in the same frames. `point` converts both into the
+  player's frames. Unconverted, a 44.1 kHz stream is placed about 5 ms off on
+  the speaker and 36 ms off over Bluetooth.
 
 ## Playing audio at a time somebody else chose
 
@@ -317,6 +347,18 @@ one at a time, as there is one player.
   output had been idle, and the re-anchor read 82 ms against a warm 141. The
   mapping was then placed again 3 times in 15 seconds, and the stream stayed
   off until the next one. A switch with the output already awake read 141.
+- A server that changes format replaces the stream instead. The Dot asks for
+  48 kHz once the speaker goes, and the new stream is placed afresh. Twice it
+  was placed at 142 and 143 ms and played on.
+- That costs about 1 second of audio at each disconnect: the new streams were
+  placed 0.93 and 1.08 seconds after they opened. It is the route change, not
+  the reopen or standby: a stream on a speaker idle for 3 minutes was placed in
+  143 ms.
+- Connecting costs about 0.3 seconds. The new 44.1 kHz stream's first chunk was
+  due 343 ms ahead, and 320 ms was dropped as late.
+- A stream opening over Bluetooth loses its start the same way. Music
+  Assistant's first chunk was due 141 ms ahead of a 429 ms pipeline, and 548 ms
+  was dropped. A 48 kHz stream over Bluetooth dropped 495 ms the same way.
 
 ### What a peer's audio can cost
 
@@ -390,5 +432,6 @@ one at a time, as there is one player.
 - The tones are the original recording's, measured by DFT: 880.0 Hz and
   1320.0 Hz, within 2 cents of A5 and E6, with no partial above the fundamental
   that matters.
-- Generating the chime takes 12.7 ms on the Dot, once at startup. The resident
-  cost is about 46 KB: the 38,400-byte clip and the 7,680-byte pool.
+- The chime is generated at both rates, once at startup. A mono 48 kHz clip
+  took 12.7 ms on the Dot; the stereo clips are not timed. The resident cost is
+  about 163 KB: clips of 76,800 and 70,560 bytes, and the 15,360-byte pool.

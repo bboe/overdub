@@ -18,6 +18,7 @@ const (
 	flacHeadBytes       = 4
 	flacSync            = 0xfff8
 	flacRateFromHeader  = 0x0
+	flacRate44kHz       = 0x9
 	flacRate48kHz       = 0xa
 	flacDepth16Bit      = 0x4
 	flacTwoChannels     = 0x1
@@ -25,6 +26,8 @@ const (
 	flacMidSide         = 0xa
 	flacChunkFrames     = 4608 // the streamable subset's largest block at 48 kHz
 )
+
+var flacRates = map[int]byte{StreamRate: flacRate48kHz, BluetoothRate: flacRate44kHz}
 
 var (
 	flacMagic = []byte("fLaC")
@@ -36,7 +39,7 @@ var (
 		errTransport, flacChunkFrames)
 )
 
-func flacHeaderPlayable(encoded string) bool {
+func flacHeaderPlayable(encoded string, rate int) bool {
 	header, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return false
@@ -53,21 +56,21 @@ func flacHeaderPlayable(encoded string) bool {
 		return false
 	}
 	packed := binary.BigEndian.Uint64(header[10:]) // sample rate, channels, depth
-	return int(packed>>44) == StreamRate &&
+	return int(packed>>44) == rate &&
 		int(packed>>41&0x7)+1 == StreamChannels &&
 		int(packed>>36&0x1f)+1 == StreamBitDepth
 }
 
-func flacFrameInStreamFormat(head []byte) bool {
-	rate := head[2] & 0x0f       // sample rate
+func flacFrameInStreamFormat(head []byte, rate int) bool {
+	code := head[2] & 0x0f       // sample rate
 	channels := head[3] >> 4     // channel assignment
 	depth := head[3] >> 1 & 0x07 // sample size
-	return (rate == flacRateFromHeader || rate == flacRate48kHz) &&
+	return (code == flacRateFromHeader || code == flacRates[rate]) &&
 		(channels == flacTwoChannels || channels >= flacLeftSide && channels <= flacMidSide) &&
 		depth == flacDepth16Bit
 }
 
-func decodeFLAC(audio []byte) ([]byte, error) {
+func decodeFLAC(audio []byte, rate int) ([]byte, error) {
 	var pcm []byte
 	budget := flacChunkFrames
 	r := bytes.NewReader(audio)
@@ -76,7 +79,7 @@ func decodeFLAC(audio []byte) ([]byte, error) {
 		if len(head) < flacHeadBytes || binary.BigEndian.Uint16(head)&^1 != flacSync {
 			return nil, errFLACFrame
 		}
-		if !flacFrameInStreamFormat(head) {
+		if !flacFrameInStreamFormat(head, rate) {
 			return nil, errFLACFormat
 		}
 		f, err := flacframe.New(r)

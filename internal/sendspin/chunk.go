@@ -54,12 +54,12 @@ func parseChunk(body []byte) (*audioChunk, error) {
 	return &audioChunk{ServerTime: stamp, PCM: pcm}, nil
 }
 
-func parseFLACChunk(body []byte) (*audioChunk, error) {
+func parseFLACChunk(body []byte, rate int) (*audioChunk, error) {
 	stamp, err := chunkStamp(body)
 	if err != nil {
 		return nil, err
 	}
-	pcm, err := decodeFLAC(body[chunkStampBytes:])
+	pcm, err := decodeFLAC(body[chunkStampBytes:], rate)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func (s *Session) AudioChunk(body []byte) (*audioChunk, error) {
 		return nil, nil
 	}
 	if s.flac {
-		return parseFLACChunk(body)
+		return parseFLACChunk(body, s.rate)
 	}
 	return parseChunk(body)
 }
@@ -90,8 +90,6 @@ func (s *Session) Lead(serverTime int64) (lead, spread, offset int64, ok bool) {
 const reportEvery = 30 * time.Second
 
 func micros(us int64) time.Duration { return time.Duration(us) * time.Microsecond }
-
-func frames(n int64) time.Duration { return time.Duration(n) * time.Second / StreamRate }
 
 type chunkRun struct {
 	announced bool
@@ -114,11 +112,11 @@ type chunkRun struct {
 
 	play        *playback
 	lastStream  Stream
-	lastPlaced  int64
-	lastSilence int64
+	lastPlaced  time.Duration
+	lastSilence time.Duration
 }
 
-func (r *chunkRun) placedSince() (audio, silence int64) {
+func (r *chunkRun) placedSince() (audio, silence time.Duration) {
 	if r.play == nil {
 		return 0, 0
 	}
@@ -193,13 +191,11 @@ func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 			" %s and %s ahead, against a clock good to %s that moved %s; the player"+
 			" placed %s of audio against %s of silence%s", name,
 			r.chunks, r.frames, r.bytes, micros(r.leastLead), micros(r.mostLead),
-			micros(r.spread), micros(r.lastOff-r.firstOff), frames(audio), frames(silence),
-			r.delaySet())
+			micros(r.spread), micros(r.lastOff-r.firstOff), audio, silence, r.delaySet())
 	} else {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, with no clock"+
 			" to say when they were due; the player placed %s of audio against %s of"+
-			" silence%s", name, r.chunks, r.frames, r.bytes, frames(audio), frames(silence),
-			r.delaySet())
+			" silence%s", name, r.chunks, r.frames, r.bytes, audio, silence, r.delaySet())
 	}
 	*r = chunkRun{announced: r.announced, every: r.every, due: time.Now().Add(r.every),
 		clockKnown: r.clockKnown, firstOff: r.lastOff, lastOff: r.lastOff,

@@ -226,6 +226,7 @@ type Config struct {
 	Level          func() (percent int, muted, ok bool)
 	SetVolume      func(percent int)
 	SetMute        func(on bool)
+	OutputRate     func() int
 }
 
 func (c Config) setsVolume() bool { return c.Level != nil && c.SetVolume != nil }
@@ -247,6 +248,21 @@ func offeredPairMethods() map[string]pairMethod { return map[string]pairMethod{}
 
 func supportedRoles() []string { return []string{rolePlayerV1} }
 
+func supportedFormats() []audioFormat {
+	var out []audioFormat
+	for _, rate := range streamRates() {
+		for _, codec := range []string{codecFLAC, codecPCM} {
+			out = append(out, audioFormat{
+				Codec:      codec,
+				Channels:   StreamChannels,
+				SampleRate: rate,
+				BitDepth:   StreamBitDepth,
+			})
+		}
+	}
+	return out
+}
+
 func (c Config) hello() clientHello {
 	return clientHello{
 		Name: c.Name,
@@ -258,17 +274,7 @@ func (c Config) hello() clientHello {
 		SupportedRoles:       supportedRoles(),
 		SupportedPairMethods: offeredPairMethods(),
 		PlayerSupport: &playerSupport{
-			SupportedFormats: []audioFormat{{
-				Codec:      codecFLAC,
-				Channels:   StreamChannels,
-				SampleRate: StreamRate,
-				BitDepth:   StreamBitDepth,
-			}, {
-				Codec:      codecPCM,
-				Channels:   StreamChannels,
-				SampleRate: StreamRate,
-				BitDepth:   StreamBitDepth,
-			}},
+			SupportedFormats:  supportedFormats(),
 			BufferCapacity:    c.BufferCapacity,
 			SupportedCommands: c.playerCommands(),
 		},
@@ -331,6 +337,9 @@ func (s *Session) Goodbye(reason string) error {
 
 const (
 	StreamRate     = 48000
+	BluetoothRate  = 44100
 	StreamChannels = 2
 	StreamBitDepth = 16
 )
+
+func streamRates() []int { return []int{StreamRate, BluetoothRate} }

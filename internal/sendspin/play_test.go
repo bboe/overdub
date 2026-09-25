@@ -22,8 +22,8 @@ type fakeStream struct {
 	finished  int
 	resumed   int
 	exhausted bool
-	placed    int64
-	quiet     int64
+	placed    time.Duration
+	quiet     time.Duration
 }
 
 func (s *fakeStream) Write(at time.Time, pcm []byte) error {
@@ -69,13 +69,13 @@ func (s *fakeStream) Resume() bool {
 	return true
 }
 
-func (s *fakeStream) Placed() (audio, silence int64) {
+func (s *fakeStream) Placed() (audio, silence time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.placed, s.quiet
 }
 
-func (s *fakeStream) heard(audio, silence int64) {
+func (s *fakeStream) heard(audio, silence time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.placed, s.quiet = audio, silence
@@ -126,10 +126,11 @@ func (s *fakeStream) flushed() int {
 type fakePlayer struct {
 	mu      sync.Mutex
 	opened  []*fakeStream
+	rates   []int
 	refusal error
 }
 
-func (p *fakePlayer) OpenStream(func(string, ...any)) (Stream, error) {
+func (p *fakePlayer) OpenStream(rate int, _ func(string, ...any)) (Stream, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.refusal != nil {
@@ -137,7 +138,14 @@ func (p *fakePlayer) OpenStream(func(string, ...any)) (Stream, error) {
 	}
 	s := &fakeStream{}
 	p.opened = append(p.opened, s)
+	p.rates = append(p.rates, rate)
 	return s, nil
+}
+
+func (p *fakePlayer) openedAt() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.rates)
 }
 
 func (p *fakePlayer) count() int {
@@ -342,6 +350,31 @@ func TestAStreamStartingAgainCarriesOnWhereTheLastOneLeftOff(t *testing.T) {
 	}
 }
 
+func TestAStreamAtAnotherRateReplacesTheOneOpen(t *testing.T) {
+	ln := listenLocal(t)
+	c, player := playingClient(t)
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	playing(t, peer, server)
+	waitFor(t, "a stream to be opened", func() bool { return player.count() == 1 })
+	first := player.last()
+
+	playingAt(t, peer, server, BluetoothRate)
+	waitFor(t, "a stream at the new rate", func() bool { return player.count() == 2 })
+	if first.shut() != 1 {
+		t.Error("the stream at the old rate was left open, so the player holds it and" +
+			" refuses the new one, and a server that changed format mid-track is silent")
+	}
+	playingAt(t, peer, server, BluetoothRate)
+	handled(t, peer, server)
+	if got := player.openedAt(); !slices.Equal(got, []int{StreamRate, BluetoothRate}) {
+		t.Errorf("streams were opened at %v Hz, want %v: each stream/start opens the"+
+			" player at its own rate, and a repeat at the same rate takes up the stream"+
+			" already open", got, []int{StreamRate, BluetoothRate})
+	}
+}
+
 func TestAPlayerStreamThatHasPlayedItselfOutIsReplaced(t *testing.T) {
 	ln := listenLocal(t)
 	c, player := playingClient(t)
@@ -438,7 +471,7 @@ func TestAFormatThisPlayerCannotTakeOpensNoStream(t *testing.T) {
 
 	peer.writeBinary(server.sealJSON(t, typeStreamStart, streamStart{
 		ServerTransmitted: 1, Player: &streamPlayer{
-			Codec: codecPCM, SampleRate: 44100,
+			Codec: codecPCM, SampleRate: 96000,
 			Channels: StreamChannels, BitDepth: StreamBitDepth,
 		}}))
 	peer.writeBinary(server.sealJSON(t, typeGroupUpdate, groupUpdate{GroupName: "after"}))
@@ -448,7 +481,7 @@ func TestAFormatThisPlayerCannotTakeOpensNoStream(t *testing.T) {
 
 	if player.count() != 1 {
 		t.Error("a stream in a format this client never advertised was opened anyway;" +
-			" played as pcm 48 kHz it is noise or the right audio at the wrong pitch")
+			" played at another rate it is the right audio at the wrong pitch")
 	}
 }
 

@@ -2,6 +2,7 @@ package sendspin
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -170,16 +171,19 @@ func TestHelloDeclaresPlayerAndTheFormatWeCanPlay(t *testing.T) {
 	if h.PlayerSupport == nil {
 		t.Fatal("player@v1 is listed with no player@v1_support object")
 	}
-	var codecs []string
+	var offered []string
 	for _, f := range h.PlayerSupport.SupportedFormats {
-		if f.SampleRate != StreamRate || f.Channels != StreamChannels || f.BitDepth != StreamBitDepth {
+		if f.Channels != StreamChannels || f.BitDepth != StreamBitDepth {
 			t.Errorf("offered format = %+v", f)
 		}
-		codecs = append(codecs, f.Codec)
+		offered = append(offered, fmt.Sprintf("%s %d", f.Codec, f.SampleRate))
 	}
-	if !slices.Equal(codecs, []string{codecFLAC, codecPCM}) {
-		t.Errorf("supported_formats offers %v, want flac first for the bandwidth and pcm"+
-			" after it, which every server must be able to send", codecs)
+	want := []string{"flac 48000", "pcm 48000", "flac 44100", "pcm 44100"}
+	if !slices.Equal(offered, want) {
+		t.Errorf("supported_formats offers %v, want %v: flac before pcm at each rate for"+
+			" the bandwidth, and 48 kHz first, because a server plays the first format"+
+			" until the client asks for another, and the speaker runs at 48 kHz",
+			offered, want)
 	}
 	if len(h.SupportedPairMethods) != 0 {
 		t.Error("no pairing method is implemented yet, so none may be advertised")
@@ -189,13 +193,21 @@ func TestHelloDeclaresPlayerAndTheFormatWeCanPlay(t *testing.T) {
 	}
 }
 
-func TestHelloMatchesTheChimeFormat(t *testing.T) {
+func TestHelloOffersTheRatesThePlayerOpensAt(t *testing.T) {
+	var rates []int
 	for _, f := range testConfig().hello().PlayerSupport.SupportedFormats {
-		if f.SampleRate != audio.ChimeRate || f.Channels != audio.ChimeChannels {
-			t.Errorf("%s is %d Hz / %d channel(s) and the chime is %d Hz / %d; they share"+
-				" one player, so a mismatch is silence or a chime at the wrong pitch",
-				f.Codec, f.SampleRate, f.Channels, audio.ChimeRate, audio.ChimeChannels)
+		if !slices.Contains(rates, f.SampleRate) {
+			rates = append(rates, f.SampleRate)
 		}
+		if f.Channels != audio.ChimeChannels {
+			t.Errorf("%s is %d channel(s) and the player is %d; they share one player, so"+
+				" a mismatch is noise", f.Codec, f.Channels, audio.ChimeChannels)
+		}
+	}
+	if !slices.Equal(rates, audio.Rates()) {
+		t.Errorf("supported_formats offers %v Hz and the player opens at %v Hz: a rate"+
+			" offered and not opened is a stream refused, and one opened and not"+
+			" offered is one a server may never send", rates, audio.Rates())
 	}
 }
 
@@ -329,7 +341,9 @@ func TestClientHelloIsExactlyThisOnTheWire(t *testing.T) {
 		`"supported_roles":["player@v1"],` +
 		`"player@v1_support":{"supported_formats":[{"codec":"flac","channels":2,` +
 		`"sample_rate":48000,"bit_depth":16},{"codec":"pcm","channels":2,` +
-		`"sample_rate":48000,"bit_depth":16}],"buffer_capacity":65536,` +
+		`"sample_rate":48000,"bit_depth":16},{"codec":"flac","channels":2,` +
+		`"sample_rate":44100,"bit_depth":16},{"codec":"pcm","channels":2,` +
+		`"sample_rate":44100,"bit_depth":16}],"buffer_capacity":65536,` +
 		`"supported_commands":[]},"unpaired_access":{"enabled":true}}}`
 	if string(got) != want {
 		t.Errorf("client/hello is\n%s\nwant\n%s", got, want)
@@ -362,6 +376,7 @@ func TestTheDeclaredNamesAreFixed(t *testing.T) {
 		got, want int
 	}{
 		{"sample rate", StreamRate, 48000},
+		{"sample rate over Bluetooth", BluetoothRate, 44100},
 		{"channels", StreamChannels, 2},
 		{"bit depth", StreamBitDepth, 16},
 	} {

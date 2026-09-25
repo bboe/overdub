@@ -13,8 +13,8 @@ const (
 	frameBytes = ChimeChannels * 2
 
 	streamAhead  = 30 * time.Second
-	streamHold   = 30 * ChimeRate
-	streamChunks = streamHold / BlockFrames
+	streamHold   = 30 * time.Second
+	streamChunks = 3000
 
 	anchorSettle = 100 * time.Millisecond
 	anchorTake   = 5
@@ -27,10 +27,10 @@ const (
 	burstyBand  = 4 * time.Millisecond
 	burstySlip  = 150 * time.Millisecond
 
-	deadBand   = ChimeRate / 200
-	softStep   = 21 * ChimeRate / 1000000
+	deadBand   = 5 * time.Millisecond
+	softStep   = 21 * time.Microsecond
 	easeApart  = 200
-	snapAbove  = ChimeRate / 20
+	snapAbove  = 50 * time.Millisecond
 	smoothOver = 50
 	smoothBits = 10
 
@@ -43,12 +43,14 @@ var (
 	errStreamDone   = errors.New("audio: the stream has been ended")
 )
 
-func frameTime(n int64) time.Duration {
-	return time.Duration(n/ChimeRate)*time.Second +
-		time.Duration(n%ChimeRate)*time.Second/ChimeRate
+func frameTime(rate int, n int64) time.Duration {
+	r := int64(rate)
+	return time.Duration(n/r)*time.Second + time.Duration(n%r)*time.Second/time.Duration(r)
 }
 
-func frameCount(d time.Duration) int64 { return int64(d) * ChimeRate / int64(time.Second) }
+func frameCount(rate int, d time.Duration) int64 {
+	return int64(d) * int64(rate) / int64(time.Second)
+}
 
 type queued struct {
 	at    time.Time
@@ -80,12 +82,12 @@ func (s *Stream) smoothed(err int64) int64 {
 	return s.smooth >> smoothBits
 }
 
-func ease(err int64) int64 {
-	step := int64(max(1, softStep))
+func (s *Stream) ease(err int64) int64 {
+	band, step := frameCount(s.rate, deadBand), max(1, frameCount(s.rate, softStep))
 	switch {
-	case err >= deadBand:
+	case err >= band:
 		return min(err, step)
-	case err <= -deadBand:
+	case err <= -band:
 		return max(err, -step)
 	default:
 		return 0
@@ -93,6 +95,7 @@ func ease(err int64) int64 {
 }
 
 type Stream struct {
+	rate   int
 	say    func(string, ...any)
 	closer func()
 
@@ -161,9 +164,9 @@ func (s *Stream) Write(at time.Time, pcm []byte) error {
 			" this player will hold", due.Round(time.Millisecond), streamAhead)
 	}
 	frames := int64(len(pcm) / frameBytes)
-	if s.held+frames > streamHold {
+	if s.held+frames > frameCount(s.rate, streamHold) {
 		return fmt.Errorf("audio: %s already buffered, so another %d frames passes the %s"+
-			" this player holds", frameTime(s.held), frames, frameTime(streamHold))
+			" this player holds", frameTime(s.rate, s.held), frames, streamHold)
 	}
 	if len(s.queue) >= streamChunks {
 		return fmt.Errorf("audio: %d chunks are already queued, so another one passes the"+
@@ -201,10 +204,10 @@ func (s *Stream) Resume() bool {
 	return true
 }
 
-func (s *Stream) Placed() (audio, silence int64) {
+func (s *Stream) Placed() (audio, silence time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.placed, s.silence
+	return frameTime(s.rate, s.placed), frameTime(s.rate, s.silence)
 }
 
 func (s *Stream) Spent() bool {
@@ -242,12 +245,12 @@ func (s *Stream) Close() {
 		s.report("audio: the stream placed %s of audio against %s of silence, dropped %s"+
 			" that arrived late and %s that was still buffered when the server ended it,"+
 			" eased %s onto the server's clock, and was placed again %d times",
-			frameTime(placed), frameTime(silence), frameTime(late), frameTime(ended),
-			frameTime(eased), slips)
+			frameTime(s.rate, placed), frameTime(s.rate, silence), frameTime(s.rate, late),
+			frameTime(s.rate, ended), frameTime(s.rate, eased), slips)
 	} else {
 		s.report("audio: the stream never learned where the player had reached, so it"+
 			" played %s of silence and threw away the %s it was holding",
-			frameTime(silence), frameTime(held+ended))
+			frameTime(s.rate, silence), frameTime(s.rate, held+ended))
 	}
 	if s.closer != nil {
 		s.closer()
@@ -284,6 +287,7 @@ func (s *Stream) read(block []int16) (int, bool) {
 
 func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
 	frames := len(block) / ChimeChannels
+	snap := frameCount(s.rate, snapAbove)
 	pos := 0
 	for pos < frames && len(s.queue) > 0 {
 		c := &s.queue[0]
@@ -296,12 +300,12 @@ func (s *Stream) fill(block []int16) (filled, blended, trimmed int) {
 			err := s.frameAt(c.at) - want
 			step := int64(0)
 			if held := s.smoothed(err); s.index-s.easedAt >= easeApart {
-				step = ease(held)
+				step = s.ease(held)
 			}
 			if step != 0 {
 				s.easedAt = s.index
 			}
-			if !s.began || s.jump || err > snapAbove || err < -snapAbove {
+			if !s.began || s.jump || err > snap || err < -snap {
 				step, s.smooth = err, 0
 				s.jump = s.jump && err <= -int64(c.frames())
 			}
@@ -373,7 +377,7 @@ func (s *Stream) skip(frames int64) {
 }
 
 func (s *Stream) frameAt(when time.Time) int64 {
-	return s.originIndex + frameCount(when.Sub(s.origin))
+	return s.originIndex + frameCount(s.rate, when.Sub(s.origin))
 }
 
 func (s *Stream) wants() bool {
@@ -417,7 +421,7 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 	s.asked = s.blocks
 	s.unread = 0
 
-	due := p.At.Add(frameTime(p.Ahead))
+	due := p.At.Add(frameTime(s.rate, p.Ahead))
 	if p.Bursty != s.bursty {
 		s.anchored, s.candidates, s.outside = false, nil, 0
 		s.unease()
@@ -427,7 +431,7 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 		if len(s.candidates) == 0 {
 			s.ref = s.index
 		}
-		s.candidates = append(s.candidates, due.Add(-frameTime(s.index-s.ref)))
+		s.candidates = append(s.candidates, due.Add(-frameTime(s.rate, s.index-s.ref)))
 		if len(s.candidates) < anchorTake {
 			return 0, 0, false
 		}
@@ -437,7 +441,7 @@ func (s *Stream) place(p Point) (depth, slip time.Duration, again bool) {
 		s.firstSum, s.firstTaken = 0, 0
 		return due.Sub(p.At), 0, false
 	}
-	slip = due.Sub(s.origin.Add(frameTime(s.index - s.originIndex)))
+	slip = due.Sub(s.origin.Add(frameTime(s.rate, s.index-s.originIndex)))
 	if p.Bursty {
 		return s.follow(slip)
 	}

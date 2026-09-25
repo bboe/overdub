@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func quiet() *Stream { return &Stream{say: func(string, ...any) {}} }
+func quiet() *Stream { return &Stream{rate: ChimeRate, say: func(string, ...any) {}} }
 
 func anchorAt(s *Stream, when time.Time) {
 	s.first = time.Now().Add(-anchorSettle)
@@ -170,6 +170,87 @@ func TestAudioIsPlacedAtTheFrameItsTimestampNames(t *testing.T) {
 	}
 }
 
+func TestAStreamPlacesAndCountsInItsOwnRatesFrames(t *testing.T) {
+	s := quiet()
+	s.rate = BluetoothRate
+	now := time.Now()
+	s.first = now.Add(-anchorSettle)
+	for range anchorTake {
+		s.observe(Point{Ahead: BluetoothRate / 10, At: now})
+	}
+	if err := s.Write(now.Add(150*time.Millisecond), level(1000, 4000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	block := make([]int16, BlockSamples)
+	var played []int16
+	for range 6 {
+		s.read(block)
+		played = append(played, left(block)...)
+	}
+	if got := slices.IndexFunc(played, func(v int16) bool { return v != 0 }); got != BluetoothRate/20 {
+		t.Errorf("audio due 50 ms past the frame the player reaches next began at frame %d,"+
+			" want %d: a %d Hz stream counted in another rate's frames drifts from the"+
+			" group by the ratio", got, BluetoothRate/20, BluetoothRate)
+	}
+	if _, silence := s.Placed(); silence != 50*time.Millisecond {
+		t.Errorf("the stream reported %s of silence ahead of the chunk, want 50ms", silence)
+	}
+}
+
+func TestAStreamFollowsReadingsInItsOwnRatesFrames(t *testing.T) {
+	s := quiet()
+	s.rate = BluetoothRate
+	now := time.Now()
+	block := make([]int16, BlockSamples)
+	s.first = now.Add(-anchorSettle)
+	for range anchorTake {
+		s.observe(Point{At: now.Add(frameTime(BluetoothRate, s.index))})
+		s.read(block)
+	}
+	if !s.anchored || !s.origin.Equal(now) {
+		t.Fatalf("readings a block apart anchored the stream at %s from the truth; each"+
+			" is taken back to the first by the frames between them, at the stream's"+
+			" own rate", s.origin.Sub(now))
+	}
+	for b := range 300 {
+		s.read(block)
+		if b%observeEvery == 0 {
+			s.observe(Point{At: now.Add(frameTime(BluetoothRate, s.index))})
+		}
+	}
+	if s.slips != 0 {
+		t.Errorf("readings that agree with a %d Hz stream placed it again %d times in"+
+			" 3 seconds: a slip counted in another rate's frames grows about 80 ms a"+
+			" second", BluetoothRate, s.slips)
+	}
+}
+
+func TestAChunkPastTheSnapIsPlacedWhereItIsDueAtItsOwnRate(t *testing.T) {
+	s := quiet()
+	s.rate = BluetoothRate
+	now := time.Now()
+	anchorAt(s, now)
+	block := make([]int16, BlockSamples)
+	if err := s.Write(now, level(BlockFrames, 1000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	s.read(block)
+	const late = 2300
+	if err := s.Write(now.Add(frameTime(BluetoothRate, BlockFrames+late)), level(BlockFrames, 4000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var played []int16
+	for range 8 {
+		s.read(block)
+		played = append(played, left(block)...)
+	}
+	if got := slices.IndexFunc(played, func(v int16) bool { return v != 0 }); got < late-1 || got > late {
+		t.Errorf("a chunk due %d frames on, past the %s snap at %d Hz, began at frame %d:"+
+			" it was eased toward its place instead of put there", late, snapAbove,
+			BluetoothRate, got)
+	}
+}
+
 func TestChunksThatDoNotDivideIntoBlocksStayContinuous(t *testing.T) {
 	s := quiet()
 	now := time.Now()
@@ -265,18 +346,21 @@ func TestAGapIsSilenceRatherThanTheNextChunkPulledForward(t *testing.T) {
 }
 
 func TestTheStreamHoldsABoundedAmountOfAudio(t *testing.T) {
-	s := quiet()
-	now := time.Now()
-	for i := range 30 {
-		if err := s.Write(now, level(ChimeRate, 100)); err != nil {
-			t.Fatalf("second %d of the 30 aiosendspin may send ahead: %v; buffer_capacity"+
-				" counts bytes, so a FLAC stream through a quiet passage reaches that cap",
-				i, err)
+	for _, rate := range Rates() {
+		s := quiet()
+		s.rate = rate
+		now := time.Now()
+		for i := range 30 {
+			if err := s.Write(now, level(rate, 100)); err != nil {
+				t.Fatalf("at %d Hz, second %d of the 30 aiosendspin may send ahead: %v;"+
+					" buffer_capacity counts bytes, so a FLAC stream through a quiet"+
+					" passage reaches that cap", rate, i, err)
+			}
 		}
-	}
-	if err := s.Write(now, level(1, 100)); err == nil {
-		t.Errorf("a server can buffer past %s here, which is memory a peer chooses the"+
-			" size of on a device with 512 MB", frameTime(streamHold))
+		if err := s.Write(now, level(1, 100)); err == nil {
+			t.Errorf("at %d Hz a server can buffer past %s here, which is memory a peer"+
+				" chooses the size of on a device with 512 MB", rate, streamHold)
+		}
 	}
 }
 
@@ -288,7 +372,7 @@ func TestAudioDueBeyondAnyStreamIsRefused(t *testing.T) {
 		if err := s.Write(when, level(480, 100)); err == nil {
 			t.Errorf("audio due %s from now was buffered; a stamp near the %s ceiling"+
 				" onAClock allows turns into a frame count that overflows int64 on the"+
-				" way to a frame index", when.Sub(now), frameTime(1<<50))
+				" way to a frame index", when.Sub(now), frameTime(ChimeRate, 1<<50))
 		}
 	}
 }
@@ -344,7 +428,7 @@ func TestAClosedStreamLetsTheWriterGoIdle(t *testing.T) {
 
 func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 	var lines [][]any
-	s := &Stream{say: func(_ string, args ...any) { lines = append(lines, args) }}
+	s := &Stream{rate: ChimeRate, say: func(_ string, args ...any) { lines = append(lines, args) }}
 	now := time.Now()
 	anchorAt(s, now)
 	if err := s.Write(now, level(BlockFrames, 3000)); err != nil {
@@ -366,8 +450,8 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 		t.Fatalf("a stream that ended said %d things; the only place the silence it"+
 			" inserted and the audio it dropped are readable is this line", len(lines))
 	}
-	want := []any{frameTime(BlockFrames), frameTime(BlockFrames), frameTime(240),
-		frameTime(720), frameTime(0), 0}
+	want := []any{frameTime(ChimeRate, BlockFrames), frameTime(ChimeRate, BlockFrames), frameTime(ChimeRate, 240),
+		frameTime(ChimeRate, 720), frameTime(ChimeRate, 0), 0}
 	for i, got := range lines[0] {
 		if got != want[i] {
 			t.Errorf("the line reports %v at position %d, want %v: one block of audio"+
@@ -380,7 +464,7 @@ func TestCloseSaysWhatTheStreamDidWithTheAudio(t *testing.T) {
 
 func TestAStreamThatNeverAnchoredStillSaysWhatItThrewAway(t *testing.T) {
 	var lines [][]any
-	s := &Stream{say: func(_ string, args ...any) { lines = append(lines, args) }}
+	s := &Stream{rate: ChimeRate, say: func(_ string, args ...any) { lines = append(lines, args) }}
 	if err := s.Write(time.Now().Add(time.Second), level(4800, 3000)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -390,10 +474,10 @@ func TestAStreamThatNeverAnchoredStillSaysWhatItThrewAway(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("a stream that never anchored said %d things", len(lines))
 	}
-	if got := lines[0][1]; got != frameTime(4800) {
+	if got := lines[0][1]; got != frameTime(ChimeRate, 4800) {
 		t.Errorf("the line reports %v thrown away, want %v; ending the stream empties"+
 			" the queue, so a report reading the queue afterwards says a whole stream"+
-			" was worth nothing", got, frameTime(4800))
+			" was worth nothing", got, frameTime(ChimeRate, 4800))
 	}
 }
 
@@ -445,15 +529,15 @@ func TestPlacingCountsWhatThePlayerStillHolds(t *testing.T) {
 	if len(s.candidates) != 1 {
 		t.Fatalf("the reading was not taken")
 	}
-	if got := s.candidates[0].Sub(now); got != frameTime(depth) {
+	if got := s.candidates[0].Sub(now); got != frameTime(ChimeRate, depth) {
 		t.Errorf("the next frame was placed %s out, want the %s the player and the HAL"+
-			" still hold between them", got, frameTime(depth))
+			" still hold between them", got, frameTime(ChimeRate, depth))
 	}
 }
 
 func TestAPlayerThatWillNotSayWhereItIsSaysSoOnce(t *testing.T) {
 	said := 0
-	s := &Stream{say: func(string, ...any) { said++ }}
+	s := &Stream{rate: ChimeRate, say: func(string, ...any) { said++ }}
 	for range 3 * blindAfter {
 		s.blind(errors.New("the output is XRUN rather than running"))
 	}
@@ -493,7 +577,7 @@ func TestAStreamIsWrittenToWhileItIsRead(t *testing.T) {
 
 func TestPlacingAStreamSaysHowFarAheadOfTheSpeakerThePlayerIs(t *testing.T) {
 	var said []any
-	s := &Stream{say: func(_ string, args ...any) { said = append(said, args...) }}
+	s := &Stream{rate: ChimeRate, say: func(_ string, args ...any) { said = append(said, args...) }}
 	s.first = time.Now().Add(-anchorSettle)
 	const depth = 6896
 	for range anchorTake {
@@ -503,9 +587,9 @@ func TestPlacingAStreamSaysHowFarAheadOfTheSpeakerThePlayerIs(t *testing.T) {
 		t.Fatalf("placing a stream said %d things, want the one line that makes the"+
 			" declared required_lead_time_ms checkable on hardware", len(said))
 	}
-	if got := said[0]; got != frameTime(depth).Round(time.Millisecond) {
+	if got := said[0]; got != frameTime(ChimeRate, depth).Round(time.Millisecond) {
 		t.Errorf("the line reports %v, want the %s the player and the HAL hold between"+
-			" a written frame and the speaker", got, frameTime(depth))
+			" a written frame and the speaker", got, frameTime(ChimeRate, depth))
 	}
 }
 
@@ -655,15 +739,15 @@ func TestAPartlyPlayedChunkKeepsItsPlaceInTheQueue(t *testing.T) {
 }
 
 func TestAStreamThatOutlivesTheDurationTypeStillReportsHonestly(t *testing.T) {
-	if got := frameTime(1 << 40); got <= 0 {
+	if got := frameTime(ChimeRate, 1<<40); got <= 0 {
 		t.Errorf("%d frames came back as %s; the counters a long stream accumulates"+
 			" overflow the multiply and the closing line reports a negative duration",
 			int64(1)<<40, got)
 	}
-	if got := frameTime(-3000); got != -62500*time.Microsecond {
+	if got := frameTime(ChimeRate, -3000); got != -62500*time.Microsecond {
 		t.Errorf("-3000 frames came back as %s, want -62.5ms", got)
 	}
-	if got := frameTime(BlockFrames); got != 10*time.Millisecond {
+	if got := frameTime(ChimeRate, BlockFrames); got != 10*time.Millisecond {
 		t.Errorf("a block came back as %s, want 10ms", got)
 	}
 }
@@ -690,7 +774,7 @@ func TestAStreamHoldsABoundedNumberOfChunksAndNotOnlyBoundedAudio(t *testing.T) 
 	for i := range streamChunks {
 		if err := s.Write(due.Add(-time.Duration(i)*time.Microsecond), one); err != nil {
 			t.Fatalf("chunk %d of %d was refused, and the queue holds a whole %s: %v",
-				i, streamChunks, frameTime(streamHold), err)
+				i, streamChunks, streamHold, err)
 		}
 	}
 	if err := s.Write(due.Add(-time.Duration(streamChunks)*time.Microsecond), one); err == nil {
@@ -701,9 +785,9 @@ func TestAStreamHoldsABoundedNumberOfChunksAndNotOnlyBoundedAudio(t *testing.T) 
 	s.mu.Lock()
 	held := s.held
 	s.mu.Unlock()
-	if held >= streamHold {
+	if held >= frameCount(ChimeRate, streamHold) {
 		t.Fatalf("the queue held %s of audio, which is the frame ceiling of %s doing the"+
-			" refusing rather than the chunk ceiling", frameTime(held), frameTime(streamHold))
+			" refusing rather than the chunk ceiling", frameTime(ChimeRate, held), streamHold)
 	}
 }
 
@@ -747,16 +831,16 @@ func TestAChunkDueFurtherOffThanTheFrameCountFitsLeavesTheWriterRunning(t *testi
 			" frame count spins inside the lock the mixer and the chime both wait on,"+
 			" and this dot is silent until it reboots", 13*time.Hour)
 	}
-	if audio, silence := s.Placed(); audio != 0 || silence != BlockFrames {
-		t.Fatalf("the block placed %d frames of audio and %d of silence, want %d silent:"+
+	if audio, silence := s.Placed(); audio != 0 || silence != frameTime(ChimeRate, BlockFrames) {
+		t.Fatalf("the block placed %s of audio and %s of silence, want %s silent:"+
 			" a chunk that far out is a gap rather than something to play",
-			audio, silence, BlockFrames)
+			audio, silence, frameTime(ChimeRate, BlockFrames))
 	}
 }
 
 func TestAStreamThatWasNeverPlacedSaysWhatItThrewAway(t *testing.T) {
 	var said []string
-	s := &Stream{say: func(format string, args ...any) {
+	s := &Stream{rate: ChimeRate, say: func(format string, args ...any) {
 		said = append(said, fmt.Sprintf(format, args...))
 	}}
 	if err := s.Write(time.Now().Add(time.Second), level(1200, 1000)); err != nil {
@@ -766,29 +850,34 @@ func TestAStreamThatWasNeverPlacedSaysWhatItThrewAway(t *testing.T) {
 	if len(said) != 1 {
 		t.Fatalf("closing said %d things, want 1: %v", len(said), said)
 	}
-	if !strings.Contains(said[0], frameTime(1200).String()) {
+	if !strings.Contains(said[0], frameTime(ChimeRate, 1200).String()) {
 		t.Errorf("closing said %q, which never names the %s it was still holding, so a"+
 			" stream that was never placed reports nothing it lost", said[0],
-			frameTime(1200))
+			frameTime(ChimeRate, 1200))
 	}
 }
 
 func TestATimingErrorIsCorrectedOneFrameAtATime(t *testing.T) {
-	for _, c := range []struct {
-		err  int64
-		want int64
-	}{
-		{deadBand - 1, 0},
-		{-(deadBand - 1), 0},
-		{deadBand, 1},
-		{-deadBand, -1},
-		{ChimeRate, 1},
-		{-ChimeRate, -1},
-	} {
-		if got := ease(c.err); got != c.want {
-			t.Errorf("an error of %s was corrected by %d frames, want %d: chasing the"+
-				" whole error is what makes every clock revision audible",
-				frameTime(c.err), got, c.want)
+	for _, rate := range Rates() {
+		s := quiet()
+		s.rate = rate
+		band := frameCount(rate, deadBand)
+		for _, c := range []struct {
+			err  int64
+			want int64
+		}{
+			{band - 1, 0},
+			{-(band - 1), 0},
+			{band, 1},
+			{-band, -1},
+			{int64(rate), 1},
+			{-int64(rate), -1},
+		} {
+			if got := s.ease(c.err); got != c.want {
+				t.Errorf("at %d Hz an error of %s was corrected by %d frames, want %d:"+
+					" chasing the whole error is what makes every clock revision audible",
+					rate, frameTime(rate, c.err), got, c.want)
+			}
 		}
 	}
 }
@@ -818,12 +907,12 @@ func TestOneRevisionOfTheClockDoesNotMoveTheAudio(t *testing.T) {
 		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		at = at.Add(frameTime(BlockFrames))
+		at = at.Add(frameTime(ChimeRate, BlockFrames))
 		s.read(block)
 	}
 	if s.late > 1 {
 		t.Errorf("a single 3ms revision cost %s of audio; one revision is the"+
-			" instrument moving, not the audio being late", frameTime(s.late))
+			" instrument moving, not the audio being late", frameTime(ChimeRate, s.late))
 	}
 }
 
@@ -832,7 +921,7 @@ func TestAnEmptyChunkIsNotPlacedRatherThanIndexed(t *testing.T) {
 	now := time.Now()
 	anchorAt(s, now)
 	s.began = true
-	s.smooth = int64(2*deadBand) << smoothBits
+	s.smooth = 2 * frameCount(ChimeRate, deadBand) << smoothBits
 	if err := s.Write(now.Add(2*time.Millisecond), nil); err != nil {
 		t.Fatalf("Write of an empty chunk: %v", err)
 	}
@@ -846,7 +935,7 @@ func TestAnEmptyChunkIsNotPlacedRatherThanIndexed(t *testing.T) {
 	}
 	if s.placed != 0 || s.eased != 0 {
 		t.Errorf("a chunk carrying no audio placed %s and eased %s",
-			frameTime(s.placed), frameTime(s.eased))
+			frameTime(ChimeRate, s.placed), frameTime(ChimeRate, s.eased))
 	}
 }
 
@@ -860,7 +949,7 @@ func TestFramesEasedOntoTheClockAreNotCountedLate(t *testing.T) {
 		if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		at = at.Add(frameTime(BlockFrames) - 200*time.Microsecond)
+		at = at.Add(frameTime(ChimeRate, BlockFrames) - 200*time.Microsecond)
 		s.read(block)
 	}
 	if s.eased == 0 {
@@ -868,7 +957,7 @@ func TestFramesEasedOntoTheClockAreNotCountedLate(t *testing.T) {
 	}
 	if s.late != 0 {
 		t.Errorf("%s was counted late, and it was eased on purpose: the count is what"+
-			" separates a starved stream from a healthy one", frameTime(s.late))
+			" separates a starved stream from a healthy one", frameTime(ChimeRate, s.late))
 	}
 }
 
@@ -882,7 +971,7 @@ func TestAReanchorLeavesAPartPlayedChunkWhereItIs(t *testing.T) {
 		if err := s.Write(at, level(2*BlockFrames, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		at = at.Add(frameTime(2 * BlockFrames))
+		at = at.Add(frameTime(ChimeRate, 2*BlockFrames))
 	}
 	s.read(block)
 	for range slipRuns {
@@ -906,13 +995,13 @@ func TestFramesEasedInOrOutAreNotCountedAsSilence(t *testing.T) {
 			if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
 				t.Fatalf("Write: %v", err)
 			}
-			at = at.Add(frameTime(BlockFrames))
+			at = at.Add(frameTime(ChimeRate, BlockFrames))
 		}
 		for range 300 {
 			if err := s.Write(at, level(BlockFrames, 3000)); err != nil {
 				t.Fatalf("Write: %v", err)
 			}
-			at = at.Add(frameTime(BlockFrames) + drift)
+			at = at.Add(frameTime(ChimeRate, BlockFrames) + drift)
 			s.read(block)
 		}
 		if s.eased == 0 {
@@ -921,7 +1010,7 @@ func TestFramesEasedInOrOutAreNotCountedAsSilence(t *testing.T) {
 		if s.silence < 0 {
 			t.Errorf("drifting %v: silence is %s; a trimmed frame never reached a block,"+
 				" and a blended frame is counted once, so neither stands in for silence",
-				drift, frameTime(s.silence))
+				drift, frameTime(ChimeRate, s.silence))
 		}
 	}
 }
@@ -952,7 +1041,7 @@ func TestAShortChunkIsStillCorrected(t *testing.T) {
 		if err := s.Write(at, level(short, 3000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		at = at.Add(frameTime(int64(short)) - 40*time.Microsecond)
+		at = at.Add(frameTime(ChimeRate, int64(short)) - 40*time.Microsecond)
 		if len(s.queue) >= 8 {
 			s.read(block)
 		}
@@ -1068,7 +1157,7 @@ func TestAJumpLongerThanAChunkCutsAllOfIt(t *testing.T) {
 	anchorBursty(s, now)
 	const chunk = 1200
 	for k := range 12 {
-		at := now.Add(frameTime(int64(k * chunk)))
+		at := now.Add(frameTime(ChimeRate, int64(k*chunk)))
 		if err := s.Write(at, level(chunk, int16(100*(k+1)))); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -1078,7 +1167,7 @@ func TestAJumpLongerThanAChunkCutsAllOfIt(t *testing.T) {
 
 	const cut = 40 * time.Millisecond
 	for range burstyFirst {
-		s.observe(Point{At: now.Add(frameTime(BlockFrames) + cut), Bursty: true})
+		s.observe(Point{At: now.Add(frameTime(ChimeRate, BlockFrames) + cut), Bursty: true})
 	}
 	var out []int16
 	for range 25 {
@@ -1105,7 +1194,7 @@ func TestAJumpPlacesTheNextChunkWhereItsTimestampSays(t *testing.T) {
 		s.read(block)
 
 		s.jump = jump
-		if err := s.Write(now.Add(frameTime(BlockFrames+960)), level(BlockFrames, 2000)); err != nil {
+		if err := s.Write(now.Add(frameTime(ChimeRate, BlockFrames+960)), level(BlockFrames, 2000)); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
 		var out []int16
@@ -1319,7 +1408,7 @@ func TestEveryFrameKeepsItsChannelsInOrder(t *testing.T) {
 				if err := s.Write(at, stereoRamp(k*c.chunk, c.chunk)); err != nil {
 					t.Fatalf("Write %d: %v", k, err)
 				}
-				at = at.Add(frameTime(int64(c.chunk)) + c.drift)
+				at = at.Add(frameTime(ChimeRate, int64(c.chunk)) + c.drift)
 				for written += c.chunk; read+BlockFrames <= written; read += BlockFrames {
 					s.read(block)
 					for i := range BlockFrames {
@@ -1375,7 +1464,7 @@ func TestEasingNeverStepsEitherChannel(t *testing.T) {
 			if err := s.Write(at, slowRamp(k*c.chunk, c.chunk)); err != nil {
 				t.Fatalf("Write %d: %v", k, err)
 			}
-			at = at.Add(frameTime(int64(c.chunk)) + c.drift)
+			at = at.Add(frameTime(ChimeRate, int64(c.chunk)) + c.drift)
 			for written += c.chunk; read+BlockFrames+ChimeRate/2 <= written; read += BlockFrames {
 				s.read(block)
 				for i := range BlockFrames {
@@ -1414,7 +1503,7 @@ func TestATrimCutsOneFrameAndSmoothsTheCut(t *testing.T) {
 			if err := s.Write(at, level(chunk, int16(50*(k+1)))); err != nil {
 				t.Fatalf("Write %d: %v", k, err)
 			}
-			at = at.Add(frameTime(int64(chunk)) - 40*time.Microsecond)
+			at = at.Add(frameTime(ChimeRate, int64(chunk)) - 40*time.Microsecond)
 			for written += chunk; read+BlockFrames+ChimeRate/2 <= written; read += BlockFrames {
 				s.read(block)
 				for i := range BlockFrames {

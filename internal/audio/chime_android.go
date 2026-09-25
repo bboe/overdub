@@ -8,6 +8,7 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -20,7 +21,8 @@ var open atomic.Bool
 type Chime struct {
 	mu     sync.Mutex
 	mix    *mixer
-	clip   *clip
+	rate   int
+	clips  map[int]*clip
 	stream atomic.Pointer[Stream]
 	stop   chan struct{}
 	done   chan struct{}
@@ -40,11 +42,16 @@ func NewChime() (*Chime, error) {
 		open.Store(false)
 		return nil, errors.New("audio_start: the player would not start")
 	}
+	clips := map[int]*clip{}
+	for _, rate := range Rates() {
+		clips[rate] = &clip{pcm: decode(chimePCM(rate))}
+	}
 	c := &Chime{
-		mix:  newMixer(),
-		clip: &clip{pcm: decode(chimePCM())},
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		mix:   newMixer(),
+		rate:  ChimeRate,
+		clips: clips,
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
 	}
 	go c.write()
 	return c, nil
@@ -56,15 +63,18 @@ func (c *Chime) Play() error {
 	if c.closed {
 		return errors.New("audio: play after close")
 	}
-	c.mix.start(c.clip)
+	c.mix.start(c.clips[c.rate])
 	return nil
 }
 
-func (c *Chime) OpenStream(say func(string, ...any)) (*Stream, error) {
+func (c *Chime) OpenStream(rate int, say func(string, ...any)) (*Stream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil, errors.New("audio: a stream after close")
+	}
+	if c.clips[rate] == nil {
+		return nil, fmt.Errorf("audio: this player does not open at %d Hz", rate)
 	}
 	if held := c.stream.Load(); held != nil {
 		if !held.Spent() {
@@ -74,13 +84,36 @@ func (c *Chime) OpenStream(say func(string, ...any)) (*Stream, error) {
 		held.Close()
 		c.stream.CompareAndSwap(held, nil)
 	}
-	s := &Stream{say: say}
+	s := &Stream{rate: rate, say: say}
 	s.closer = func() { c.stream.CompareAndSwap(s, nil) }
 	if !c.stream.CompareAndSwap(nil, s) {
 		return nil, errors.New("audio: a stream is already open, and this player holds one")
 	}
-	c.mix.add(s)
+	if rate == c.rate {
+		c.mix.add(s)
+	} else {
+		c.mix.wake()
+	}
 	return s, nil
+}
+
+func (c *Chime) retune() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.live()
+	if c.closed || s == nil || s.rate == c.rate || s.Spent() {
+		return true
+	}
+	c.mix.remove(c.clips[c.rate])
+	C.audio_close()
+	if C.audio_open(C.int(s.rate), ChimeChannels) != 0 || C.audio_start() != 0 {
+		log.Printf("audio: the player would not open again at %d Hz; the Dot is silent until"+
+			" the daemon restarts", s.rate)
+		return false
+	}
+	c.rate = s.rate
+	c.mix.add(s)
+	return true
 }
 
 func (c *Chime) live() *Stream { return c.stream.Load() }
@@ -111,6 +144,9 @@ func (c *Chime) write() {
 	buf := make([]byte, BlockBytes)
 	for {
 		c.look()
+		if !c.retune() {
+			return
+		}
 		if !c.mix.next(block) {
 			c.look()
 			select {
@@ -171,7 +207,7 @@ func (c *Chime) ahead() (Point, error) {
 		return Point{}, err
 	}
 	at := time.Now()
-	return point(int64(C.audio_pending()), st, at)
+	return point(int64(C.audio_pending()), st, at, c.rate)
 }
 
 func (c *Chime) Close() {

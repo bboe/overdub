@@ -55,7 +55,7 @@ func TestAStreamInAFormatThisPlayerCannotPlayDoesNotOpen(t *testing.T) {
 		with func(*streamPlayer)
 	}{
 		{"a codec nothing here decodes", func(p *streamPlayer) { p.Codec = "opus" }},
-		{"a sample rate the player is not open at", func(p *streamPlayer) { p.SampleRate = 44100 }},
+		{"a sample rate the player does not open at", func(p *streamPlayer) { p.SampleRate = 96000 }},
 		{"mono, which the player is not open for", func(p *streamPlayer) { p.Channels = 1 }},
 		{"a bit depth the mixer does not sum", func(p *streamPlayer) { p.BitDepth = 24 }},
 	} {
@@ -289,7 +289,7 @@ func TestTheFormatThisClientAdvertisesIsOneItAccepts(t *testing.T) {
 			BitDepth:   f.BitDepth,
 		}
 		if f.Codec == codecFLAC {
-			p.CodecHeader = flacHeaderB64(t)
+			p.CodecHeader = b64(wrapped(streamInfo(f.SampleRate, f.Channels, f.BitDepth)))
 		}
 		if !p.playable() {
 			t.Errorf("client/hello advertises %s and stream/start refuses it, so a server"+

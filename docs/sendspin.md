@@ -23,8 +23,9 @@ Dot joins a synchronised group.
 - **Server-initiated.** The Dot advertises `_sendspin._tcp.local.` on 8928 and
   Music Assistant dials it. This reuses the mDNS responder and the firewall
   helpers, at the cost of the multi-server admission rules.
-- Role `player@v1`, formats **`flac`, then `pcm`**, both 48000 Hz, stereo,
-  16-bit. A server takes the first it can encode.
+- Role `player@v1`, formats **`flac`, then `pcm`**, at 48000 Hz, then the same
+  two at 44100 Hz; stereo, 16-bit. A server takes the first it can encode,
+  until the Dot asks for another ("Following the output" below).
   - Stereo on every output. The speaker path sums the channels: through a
     2-channel AudioTrack, a sweep in either channel alone played, and one with
     the right channel inverted was inaudible. A single-driver Bluetooth speaker
@@ -33,8 +34,10 @@ Dot joins a synchronised group.
     same samples in fewer bytes: 58% and 67% of PCM on 2 test signals, about 2.1
     times mono FLAC. The signals put independent noise in each channel; music
     shares more between them.
-  - PCM stays second: every server must support it.
-  - It is the chime's format, so the chime and the stream share one player.
+  - PCM stays second at each rate: every server must support it.
+  - 48 kHz is first because the Dot's speaker runs at 48 kHz.
+  - The chime and the stream share one player, which opens at the stream's
+    rate (docs/audio.md).
 
 ### The WebSocket is hand-rolled
 
@@ -211,11 +214,11 @@ the PSK matched in the handshake:
 Assistant play over a Sentinel-keyed connection once its operator approves the
 Dot.
 
-- `buffer_capacity` is 2 seconds of PCM, 384,000 bytes. The server counts FLAC
-  bytes against it too, so FLAC leads further: about 3 seconds at the ratios
-  above, and up to `aiosendspin`'s 30-second `max_duration_us` through a quiet
-  passage, where a block of silence is an 11-byte frame. `streamHold` is sized
-  for that cap.
+- `buffer_capacity` is 2 seconds of 48 kHz PCM, 384,000 bytes. The server counts
+  FLAC bytes against it too, so FLAC leads further: about 3 seconds at the
+  ratios above, and up to `aiosendspin`'s 30-second `max_duration_us` through a
+  quiet passage, where a block of silence is an 11-byte frame. `streamHold` is
+  sized for that cap.
 - `min_buffer_ms` is `sendspinBuffer`, 500.
 - `static_delay_ms` starts at **0**. It is not the place for the ~95 ms
   docs/audio.md measures: the spec says it is the delay *past* the audio port,
@@ -262,11 +265,12 @@ buffer and keeps it open. Each reaches the player and the session.
   take, and the connection going away (a `defer`, or a writer feeds silence
   for the daemon's life). The role check is on the *player* role, not every
   role; with one supported role no test can tell them apart.
-- A **repeated** `stream/start`, or one before the writer retired the last,
-  takes up the existing stream. Timestamps are absolute, so the audio places
-  itself; a fresh stream would spend another 134 to 164 ms relearning the
-  mapping. Music Assistant restarts 60 to 90 ms after a `stream/end`.
-- Any format other than the declared one is refused, and **closes** an open
+- A **repeated** `stream/start` at the same rate, or one before the writer
+  retired the last, takes up the existing stream. Timestamps are absolute, so
+  the audio places itself; a fresh stream would spend another 134 to 164 ms
+  relearning the mapping. Music Assistant restarts 60 to 90 ms after a
+  `stream/end`.
+- Any format other than the declared ones is refused, and **closes** an open
   stream so following audio is not read in the old format. A server chooses
   from `supported_formats`, so a mismatch is a fault. Played anyway it is noise
   or wrong pitch.
@@ -307,8 +311,7 @@ buffer and keeps it open. Each reaches the player and the session.
 - **`send_ahead` is not a wire field.** The server computes it from
   `min_buffer_ms`, `static_delay_ms` and `required_lead_time_ms`. The first
   chunk follows `stream/start` by about 1 ms.
-- `stream/request-format` is not implemented. The server picks from
-  `supported_formats` without it.
+- `stream/request-format` asks for a rate; "Following the output" below.
 
 ### FLAC
 
@@ -321,7 +324,8 @@ buffer and keeps it open. Each reaches the player and the session.
   seconds, against 14.6% for mono FLAC on the speaker.
 - `codec_header` is base64 of `fLaC` and a STREAMINFO block, 42 bytes. A bare
   34-byte STREAMINFO is accepted too, as `aiosendspin`'s own decoder accepts it.
-  A header that does not describe 48000 Hz stereo 16-bit refuses the stream.
+  A header that does not describe the `stream/start`'s rate, stereo and 16-bit
+  refuses the stream.
 - The header is read by hand, not by the library. `flac.New` parses a whole
   metadata block before checking its type: a 40-byte header whose PICTURE block
   claimed 128 MB allocated 128 MB, and every `stream/start` is read.
@@ -331,14 +335,15 @@ buffer and keeps it open. Each reaches the player and the session.
 - Stopping the group drops the encoder's partial block. In the interop test the
   last 3,840 of 96,000 frames never arrived.
 - The frame's sync, rate, channel and bit-depth codes are read before the
-  library sees it. Any of FLAC's 4 stereo layouts passes; the library rebuilds
+  library sees it. The rate code must name the stream's rate or defer to
+  STREAMINFO. Any of FLAC's 4 stereo layouts passes; the library rebuilds
   left and right from a side channel. `mewkiz/flac` writes to the standard log
   for the 24 and 176.4 kHz codes, which would be a line a frame outside
   `untrustedlog`. It also decodes a bit depth left to STREAMINFO as 0 bits.
 - Its errors carry the frame's numbers. A refusal is 1 of 3 fixed messages, for
   the once-per-message log above.
-- A chunk decodes to at most 4,608 frames: the streamable subset's largest
-  block at 48 kHz, and what `aiosendspin` sends. Each frame's block size is read
+- A chunk decodes to at most 4,608 frames: the streamable subset's largest block
+  up to 48 kHz, and what `aiosendspin` sends. Each frame's block size is read
   before its samples.
 - A 16-byte stereo frame can claim 65,535 frames of silence. Uncapped, 1 message
   of such frames decodes to about 1 GB. On a Dot, 1 such frame took 5.6 ms and
@@ -350,6 +355,57 @@ buffer and keeps it open. Each reaches the player and the session.
   frames allocated 1.3 MB, and 1.6 MB with that 9-byte frame at its end. It is
   garbage nothing keeps. Byte for byte it costs about the CPU of real audio:
   0.85 times natively, and 1.2 times under ARM emulation.
+
+### Following the output
+
+- Each output runs at one rate: 48 kHz on the speaker, 44.1 kHz on a Bluetooth
+  speaker (docs/audio.md). AudioFlinger resamples a stream at the other rate,
+  so a 44.1 kHz track to a Bluetooth speaker was resampled twice: by the
+  server to 48 kHz, then back.
+- So the Dot asks the server for its output's rate. `stream/request-format`
+  carries only `sample_rate`, and the server keeps the codec.
+- The spec at `8fc2f8f` has no such message. Sendspin/spec#195 folded it into
+  `client/state`, where a player states a preference as `format`. `aiosendspin`
+  9.1.1 does not read that field.
+  The table at the end lists it.
+- Music Assistant converts at 2 stages. It feeds `aiosendspin` at one rate per
+  play, picked when playback starts from the rate the leader's role prefers
+  (`_select_session_pcm_formats`), and converts the track to it with ffmpeg.
+  `aiosendspin` then converts that feed to each player's rate with soxr. In a
+  group, a member at another rate than the leader's is converted there.
+- So a play that starts on the output's rate converts a track at most once. A
+  request mid-play changes only the second stage, until the next play: a
+  44.1 kHz track moved from the speaker to a Bluetooth speaker goes to 48 kHz
+  and back. Asking for nothing costs the same: the second conversion is then
+  AudioFlinger's.
+- Music Assistant's signal path shows the rate picked at the start of the play,
+  so it changes only after a pause and play. The Dot's log line
+  `started a flac 44100 Hz` shows what arrives.
+- The spec lets a server pick a track's native rate instead ("MAY ... to match
+  a track's native sample rate and avoid resampling"). Neither `aiosendspin`
+  nor Music Assistant does, and on this Dot it would save nothing: a track at
+  the other rate is converted once either way.
+- Not 44.1 kHz everywhere. The speaker would then resample every stream, and a
+  48 kHz source twice.
+- The output is read every 2.5 seconds (`outputEvery`), about 1 ms a read.
+  The request goes only while the session holds the player role:
+  `aiosendspin` flags a payload for a role that is not active.
+- The server keeps the request on the role object. A role taken again starts
+  at the first format offered, so the Dot asks again after a roleless spell.
+  A reconnect sends a fresh `client/hello` and starts over the same way.
+- A request mid-stream is a new stream. `aiosendspin` sends `stream/start` in
+  the new format with its next chunk, and joins the role near the playhead,
+  `max(100 ms, min_buffer_ms + static_delay_ms)` ahead for a live source and
+  `max(100 ms, max(min_buffer_ms, required_lead_time_ms) + static_delay_ms)`
+  for a buffered one. The Dot closes the old stream and opens one at the new
+  rate.
+- Measured with Music Assistant and a JBL Go 3: the new `stream/start` came 163
+  to 349 ms after the request, 3 times. Connecting the speaker lost about 0.3
+  seconds of audio, about what a change of output costs the mapping on its own
+  (330 ms), and disconnecting it about 1 second (docs/audio.md).
+- `TestInteropStreamsAt44kToADotThatAsks` runs the request against the
+  reference server: the stream arrives as 44.1 kHz FLAC, 2 seconds of it about
+  88,200 frames.
 
 ### What the log says while a stream runs
 
@@ -419,8 +475,8 @@ buffer and keeps it open. Each reaches the player and the session.
   PSK". Claiming one the client cannot honour is worse. `offeredPairMethods`
   feeds both `client/hello` and the admission rules.
 - Only roles in `supported_roles` can become active. `display@v1` is dropped.
-- A test pins the declared format to `audio.ChimeRate` and
-  `audio.ChimeChannels`. A mismatch fails as silence or wrong pitch.
+- A test pins the declared rates to `audio.Rates()` and the channels to
+  `audio.ChimeChannels`. A mismatch fails as a refused stream or wrong pitch.
 
 ## Presence
 
@@ -901,6 +957,7 @@ Differences between the spec at `8fc2f8f` and **aiosendspin 9.1.1**:
 | `supported_commands` | in `client/state` | also in `player@v1_support` |
 | fixed output delay | `output_delay_ms` | `static_delay_ms` |
 | its command | `set_output_delay` | `set_static_delay` |
+| a player's preferred format | `format` in `client/state` | `stream/request-format` |
 
 - All point the same way: the document is ahead of the library. The spec's
   "Clarify output delay in the player sync target" is dated 2026-09-08. This

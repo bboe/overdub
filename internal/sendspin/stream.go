@@ -3,6 +3,7 @@ package sendspin
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/bboe/overdub/internal/untrustedlog"
@@ -32,7 +33,7 @@ type streamRoles struct {
 }
 
 func (p *streamPlayer) playable() bool {
-	if p.SampleRate != StreamRate || p.Channels != StreamChannels ||
+	if !slices.Contains(streamRates(), p.SampleRate) || p.Channels != StreamChannels ||
 		p.BitDepth != StreamBitDepth {
 		return false
 	}
@@ -40,7 +41,7 @@ func (p *streamPlayer) playable() bool {
 	case codecPCM:
 		return true
 	case codecFLAC:
-		return flacHeaderPlayable(p.CodecHeader)
+		return flacHeaderPlayable(p.CodecHeader, p.SampleRate)
 	}
 	return false
 }
@@ -48,7 +49,7 @@ func (p *streamPlayer) playable() bool {
 func (p *streamPlayer) String() string {
 	format := fmt.Sprintf("%s %d Hz %d ch %d bit", untrustedlog.Cut(p.Codec), p.SampleRate,
 		p.Channels, p.BitDepth)
-	if p.Codec == codecFLAC && !flacHeaderPlayable(p.CodecHeader) {
+	if p.Codec == codecFLAC && !flacHeaderPlayable(p.CodecHeader, p.SampleRate) {
 		format += " with a codec_header this player cannot read"
 	}
 	return format
@@ -89,6 +90,7 @@ func (s *Session) StartStream(payload json.RawMessage) (*streamPlayer, error) {
 	}
 	s.streaming = true
 	s.flac = start.Player.Codec == codecFLAC
+	s.rate = start.Player.SampleRate
 	return start.Player, nil
 }
 

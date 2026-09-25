@@ -17,6 +17,7 @@ const (
 	a2dpDataSocket = "@/data/misc/bluedroid/.a2dp_data"
 	socketLinked   = "03"
 	a2dpDelay      = 407 * ChimeRate / 1000
+	BluetoothRate  = 44100
 )
 
 type pcmStatus struct {
@@ -87,6 +88,15 @@ func overBluetooth(path string) bool {
 	return false
 }
 
+func OutputRate() int { return outputRate(socketsPath) }
+
+func outputRate(sockets string) int {
+	if overBluetooth(sockets) {
+		return BluetoothRate
+	}
+	return ChimeRate
+}
+
 func outputStatus(sockets, status string) (pcmStatus, error) {
 	if overBluetooth(sockets) {
 		return pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}, nil
@@ -102,7 +112,7 @@ type Point struct {
 	Bursty bool
 }
 
-func point(pending int64, st pcmStatus, at time.Time) (Point, error) {
+func point(pending int64, st pcmStatus, at time.Time, rate int) (Point, error) {
 	if pending < 0 {
 		return Point{}, errors.New("audio: the player would not say how much of what it" +
 			" was written it still holds")
@@ -115,10 +125,13 @@ func point(pending int64, st pcmStatus, at time.Time) (Point, error) {
 		return Point{}, fmt.Errorf("audio: the output says it is %d frames behind what has"+
 			" been written to it, and a delay below zero is not a measurement", st.Delay)
 	}
-	if ahead := pending + st.Delay; ahead >= 0 && ahead <= aheadCeiling {
-		return Point{Ahead: ahead, At: at, Bursty: st.bursty}, nil
+	if st.Delay <= aheadCeiling {
+		ahead := pending + st.Delay*int64(rate)/ChimeRate
+		if ahead >= 0 && ahead <= int64(rate)*aheadCeiling/ChimeRate {
+			return Point{Ahead: ahead, At: at, Bursty: st.bursty}, nil
+		}
 	}
-	return Point{}, fmt.Errorf("audio: the player and the output claim to hold %d frames"+
-		" between them, and a pipeline outside 0 to %d is not a measurement",
-		pending+st.Delay, aheadCeiling)
+	return Point{}, fmt.Errorf("audio: the player claims to hold %d frames at %d Hz and the"+
+		" output %d at %d Hz, and a pipeline outside 0 to %s is not a measurement",
+		pending, rate, st.Delay, ChimeRate, frameTime(ChimeRate, aheadCeiling))
 }

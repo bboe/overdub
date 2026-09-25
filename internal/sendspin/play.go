@@ -3,7 +3,7 @@ package sendspin
 import "time"
 
 type Player interface {
-	OpenStream(say func(string, ...any)) (Stream, error)
+	OpenStream(rate int, say func(string, ...any)) (Stream, error)
 }
 
 type Stream interface {
@@ -12,7 +12,7 @@ type Stream interface {
 	Finish()
 	Resume() bool
 	Spent() bool
-	Placed() (audio, silence int64)
+	Placed() (audio, silence time.Duration)
 	Close()
 }
 
@@ -33,6 +33,7 @@ type playback struct {
 	name   string
 
 	stream Stream
+	rate   int
 	held   func() time.Duration
 
 	saidShut    bool
@@ -40,11 +41,11 @@ type playback struct {
 	saidRefused bool
 }
 
-func (p *playback) open() {
-	if p.stream != nil && p.stream.Resume() {
+func (p *playback) open(rate int) {
+	if p.stream != nil && p.rate == rate && p.stream.Resume() {
 		return
 	}
-	p.stream = nil
+	p.stop()
 	if p.player == nil {
 		if !p.saidShut {
 			p.saidShut = true
@@ -53,7 +54,7 @@ func (p *playback) open() {
 		}
 		return
 	}
-	stream, err := p.player.OpenStream(p.say)
+	stream, err := p.player.OpenStream(rate, p.say)
 	if err != nil {
 		if !p.saidShut {
 			p.saidShut = true
@@ -62,7 +63,7 @@ func (p *playback) open() {
 		}
 		return
 	}
-	p.stream = stream
+	p.stream, p.rate = stream, rate
 }
 
 func (p *playback) take(s *Session, c *audioChunk) {
@@ -93,7 +94,7 @@ func (p *playback) delay() time.Duration {
 	return p.held()
 }
 
-func (p *playback) counts() (audio, silence int64) {
+func (p *playback) counts() (audio, silence time.Duration) {
 	if p.stream == nil {
 		return 0, 0
 	}
