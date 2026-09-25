@@ -42,6 +42,8 @@ func outputClient(t *testing.T, rate int) (*Client, *fakeOutput) {
 	c.outputEvery = 10 * time.Millisecond
 	c.RequiredLeadMS = 350
 	c.BluetoothLeadMS = 1100
+	c.MinBufferMS = 500
+	c.BluetoothMinBufferMS = 900
 	return c, o
 }
 
@@ -61,9 +63,9 @@ func activatedOnBluetooth(t *testing.T, c *Client, ln net.Listener) (*wsPeer, *s
 	return peer, server
 }
 
-func leadThenRate(t *testing.T, peer *wsPeer, server *serverSide) (lead, rate int) {
+func timingThenRate(t *testing.T, peer *wsPeer, server *serverSide) (lead, buffer, rate int) {
 	t.Helper()
-	lead = -1
+	lead, buffer = -1, -1
 	for {
 		kind, payload := nextJSON(t, peer, server)
 		switch kind {
@@ -72,13 +74,13 @@ func leadThenRate(t *testing.T, peer *wsPeer, server *serverSide) (lead, rate in
 			if err := json.Unmarshal(payload, &s); err != nil {
 				t.Fatalf("decoding %s: %v", typeClientState, err)
 			}
-			lead = s.Player.RequiredLeadTimeMS
+			lead, buffer = s.Player.RequiredLeadTimeMS, s.Player.MinBufferMS
 		case typeStreamRequestFormat:
 			var r requestFormat
 			if err := json.Unmarshal(payload, &r); err != nil {
 				t.Fatalf("decoding %s: %v", typeStreamRequestFormat, err)
 			}
-			return lead, r.Player.SampleRate
+			return lead, buffer, r.Player.SampleRate
 		}
 	}
 }
@@ -227,7 +229,7 @@ func TestADotOnBluetoothDeclaresTheLongerLeadBeforeAskingForItsRate(t *testing.T
 	c, _ := outputClient(t, BluetoothRate)
 	serveOn(t, c, ln)
 	peer, server := activatedOnBluetooth(t, c, ln)
-	lead, rate := leadThenRate(t, peer, server)
+	lead, buffer, rate := timingThenRate(t, peer, server)
 	if rate != BluetoothRate {
 		t.Fatalf("the dot asked for %d Hz, want %d", rate, BluetoothRate)
 	}
@@ -236,6 +238,10 @@ func TestADotOnBluetoothDeclaresTheLongerLeadBeforeAskingForItsRate(t *testing.T
 			" the new stream is stamped from the lead the server holds when it opens,"+
 			" and a Bluetooth output is about 430 ms deep", rate, lead)
 	}
+	if buffer != 900 {
+		t.Errorf("before asking for %d Hz the dot declared a %d ms buffer, want 900:"+
+			" a live stream is stamped from the buffer alone", rate, buffer)
+	}
 }
 
 func TestADotBackOnItsSpeakerDeclaresTheSpeakersLead(t *testing.T) {
@@ -243,19 +249,35 @@ func TestADotBackOnItsSpeakerDeclaresTheSpeakersLead(t *testing.T) {
 	c, o := outputClient(t, StreamRate)
 	serveOn(t, c, ln)
 	peer, server, state := bringUp(t, c, ln)
-	if state.Player.RequiredLeadTimeMS != 350 {
-		t.Fatalf("a dot on its speaker declared a %d ms lead, want 350",
-			state.Player.RequiredLeadTimeMS)
+	if state.Player.RequiredLeadTimeMS != 350 || state.Player.MinBufferMS != 500 {
+		t.Fatalf("a dot on its speaker declared a %d ms lead and a %d ms buffer,"+
+			" want 350 and 500", state.Player.RequiredLeadTimeMS, state.Player.MinBufferMS)
 	}
 
 	o.move(BluetoothRate)
-	if lead, _ := leadThenRate(t, peer, server); lead != 1100 {
-		t.Errorf("a speaker connecting declared a %d ms lead, want 1100", lead)
+	if lead, buffer, _ := timingThenRate(t, peer, server); lead != 1100 || buffer != 900 {
+		t.Errorf("a speaker connecting declared a %d ms lead and a %d ms buffer,"+
+			" want 1100 and 900", lead, buffer)
 	}
 	o.move(StreamRate)
-	if lead, _ := leadThenRate(t, peer, server); lead != 350 {
-		t.Errorf("a speaker going away declared a %d ms lead, want 350: the longer"+
-			" lead makes every stream start later, and the whole group waits for it", lead)
+	if lead, buffer, _ := timingThenRate(t, peer, server); lead != 350 || buffer != 500 {
+		t.Errorf("a speaker going away declared a %d ms lead and a %d ms buffer, want 350"+
+			" and 500: the longer figures make every stream start later, and a live one"+
+			" play later throughout, and the whole group waits for them", lead, buffer)
+	}
+}
+
+func TestADotDeclaresItsBluetoothBufferWhenOnlyTheBufferDiffers(t *testing.T) {
+	ln := listenLocal(t)
+	c, o := outputClient(t, StreamRate)
+	c.BluetoothLeadMS = c.RequiredLeadMS
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+
+	o.move(BluetoothRate)
+	if _, buffer, _ := timingThenRate(t, peer, server); buffer != 900 {
+		t.Errorf("a speaker connecting declared a %d ms buffer, want 900: the buffer"+
+			" follows the output even where the lead does not change", buffer)
 	}
 }
 
@@ -264,7 +286,7 @@ func TestADotDeclaresItsLeadOnceWhileItsOutputHolds(t *testing.T) {
 	c, o := outputClient(t, BluetoothRate)
 	serveOn(t, c, ln)
 	peer, server := activatedOnBluetooth(t, c, ln)
-	leadThenRate(t, peer, server)
+	timingThenRate(t, peer, server)
 
 	polled := o.read()
 	waitFor(t, "the output to be read 3 more times", func() bool { return o.read() >= polled+3 })

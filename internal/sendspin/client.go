@@ -113,12 +113,13 @@ type Client struct {
 	Keys   Keys
 	PSKs   PSKSet
 
-	MinBufferMS     int
-	RequiredLeadMS  int
-	BluetoothLeadMS int
-	DelayMS         int
-	DelayUnknown    bool
-	SaveDelay       func(ms int) error
+	MinBufferMS          int
+	BluetoothMinBufferMS int
+	RequiredLeadMS       int
+	BluetoothLeadMS      int
+	DelayMS              int
+	DelayUnknown         bool
+	SaveDelay            func(ms int) error
 
 	Player Player
 
@@ -814,21 +815,21 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 	tick := time.NewTicker(waitOr(c.outputEvery, outputEvery))
 	defer tick.Stop()
 	asked := StreamRate
-	told := c.lead()
+	told := c.bluetooth.Load()
 	for {
 		rate := c.Config.OutputRate()
 		held, available := c.reporting()
 		if held == session {
 			c.bluetooth.Store(rate == BluetoothRate)
 		}
-		if held == session && c.lead() != told {
+		if held == session && c.bluetooth.Load() != told {
 			if err := c.state(session, available); err != nil {
-				c.Peer.Printf("sendspin: this player could not declare the lead its output"+
-					" needs, so its connection goes: %v", err)
+				c.Peer.Printf("sendspin: this player could not declare the lead and buffer"+
+					" its output needs, so its connection goes: %v", err)
 				nc.Close()
 				return
 			}
-			told = c.lead()
+			told = c.bluetooth.Load()
 		}
 		if held == session && rate != asked {
 			err := session.WriteJSON(typeStreamRequestFormat,
@@ -859,7 +860,7 @@ func (c *Client) state(session *Session, available bool) error {
 	player := &playerState{
 		StaticDelayMS:      int(c.heldDelay() / time.Millisecond),
 		RequiredLeadTimeMS: c.lead(),
-		MinBufferMS:        c.MinBufferMS,
+		MinBufferMS:        c.minBuffer(),
 		SupportedCommands:  []string{commandStaticDelay},
 	}
 	if percent, on, ok := c.level(); ok {
@@ -883,6 +884,13 @@ func (c *Client) lead() int {
 		return c.BluetoothLeadMS
 	}
 	return c.RequiredLeadMS
+}
+
+func (c *Client) minBuffer() int {
+	if c.bluetooth.Load() {
+		return c.BluetoothMinBufferMS
+	}
+	return c.MinBufferMS
 }
 
 func (c *Client) level() (percent int, muted, ok bool) {

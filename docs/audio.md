@@ -359,8 +359,8 @@ one at a time, as there is one player.
 - A stream opening over Bluetooth loses its start the same way. Music
   Assistant's first chunk was due 141 ms ahead of a 429 ms pipeline, and 548 ms
   was dropped. A 48 kHz stream over Bluetooth dropped 495 ms the same way.
-- A longer lead over Bluetooth fixes that start for a buffered stream, not a
-  live one. docs/sendspin.md has it, under "Over Bluetooth".
+- A longer lead and buffer over Bluetooth fix that start. docs/sendspin.md
+  has them, under "Over Bluetooth".
 
 ### What a peer's audio can cost
 

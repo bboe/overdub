@@ -219,7 +219,8 @@ Dot.
   ratios above, and up to `aiosendspin`'s 30-second `max_duration_us` through a
   quiet passage, where a block of silence is an 11-byte frame. `streamHold` is
   sized for that cap.
-- `min_buffer_ms` is `sendspinBuffer`, 500.
+- `min_buffer_ms` is `sendspinBuffer`, 500. Over Bluetooth it is 900; "Over
+  Bluetooth" below says why.
 - `static_delay_ms` starts at **0**. It is not the place for the ~95 ms
   docs/audio.md measures: the spec says it is the delay *past* the audio port,
   and a Dot's speaker is before the port. Music Assistant exposes it as
@@ -263,22 +264,45 @@ Dot.
   starts the next at once, the Dot keeps its stream open, and the mapping holds.
   The loss is at a stream the Dot opens: the first play, after a pause, after a
   restart.
-- A live stream is not fixed. `aiosendspin` ignores the lead there, and only
-  `min_buffer_ms` would move it, which holds the stream that much later for its
-  whole length. Music Assistant counts radio, audio sources and plugin sources
-  as live, and any track whose provider marks `is_realtime`. Spotify's soloist
-  backend does. A Spotify stream still lost 257 ms at its start at 1,100.
+- A live stream needs `min_buffer_ms` as well. `aiosendspin` ignores the lead
+  there. Music Assistant counts radio, audio sources and plugin sources as
+  live, and any track whose provider marks `is_realtime`. Spotify's soloist
+  backend does. A Spotify stream still lost 257 ms at its start at a lead of
+  1,100.
+- So over Bluetooth `min_buffer_ms` is `sendspinBluetoothBuffer`, **900**: the
+  650 ms the Dot needs, plus the 110 ms the server spent at most, rounded up.
+  The one first chunk that came late is not covered. The first chunks of 2
+  Spotify streams then came 823 and 850 ms before they were due.
+- Those streams still dropped 20 and 17 ms as late, not at their start. The
+  mapping then had 190 ms to spare. The likely cause is the burst average's
+  one jump, about 2 seconds in (docs/audio.md). That is not measured.
 - The cost: every buffered stream to this Dot starts about 600 ms later over
-  Bluetooth. The send-ahead is the largest across the group, so every member
-  waits the same. The lead adds no latency after the start: the queue grows
-  past it within seconds.
-- `watchOutput` declares the lead in `client/state` before it sends
+  Bluetooth, and every live stream plays about 400 ms later for its whole
+  length. The send-ahead is the largest across the group, so every member
+  waits the same. For a buffered stream the lead adds no latency after the
+  start: the queue grows past it within seconds.
+- `watchOutput` declares both in `client/state` before it sends
   `stream/request-format`. `aiosendspin` reads both in order, and joins the
-  role at the new rate `max(100 ms, send_ahead)` ahead, from the new lead. A
-  speaker connecting mid-stream should open a gap of about 1.1 seconds and drop
-  nothing. That is not measured.
-- The declared lead follows each read of the output, and is sent again only
-  when it changes. The speaker's lead comes back when the speaker disconnects.
+  role at the new rate `max(100 ms, send_ahead)` ahead, from the new figures.
+  A speaker connecting mid-stream should open a gap of about 1.1 seconds on a
+  buffered stream and 0.9 seconds on a live one, and drop nothing. That is not
+  measured.
+- `aiosendspin` moves a timeline only forward: `_resolve_channel_play_start`
+  shifts every channel up to `now + send_ahead` at each commit. A stream fed at
+  exactly playback pace sits at its floor, so a speaker connecting mid-stream
+  would move the whole group about 400 ms later, and every member would hear a
+  gap. A disconnect would not move it back until the stream restarts. That is
+  read from the code; radio is the likely case, and it is not measured.
+- Spotify's soloist backend feeds at up to about 1.1 times playback pace, so
+  its queue grows past the floor. In a group of 2 Dots on Spotify, a speaker
+  connected to 1 of them 65 seconds in. The other placed 4 minutes 42 seconds
+  with no drop, its chunks came 3.04 to 3.54 seconds ahead before and after,
+  and it played no silence past its start. The Dot that switched joined at
+  44.1 kHz with its first chunk 699 ms ahead, and dropped nothing on that
+  stream.
+- The declared figures follow each read of the output, and are sent again only
+  when the output changes. The speaker's come back when the speaker
+  disconnects.
 
 ### The messages that bracket a stream
 

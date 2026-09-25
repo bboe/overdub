@@ -808,6 +808,14 @@ func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 		t.Fatalf("the client declares a %d ms lead over Bluetooth where this dot needs %d",
 			client.BluetoothLeadMS, sendspinBluetoothLead)
 	}
+	if client.MinBufferMS != sendspinBuffer {
+		t.Fatalf("the client declares a %d ms buffer on its speaker where this dot needs %d",
+			client.MinBufferMS, sendspinBuffer)
+	}
+	if client.BluetoothMinBufferMS != sendspinBluetoothBuffer {
+		t.Fatalf("the client declares a %d ms buffer over Bluetooth where this dot needs %d",
+			client.BluetoothMinBufferMS, sendspinBluetoothBuffer)
+	}
 }
 
 func TestEverySettingThisDotKeepsFitsAPropertyName(t *testing.T) {
