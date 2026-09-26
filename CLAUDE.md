@@ -77,6 +77,7 @@ pages imported below apply to everything. Read the page for a subsystem
 - `docs/device.md`: network adb, the microphone mute, a persisted setting
 - `docs/audio.md`: making a sound, or playing one
 - `docs/deployment.md`: `install.sh`, `uninstall.sh`, the boot script
+- `docs/rooting.md`: `dot_root.py`, from stock Fire OS 6 to rooted Fire OS 5
 - `docs/command.md`: the Alexa command path, the credential, MapDump
 - `docs/hardware.md`: anything run against the real device
 - `docs/sendspin.md`: the Sendspin client, its WebSocket, its handshake

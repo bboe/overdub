@@ -125,6 +125,19 @@ jobs:
       # the outcome worth avoiding.
       - run: SENDSPIN_INTEROP=1 go test -count=1 -run TestInteropWithTheReferenceServer ./internal/sendspin/
 
+  # deploy/dot_root.py promises stock macOS's /usr/bin/python3, which is 3.9.
+  # Nothing else here runs it, and a newer interpreter accepts syntax 3.9
+  # rejects. --help also runs every import and top-level statement.
+  dot-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.9'
+      - run: python -X oldparser -m py_compile deploy/dot_root.py
+      - run: python deploy/dot_root.py --help
+
   # The release is a job here rather than a workflow of its own, so that it can
   # say `needs: build` and mean it. A tag pushed at a commit whose tests fail
   # produces nothing: there is no second workflow to race, and no verdict to go
