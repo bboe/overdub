@@ -61,6 +61,7 @@
 | `github.com/icza/bitio` | required, indirect | Apache-2.0 | no | -- |
 | `github.com/mewkiz/pkg`, `github.com/mewpkg/term` | required, indirect | Unlicense | no | -- |
 | Go standard library | every Go binary | BSD-3-Clause | yes | -- |
+| `pyserial` 3.5 | amonet's bootrom step, from `deploy/dot_root.py` | BSD-3-Clause | no, host only | -- |
 
 - flynn/noise: the standard library has X25519 (`crypto/ecdh`) but no
   ChaCha20-Poly1305, and the Noise pattern is not one to hand-roll. `go.sum`
@@ -81,6 +82,9 @@
   against what was encoded, which is the test a hand-rolled decoder would need
   too. Only its decoder is linked: its 3 indirect modules serve the encoder, and
   the binary holds no symbol from them. docs/sendspin.md has its 2 traps.
+- pyserial: amonet v1.1.0's bootrom step imports it. `deploy/dot_root.py`
+  fetches its wheel, pinned by SHA-256, when a Dot reaches that step. It never
+  reaches the Dot or the release. docs/rooting.md has how.
 
 ## Licences
 
