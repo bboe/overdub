@@ -64,7 +64,8 @@ keep Alexa and add a Home Assistant button and some entities.
   there, and fails if it cannot. A Magisk that uses `/data/adb/service.d`
   needs the path changed first.
 - `adb` on a development machine. A [release](#install-from-a-release) needs
-  nothing else.
+  nothing else to install on a rooted Dot. Rooting one also needs Python 3.9
+  or later and `fastboot`; see [Rooting a Dot](#rooting-a-dot).
 - To build it yourself: Go 1.25 or later, and an **Android NDK**
   (`brew install --cask android-ndk` on macOS, or
   [developer.android.com/ndk](https://developer.android.com/ndk)).
@@ -88,23 +89,26 @@ adb shell su -c 'cat /proc/bus/input/devices'   # names, handlers, key bitmaps
 adb shell su -c getevent                        # events, without grabbing
 ```
 
-## Coming from EchoMuse
+## Rooting a Dot
 
-EchoMuse's debloat step suppresses the Alexa stack this runs beside. Undo it
-first; nothing was uninstalled, so nothing needs reinstalling:
+`deploy/dot_root.py` takes a Dot from Amazon's stock Fire OS 6 to rooted Fire
+OS 5.5.5.4 with Magisk 17.3, which is what the requirements above ask for.
+With the Dot on USB:
 
 ```sh
-deploy/restore-amazon.sh   # then reboot
+deploy/dot_root.py                 # rooted Fire OS 5.5.5.4, about 15 minutes
+deploy/install.sh kitchen
 ```
 
-- It restores every hidden or disabled package, not only EchoMuse's. Things
-  you suppressed yourself come back too.
-- `com.amazon.device.software.ota` stays hidden. An OTA rewrites `boot.img`
-  and removes Magisk, root and overdub.
-- EchoMuse's payload moves to `/data/local/echomuse-disabled/`. Its
-  `service.d` debloat hook is deleted.
-- Skip this if the Dot never had EchoMuse.
-- docs/deployment.md says how the script decides what to restore.
+- It needs Python 3.9 or later and Android platform-tools (`adb` and
+  `fastboot`).
+- A stock Dot shows nothing on USB. `dot_root.py` asks for the fastboot gesture
+  and waits for it.
+- `deploy/dot_restore_stock.py <build>` returns a rooted Dot to stock Fire OS
+  6. It erases the whole Dot, Wi-Fi and the Alexa registration included. Keep
+  the Dot off Wi-Fi until `dot_root.py` finishes: on Wi-Fi a stock Dot can
+  take an update to a build the script has not met.
+- docs/rooting.md says why each step is there.
 
 ## Install from a release
 

@@ -25,26 +25,6 @@
   A `ps` that printed the whole command line would match the name instead, and
   both scripts would report success having done nothing.
 
-## Coming from EchoMuse
-
-README.md has the steps. This is why `deploy/restore-amazon.sh` works as it
-does.
-
-- `pm hide` and `pm disable` are independent, and EchoMuse applies both.
-- `pm list packages -d` does not report a package that is disabled while hidden.
-  So the script reads the disabled set after it unhides.
-- `pm list packages -u` means "also uninstalled for this user", not "hidden".
-  Its difference from the plain listing mixes both sets. `dumpsys package`
-  reports `hidden=` and `installed=` per user:
-  - `hidden=true` means `pm unhide` did not take, and fails the restore.
-  - `installed=false` is the owner's own choice. It is reported and does not
-    fail the restore.
-- The script reads each survivor rather than counting. On a Dot already
-  restored, everything left is the owner's, and a count cannot tell "none
-  moved" from "nothing to move".
-- Every step reads its work from the device, not from a plan made at the start.
-  A run killed part way through resumes on the next run.
-
 ## What is pushed, and how it is verified
 
 | file | on the Dot | owner, mode | staged in | checked by |

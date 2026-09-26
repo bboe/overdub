@@ -190,7 +190,9 @@ jobs:
 
       # The tarball is the whole install: the scripts, the binary, the jar, and
       # the documentation that explains them. Somebody unpacking it needs adb
-      # and a rooted Dot, and no Go, NDK, JDK or Android SDK at all.
+      # and a rooted Dot, and no Go, NDK, JDK or Android SDK at all. Rooting a
+      # Dot with the two Python scripts also needs Python 3.9 or later and
+      # fastboot.
       #
       # THIRD-PARTY.txt travels with it because clause 2 of the BSD licences
       # compiled into the binary asks that it does.
@@ -204,8 +206,8 @@ jobs:
           mkdir -p "$dir/build" "$dir/deploy/mapdump"
           cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
           cp -r docs "$dir/docs"
-          cp deploy/install.sh deploy/uninstall.sh deploy/restore-amazon.sh \
-             deploy/overdub.sh "$dir/deploy/"
+          cp deploy/install.sh deploy/uninstall.sh deploy/overdub.sh \
+             deploy/dot_root.py deploy/dot_restore_stock.py "$dir/deploy/"
           cp build/overdub "$dir/build/overdub"
           cp deploy/mapdump/mapdump.jar "$dir/deploy/mapdump/"
           # Same inputs, same tarball: the mtimes, ordering and owner a tar
