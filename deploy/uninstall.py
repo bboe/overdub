@@ -33,7 +33,23 @@ SENDKEY = "/data/local/bin/.overdub-sendspin-key"
 SENDSPIN_PORT = 8928
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(changed=False, pending=False, warned=False)
-SWEPT = [BOOT, BIN, BIN + ".new", KEY, SENDKEY, ADBKEY, APPLIED, STAGE, MAP, LOG]
+# The authority the daemon mints always has the same subject, so Android always
+# reads it under the same name. internal/avs pins this with a test.
+VOICECA = "/system/etc/security/cacerts/4c55d173.0"
+VOICEID = "/data/local/bin/.overdub-avs-identity"
+SWEPT = [
+    BOOT,
+    BIN,
+    BIN + ".new",
+    KEY,
+    SENDKEY,
+    VOICEID,
+    ADBKEY,
+    APPLIED,
+    STAGE,
+    MAP,
+    LOG,
+]
 
 
 def adb(*args: str) -> tuple[int, str]:
@@ -93,6 +109,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
     su(f"rm -f {BOOT}")
     su(
         f"rm -f {BIN} {BIN}.new {KEY} {SENDKEY} {SENDKEY}.new-* {ADBKEY} {APPLIED}\n"
+        f"rm -f {VOICEID}\n"
         f"rm -rf {STAGE} {MAP}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh"
     )
@@ -162,6 +179,78 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         )
     else:
         ok("daemon", "stopped" if pid else "was not running")
+    redirect = su(
+        "for name in persist.amazon.scl.host persist.amazon.scl.port; do\n"
+        '  [ -n "$(getprop $name)" ] || continue\n'
+        '  setprop "$name" ""\n'
+        '  rm -f "/data/property/$name"\n'
+        "  value=$(getprop $name)\n"
+        '  [ -z "$value" ] && echo released || echo "kept $name=$value"\n'
+        "done\n"
+        "echo checked"
+    )[1].split("\n")
+    kept = [line for line in redirect if line.startswith("kept ")]
+    if "checked" not in redirect:
+        warn(
+            "voice",
+            "Could not read persist.amazon.scl.host back. If it still points at"
+            " 127.0.0.1, Alexa cannot reach Amazon and will not answer.",
+        )
+    elif kept:
+        warn(
+            "voice",
+            f"{kept[0][len('kept ') :]} did not clear. Alexa sends her session"
+            " there and nothing listens, so she cannot answer at all until it"
+            " is cleared by hand or the Dot is reset.",
+        )
+    elif "released" in redirect:
+        STATE.changed = True
+        ok("voice", "Alexa points at Amazon again")
+
+    removed = su(
+        f"[ -e {VOICECA} ] || echo absent\n"
+        "mount -o rw,remount /system\n"
+        f"rm -f {VOICECA}\n"
+        "mount -o ro,remount /system\n"
+        f"[ -e {VOICECA} ] && echo kept\n"
+        "echo checked"
+    )[1].split("\n")
+    if "checked" not in removed:
+        warn("voice", f"Could not read {VOICECA} back, so it may still be in place.")
+    elif "kept" in removed:
+        warn(
+            "voice",
+            f"{VOICECA} is still in place. The daemon added it, and it stays"
+            " until removed.",
+        )
+    elif "absent" not in removed:
+        STATE.changed = True
+        ok("voice", f"removed {VOICECA}")
+
+    # Alexa's app reads where to send its session when it starts, and nothing
+    # brings it back by itself: its state machine parks in DisconnectState and
+    # answers every wake word with "I'm having trouble understanding".
+    woken = su(
+        "for p in /proc/[0-9]*; do\n"
+        '  [ "$(cat $p/cmdline 2>/dev/null)" = "amazon.speech.sim" ] || continue\n'
+        '  kill -9 "${p##*/}" && echo restarted\n'
+        "done\n"
+        "echo checked"
+    )[1].split("\n")
+    if "checked" not in redirect:
+        pass
+    elif "restarted" in woken:
+        STATE.changed = True
+        ok("voice", "restarted Alexa's app so she talks to Amazon again")
+    elif "checked" in woken:
+        ok("voice", "Alexa's app was not running")
+    else:
+        warn(
+            "voice",
+            "Could not restart Alexa's app. It still points at a relay that is"
+            " gone, so she cannot answer until the Dot is rebooted.",
+        )
+
     if left or still:
         print(file=sys.stderr)
         print("Uninstall incomplete.", file=sys.stderr)

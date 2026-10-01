@@ -52,11 +52,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 golang.org/x/crypto -- Curve25519, ChaCha20-Poly1305, and the BLAKE2
                        flynn/noise compiles in beside them
 golang.org/x/net    -- the DNS wire format in internal/mdns/mdns.go
-                       (dns/dnsmessage)
+                       (dns/dnsmessage), and HTTP/2 for Alexa's session
+                       (http2, and http/httpguts beneath it)
+golang.org/x/text   -- the name handling x/net/http2 reaches through
+                       idna: secure/bidirule, unicode/bidi, unicode/norm
 the Go standard library and runtime, which every Go binary links in
 BSD-3-Clause
 
-All three carry the same licence, which is reproduced once below. The Go
+All four carry the same licence, which is reproduced once below. The Go
 distribution's own LICENSE is this same text, under this same copyright.
 
 Copyright 2009 The Go Authors.
