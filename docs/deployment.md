@@ -249,9 +249,10 @@ that runs as root, and no `su`.
    Each restart is read back, as the daemon's is: a new pid holding live input
    nodes and no deleted one within 5 seconds. Uninstall runs after boot, where
    one restart took about a second; a reader that misses it is warned about.
-6. Delete the firewall rules, once the daemon is confirmed dead. The daemon
-   re-asserts `tcp/6053` every 30 seconds and `tcp/8928` while Sendspin is on,
-   so an earlier delete would be undone. Each rule is deleted in a loop,
+6. Delete the firewall rules, the relay's two loopback rules among them, once
+   the daemon is confirmed dead. The daemon re-asserts `tcp/6053` and the
+   loopback rules every 30 seconds, and `tcp/8928` while Sendspin is on, so an
+   earlier delete would be undone. Each rule is deleted in a loop,
    because the chain is not ours alone, then read back. A rule left behind is
    reported, not failed on: nothing listens behind it, and a reboot clears it.
 7. Clear every `persist.overdub.*` property and remove its file, then read
@@ -285,6 +286,28 @@ that runs as root, and no `su`.
   read, so the script assigns its own constants. `main_test.go` compares them
   against both constants. The read-back alone would show a moved port only as a
   rule that would not delete.
+
+## What Alexa's session leaves on the device
+
+- Routing Alexa's session through the daemon writes outside this daemon's own
+  namespace: PuffinApp's `AVSEndpoint`, and two files under `/system`, which
+  needs `/` remounted.
+- So uninstall has three steps the rest of the daemon does not need. Each is read
+  back, and a failure warns rather than passing quietly:
+  1. Point `AVSEndpoint` back at the `acl.endpoint` in
+     `/system/etc/AlexaClientSDKConfig.json` if it still reads the relay, after
+     the daemon has stopped. The daemon's `SIGTERM` shutdown puts it back
+     itself; this covers a daemon that crashed, or that init stopped with
+     SIGKILL. An endpoint left on the relay with nothing behind it is a Dot that
+     cannot answer. Only an `https://` answer is taken for the endpoint: a
+     one-line error from `lipc-get-prop` would otherwise read as an endpoint
+     that is not the relay, and nothing would be put back.
+  2. Remove the two files the daemon added under `/system`, in the remount that
+     removes `overdub.rc`. They always land under the same names, so the paths
+     are named directly rather than kept in a file.
+  3. Delete `/data/local/bin/.overdub-avs-identity`, which is what the daemon
+     made for itself on first run.
+- The identity is deleted with the binary, in the first sweep.
 
 ## Releases
 

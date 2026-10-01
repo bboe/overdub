@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"time"
 
+	"github.com/bboe/overdub/internal/avs"
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
@@ -119,6 +121,35 @@ func TestTheScriptsNameTheSendspinFilesTheDaemonKeeps(t *testing.T) {
 				t.Errorf("%s does not name %s, which the daemon keeps", c.script, path)
 			}
 		}
+	}
+}
+
+func TestUninstallNamesWhatTheVoiceRelayLeaves(t *testing.T) {
+	_, caPEM, err := avs.Identity(filepath.Join(t.TempDir(), "identity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := avs.TrustPaths(caPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("deploy/uninstall.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range append(paths, voiceIdentityPath) {
+		if !strings.Contains(string(script), `"`+name+`"`) {
+			t.Errorf("deploy/uninstall.py does not name %s, which the voice relay leaves on the device", name)
+		}
+	}
+	if want := fmt.Sprintf("VOICE_PORT = %d\n", voicePort); !strings.Contains(string(script), want) {
+		t.Errorf("deploy/uninstall.py does not carry %q: it puts Alexa back only when she reads the relay,"+
+			" and deletes the loopback rules by this port", want)
+	}
+	if !strings.Contains(string(script), `VOICEURL = f"https://127.0.0.1:{VOICE_PORT}"`) ||
+		voiceAddr != fmt.Sprintf("127.0.0.1:%d", voicePort) {
+		t.Errorf("deploy/uninstall.py's VOICEURL is not https://127.0.0.1:{VOICE_PORT}, or voiceAddr %s"+
+			" is not on voicePort %d, which the loopback rules open", voiceAddr, voicePort)
 	}
 }
 

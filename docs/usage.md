@@ -145,6 +145,32 @@ Everything else is fixed in the binary or read from the Dot: keycodes 138 and
 113, found on whichever input node declares them, the clone named after that
 node, `wlan0`, tcp/6053 and tcp/8928.
 
+## Alexa's session
+
+Alexa's session runs through the daemon on its way to Amazon. Nothing turns this
+on or off: it happens on every Dot that installs the binary.
+
+Everything in the session is passed on unchanged, so Alexa answers as she did,
+and the daemon reads nothing out of what goes by.
+
+Three things change on the device, and `uninstall.py` undoes all three:
+
+| what | where |
+|---|---|
+| where Alexa sends her session | `com.amazon.puffin AVSEndpoint`, over LIPC |
+| two files the daemon added | under `/system/etc/security` |
+| what it made for itself on first run | `/data/local/bin/.overdub-avs-identity` |
+
+Nothing has to be put on the Dot for this. The log says it is up:
+
+```
+voice: Alexa's session goes through 127.0.0.1:8443 to https://avs-alexa-14-na.amazon.com
+```
+
+**If the daemon is not running, Alexa cannot answer.** The endpoint still points
+at it. The boot script restarts a daemon that died 5 seconds later, and an
+uninstall points Alexa back at Amazon whatever state the daemon is in.
+
 ## Uninstalling
 
 ```sh
@@ -160,13 +186,18 @@ deploy/uninstall.py
   `persist.overdub.*` property. A new install starts with Sendspin on
   and no output delay.
 - `/data/local/bin` goes too if it is then empty.
-- The tcp/6053 and tcp/8928 rules go once the daemon is confirmed gone, so no
-  reboot is needed. An uninstall that reports trouble stops before this step.
+- The tcp/6053 and tcp/8928 rules, and the loopback rules for tcp/8443, go
+  once the daemon is confirmed gone, so no reboot is needed. An uninstall that
+  reports trouble stops before this step.
 - Uninstalling revokes nothing; see [Alexa commands](#alexa-commands).
 - The Sendspin identity matters as much as the API key: the pairing token
   derives from it, so a copy left behind stays valid. A server that paired
   keeps its record; remove the player there too.
-- Amazon's stack is untouched. Delete the device in Home Assistant when done.
+- Alexa is pointed back at Amazon, and the two files the daemon added under
+  `/system` are removed. Both are read back; see
+  [Alexa's session](#alexas-session).
+- Nothing else of Amazon's is touched. Delete the device in Home Assistant
+  when done.
 - A later install generates a new API key. The adb keys set from Home
   Assistant go too; the key of the computer that rooted the Dot, which
   firebreak wrote to `/adb_keys`, still opens adb.
