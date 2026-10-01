@@ -287,7 +287,11 @@ func lipcGet(service, property string) (int, error) {
 }
 
 func lipcRead(kind, service, property string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), lipcTimeout)
+	return lipcReadWithin(kind, service, property, lipcTimeout)
+}
+
+func lipcReadWithin(kind, service, property string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, err := lipcCommand(ctx, []string{lipcGetPath, kind, "-q", service, property})
 	return string(out), err
@@ -316,6 +320,13 @@ func lipcGetString(service, property string) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(out, "\r\n"), nil
+}
+
+func lipcSetString(service, property, value string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err := lipcCommand(ctx, []string{lipcSetPath, "-s", "-q", service, property, value})
+	return err
 }
 
 func lipcSet(service, property string, value int) error {

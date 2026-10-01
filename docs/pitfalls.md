@@ -115,6 +115,12 @@ covering whatever you are about to touch.
 - `DenyTCP` deletes until iptables reports no match, at most 16 times. An
   iptables that answered 0 for a no-op delete would otherwise spin holding
   `chainMu`, and `tcp/6053` would not be re-asserted.
+- `OUTPUT` has policy `DROP` too, and loopback is not always let through. On
+  biscuit it held `-o lo -j ACCEPT`; on donut, 8 minutes after a cold boot, it
+  did not. PuffinApp's SYN to the relay then sat in `SYN_SENT`, Alexa read
+  `PENDING`, and neither log said why. The relay holds its own `INPUT` and
+  `OUTPUT` rules for tcp/8443 on `lo`, matched with `multiport --ports` so
+  both directions pass, and re-asserts them every 30 seconds.
 - `tcp/8928`'s rule goes in **after** the listener binds. A rule for a port
   nothing listens on is re-asserted every 30 seconds for the rest of the boot.
   The API needs no such order: a failed bind there exits the daemon.
@@ -259,6 +265,36 @@ transfer added any other way breaks on Windows and says nothing.
   "Alexa, volume up" then took the Dot from 54 down to 40.
 - So every set goes through `AvsVolume`, and audiod follows. docs/api.md has
   what that costs.
+
+## Alexa's session
+
+- If the daemon is not running, `AVSEndpoint` still points at it and Alexa
+  cannot answer at all. PuffinApp keeps the value in
+  `/data/avs/resources/miscDatabase.db`, so it outlives a reboot. The daemon
+  puts it back at a clean shutdown, but init stops a service with SIGKILL, so a
+  restart or a crash leaves it on the relay until the next daemon takes it
+  again, or puts it back when its own relay does not start.
+- `/` is remounted for one write and put back in a deferred call, so a failed
+  write does not leave the partition writable for the rest of the boot.
+- The files the daemon adds under `/system` always land under the same names,
+  because each name is a hash of a subject that never changes. A test pins
+  them, and `uninstall.py` names them directly.
+- A certificate under the right name is not proof of trust. One from an earlier
+  identity has the same name, and the daemon's umask of 077 wrote the first ones
+  `0600`. So a file is trusted only when it holds this identity's certificate
+  and reads `0644`.
+- PuffinApp is slow to answer LIPC while its session changes. On biscuit a
+  `lipc-get-prop` of `AVSEndpoint` overran the 1-second budget the volume reads
+  use, at the daemon's start and again right after the write. The endpoint's
+  reads and its write take 10 seconds each, and a read that fails during the
+  read-back is tried again until the read-back's 15 seconds run out.
+- A path in `uninstall.py`'s sweep list that a later step removes aborts the run:
+  the sweep sees it, reports STILL PRESENT, and the steps after it never happen.
+  The same ordering costs `rmdir /data/local/bin`, which has to come after
+  everything that lives in there.
+- A test that waits on this session needs a deadline of its own. The failure it is
+  written to catch does not answer slowly, it does not answer at all, so a test
+  without one hangs instead of failing.
 
 ## Bluetooth and Wi-Fi share the radio
 

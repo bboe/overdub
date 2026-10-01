@@ -95,6 +95,39 @@ func TestAllowTCPAppendsOnlyWhenTheRuleIsMissing(t *testing.T) {
 	}
 }
 
+func TestAllowLoopbackOpensBothDirectionsOnce(t *testing.T) {
+	saved := iptablesRun
+	defer func() { iptablesRun = saved }()
+
+	have := map[string]int{}
+	iptablesRun = func(args ...string) ([]byte, error) {
+		rule := strings.Join(args[1:], " ")
+		switch args[0] {
+		case "-C":
+			if have[rule] == 0 {
+				return nil, exitWith(t, 1)
+			}
+		case "-A":
+			have[rule]++
+		}
+		return nil, nil
+	}
+	for i := 0; i < 3; i++ {
+		if err := AllowLoopback(8443); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	for _, want := range []string{
+		"OUTPUT -o lo -p tcp -m multiport --ports 8443 -j ACCEPT",
+		"INPUT -i lo -p tcp -m multiport --ports 8443 -j ACCEPT",
+	} {
+		if have[want] != 1 {
+			t.Errorf("%q appended %d times over 3 calls, want 1: on a cold boot the OUTPUT chain"+
+				" drops loopback, and Alexa's SYN to the relay never left", want, have[want])
+		}
+	}
+}
+
 func TestHoldTCPOpenAddsNothingAfterItIsToldToStop(t *testing.T) {
 	was := iptablesRun
 	defer func() { iptablesRun = was }()

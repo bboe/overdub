@@ -215,6 +215,8 @@ func newClips(chime *audio.Chime, d *ducker) *clip.Player {
 	}
 }
 
+var voiced atomic.Bool
+
 func withdraw() {
 	if r := advertised.Load(); r != nil {
 		r.Goodbye()
@@ -225,6 +227,9 @@ func stopping() {
 	withdraw()
 	if s := switched.Load(); s != nil {
 		s.flush()
+	}
+	if voiced.Load() {
+		stopVoiceRelay()
 	}
 }
 
@@ -689,6 +694,8 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 	if !up {
 		go sweepSendspinRule()
 	}
+
+	go relayVoice()
 
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)

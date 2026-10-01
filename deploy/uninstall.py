@@ -8,6 +8,7 @@ says why each step is in the order it is.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ KEY = "/data/local/bin/.overdub-noise-key"
 LABEL = 14
 INDENT = " " * (LABEL + 4)
 LOG = "/data/local/tmp/overdub.log"
+SDKCONFIG = "/system/etc/AlexaClientSDKConfig.json"
 SENDFLAG = "persist.overdub.sendspin"
 SENDKEY = "/data/local/bin/.overdub-sendspin-key"
 SENDLAST = "/data/local/bin/.overdub-sendspin-last"
@@ -37,6 +39,11 @@ STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(changed=False, pending=False, warned=False)
 TEMPS = (SENDKEY + ".new-", SENDPAIRS + ".new-", SENDLAST + ".new-")
 TRIAL = "/data/local/bin/.overdub-trial"
+VOICECAS = (
+    "/system/etc/security/cacerts/4c55d173.0",
+    "/system/etc/security/cacerts-sha1/cbac1ab7.0",
+)
+VOICEID = "/data/local/bin/.overdub-avs-identity"
 SWEPT = [
     INIT,
     BOOT,
@@ -53,9 +60,13 @@ SWEPT = [
     ADBKEY,
     ADBKEYS,
     APPLIED,
+    VOICEID,
+    *VOICECAS,
     STAGE,
     LOG,
 ]
+VOICE_PORT = 8443
+VOICEURL = f"https://127.0.0.1:{VOICE_PORT}"
 
 
 def adb(*args: str) -> tuple[int, str]:
@@ -67,6 +78,14 @@ def adb(*args: str) -> tuple[int, str]:
         stdout=subprocess.PIPE,
     )
     return result.returncode, result.stdout.decode("utf-8", "replace").replace("\r", "")
+
+
+def endpoint() -> str | None:
+    answer = shell("lipc-get-prop -s -q com.amazon.puffin AVSEndpoint; echo checked")[1]
+    *values, last = [line for line in answer.split("\n") if line] or [""]
+    if last != "checked" or len(values) != 1 or not values[0].startswith("https://"):
+        return None
+    return values[0]
 
 
 def fail(label: str, *lines: str) -> NoReturn:
@@ -114,11 +133,14 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         fail("daemon", "adb went away before the kill.")
     STATE.changed = bool(before or pid)
 
-    shell(f"mount -o rw,remount /\nrm -f {INIT}\nmount -o ro,remount /")
+    shell(
+        f"mount -o rw,remount /\nrm -f {INIT} {' '.join(VOICECAS)}\n"
+        "mount -o ro,remount /"
+    )
     shell(
         f"rm -f {BOOT} {BOOT}.new {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
         f" {SENDKEY} {SENDKEY}.new-* {SENDPAIRS} {SENDPAIRS}.new-* {SENDLAST}"
-        f" {SENDLAST}.new-* {ADBKEY} {ADBKEYS} {APPLIED}\n"
+        f" {SENDLAST}.new-* {ADBKEY} {ADBKEYS} {APPLIED} {VOICEID}\n"
         f"rm -rf {STAGE}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh /data/local/tmp/overdub.rc"
     )
@@ -128,6 +150,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         shell(f"kill {pid}")
         time.sleep(8)
     shell("stop overdub")
+    release_voice()
 
     shell(f"rm -f {LOG}\nrmdir /data/local/bin 2>/dev/null\ntrue")
     if STATE.changed:
@@ -264,8 +287,35 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         elif "deleted" in deleted:
             closed.append(f"tcp/{port}")
         STATE.changed |= "deleted" in deleted
+    voice_rules = [
+        f"{chain} -{side} lo -p tcp -m multiport --ports {VOICE_PORT} -j ACCEPT"
+        for chain, side in (("INPUT", "i"), ("OUTPUT", "o"))
+    ]
+    deleted = shell(
+        "".join(
+            f"while iptables -w -C {rule} 2>/dev/null; do\n"
+            f"  iptables -w -D {rule} || break\n"
+            "  echo deleted\n"
+            "done\n"
+            for rule in voice_rules
+        )
+        + "".join(
+            f"iptables -w -C {rule} 2>/dev/null && echo left\n" for rule in voice_rules
+        )
+        + "echo checked"
+    )[1].split("\n")
+    if "checked" not in deleted or "left" in deleted:
+        warn(
+            "firewall",
+            f"The loopback rules for tcp/{VOICE_PORT} may still be in the chains.",
+            "Nothing listens behind them now. They live in the chain rather than on"
+            " disk, so a reboot clears them.",
+        )
+    elif "deleted" in deleted:
+        closed.append(f"tcp/{VOICE_PORT} on lo")
+    STATE.changed |= "deleted" in deleted
     if closed:
-        ok("firewall", " and ".join(closed) + " closed")
+        ok("firewall", "closed " + ", ".join(closed))
     elif not STATE.warned:
         ok("firewall", "no overdub rules open")
 
@@ -366,6 +416,49 @@ def present() -> list[str] | None:
     if "swept" not in answer:
         return None
     return [line for line in answer if line in SWEPT or line.startswith(TEMPS)]
+
+
+def release_voice() -> None:
+    now = endpoint()
+    if now is None:
+        warn(
+            "voice",
+            "Could not read where Alexa sends her session. If it is still"
+            f" {VOICEURL}, nothing listens there and she cannot answer.",
+        )
+        return
+    if now != VOICEURL:
+        ok("voice", "Alexa's session goes to Amazon")
+        return
+    code, text = shell(f"cat {SDKCONFIG}; echo; echo checked")
+    stock = ""
+    if code == 0 and text.rstrip().endswith("checked"):
+        body = re.sub(r"(?m)^\s*//.*$", "", text.rstrip()[: -len("checked")])
+        try:
+            stock = json.loads(body).get("acl", {}).get("endpoint", "")
+        except ValueError:
+            stock = ""
+    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]+)?/?", stock):
+        warn(
+            "voice",
+            f"Alexa still sends her session to {VOICEURL}, where nothing listens, and"
+            f" {SDKCONFIG} named no endpoint to put back. She cannot answer until"
+            " AVSEndpoint is set by hand.",
+        )
+        return
+    pending(detail=f"pointing Alexa back at {stock}", label="voice")
+    shell(f"lipc-set-prop -s -q com.amazon.puffin AVSEndpoint {stock}")
+    for _ in range(30):
+        if endpoint() == stock:
+            STATE.changed = True
+            ok("voice", f"Alexa's session goes to {stock} again")
+            return
+        time.sleep(0.5)
+    warn(
+        "voice",
+        f"AVSEndpoint did not read back as {stock}. If it is still {VOICEURL},"
+        " nothing listens there and Alexa cannot answer.",
+    )
 
 
 def shell(command: str) -> tuple[int, str]:
