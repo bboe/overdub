@@ -55,13 +55,18 @@
 |---|---|---|---|---|
 | `github.com/flynn/noise` | the Noise handshake | BSD-3-Clause | yes | -- |
 | `golang.org/x/crypto` | the Noise ciphers | BSD-3-Clause | yes | -- |
-| `golang.org/x/net` | `dns/dnsmessage`, for mDNS | BSD-3-Clause | yes | 69 KB |
+| `golang.org/x/net` | `dns/dnsmessage` for mDNS, `http2` for Alexa's session | BSD-3-Clause | yes | 69 KB |
+| `golang.org/x/text` | required by `x/net/http2`, indirect | BSD-3-Clause | yes | 1.3 MB |
 | `golang.org/x/sys` | required, indirect | BSD-3-Clause | no | -- |
 | `github.com/mewkiz/flac` | FLAC from a Sendspin server | Unlicense | yes | 71 KB |
 | `github.com/icza/bitio` | required, indirect | Apache-2.0 | no | -- |
 | `github.com/mewkiz/pkg`, `github.com/mewpkg/term` | required, indirect | Unlicense | no | -- |
 | Go standard library | every Go binary | BSD-3-Clause | yes | -- |
 
+- x/text arrives with `x/net/http2`, which needs `httpguts` and so `idna`. It is
+  the one dependency nothing here chose, and the most expensive: routing Alexa's
+  session through this daemon took the binary from 10,510,111 to 11,988,974
+  bytes, 14% for http2 and idna's Unicode tables together.
 - flynn/noise: the standard library has X25519 (`crypto/ecdh`) but no
   ChaCha20-Poly1305, and the Noise pattern is not one to hand-roll. `go.sum`
   is the lock.
@@ -93,6 +98,16 @@
   and 4(d) for code embedded by compiling it.
 - Bionic's libc is not in the binary. `libc.so`, `libdl.so`, `liblog.so` and
   `libOpenSLES.so` are `NEEDED` entries the device resolves.
+
+## Alexa's session
+
+- It runs on every Dot that installs the daemon. There is no flag, no property
+  and no marker file: something that can be switched off is configuration, and
+  this slice has none.
+- Two properties outside this daemon's namespace are written,
+  `persist.amazon.scl.host` and `persist.amazon.scl.port`, and one file outside
+  `/data`, under `/system`. All three are undone by `uninstall.py`, and
+  docs/voice.md says what happens if they are not.
 
 ## Sound
 
