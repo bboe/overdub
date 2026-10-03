@@ -901,7 +901,7 @@ func TestAChunkThisPlayerCannotReadDoesNotDropTheSession(t *testing.T) {
 
 	playing(t, peer, server)
 
-	bad := make([]byte, 1+chunkStampBytes+2)
+	bad := make([]byte, 1+chunkHeadBytes+2)
 	bad[0] = binaryAudioChunk
 	binary.BigEndian.PutUint64(bad[1:9], uint64(stampCeiling+1))
 	peer.writeBinary(server.seal(t, bad))
@@ -988,7 +988,7 @@ func TestLosingThePlayerRoleSummarisesTheStreamItAbandoned(t *testing.T) {
 
 func badChunk(t *testing.T, stamp int64) []byte {
 	t.Helper()
-	b := make([]byte, 1+chunkStampBytes+2)
+	b := make([]byte, 1+chunkHeadBytes+2)
 	b[0] = binaryAudioChunk
 	binary.BigEndian.PutUint64(b[1:9], uint64(stamp))
 	return b

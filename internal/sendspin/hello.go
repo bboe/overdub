@@ -45,9 +45,8 @@ type audioFormat struct {
 }
 
 type playerSupport struct {
-	SupportedFormats  []audioFormat `json:"supported_formats"`
-	BufferCapacity    int           `json:"buffer_capacity"`
-	SupportedCommands []string      `json:"supported_commands"`
+	SupportedFormats []audioFormat `json:"supported_formats"`
+	BufferCapacity   int           `json:"buffer_capacity"`
 }
 
 type pairMethod struct {
@@ -274,9 +273,8 @@ func (c Config) hello() clientHello {
 		SupportedRoles:       supportedRoles(),
 		SupportedPairMethods: offeredPairMethods(),
 		PlayerSupport: &playerSupport{
-			SupportedFormats:  supportedFormats(),
-			BufferCapacity:    c.BufferCapacity,
-			SupportedCommands: c.playerCommands(),
+			SupportedFormats: supportedFormats(),
+			BufferCapacity:   c.BufferCapacity,
 		},
 		UnpairedAccess: unpairedAccess{Enabled: c.UnpairedAccess},
 	}

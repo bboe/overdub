@@ -13,8 +13,10 @@ const (
 	binaryPlayerLast  byte = 7
 	binaryAudioChunk  byte = 4
 
-	chunkStampBytes = 8
-	frameBytes      = StreamChannels * StreamBitDepth / 8
+	chunkStampBytes     = 8
+	chunkSendAheadBytes = 4
+	chunkHeadBytes      = chunkStampBytes + chunkSendAheadBytes
+	frameBytes          = StreamChannels * StreamBitDepth / 8
 )
 
 type audioChunk struct {
@@ -29,9 +31,9 @@ func playerBinary(kind byte) bool {
 }
 
 func chunkStamp(body []byte) (int64, error) {
-	if len(body) < chunkStampBytes {
-		return 0, fmt.Errorf("%w: an audio chunk too short to carry its timestamp",
-			errTransport)
+	if len(body) < chunkHeadBytes {
+		return 0, fmt.Errorf("%w: an audio chunk too short to carry its timestamp and"+
+			" send-ahead", errTransport)
 	}
 	stamp := int64(binary.BigEndian.Uint64(body[:chunkStampBytes]))
 	if !onAClock(stamp) {
@@ -46,7 +48,7 @@ func parseChunk(body []byte) (*audioChunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	pcm := body[chunkStampBytes:]
+	pcm := body[chunkHeadBytes:]
 	if len(pcm)%frameBytes != 0 {
 		return nil, fmt.Errorf("%w: audio that is not a whole number of %d-byte frames",
 			errTransport, frameBytes)
@@ -59,7 +61,7 @@ func parseFLACChunk(body []byte, rate int) (*audioChunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	pcm, err := decodeFLAC(body[chunkStampBytes:], rate)
+	pcm, err := decodeFLAC(body[chunkHeadBytes:], rate)
 	if err != nil {
 		return nil, err
 	}

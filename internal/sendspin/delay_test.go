@@ -36,7 +36,7 @@ func delayState(t *testing.T, peer *wsPeer, server *serverSide) (ms int, availab
 	if state.Player == nil {
 		t.Fatal("client/state carried no player object, so it carries no delay either")
 	}
-	return state.Player.StaticDelayMS, state.Available
+	return state.Player.OutputDelayMS, state.Available
 }
 
 func keeperCaughtUp(t *testing.T, c *Client) {
@@ -90,7 +90,7 @@ func TestADelayHomeAssistantSetsIsHeldToTheRangeTheSpecAllows(t *testing.T) {
 		want  time.Duration
 	}{
 		{-1, 0},
-		{MaxStaticDelayMS + 1, MaxStaticDelayMS * time.Millisecond},
+		{MaxOutputDelayMS + 1, MaxOutputDelayMS * time.Millisecond},
 	} {
 		c, _ := playingClient(t)
 		c.SetDelay(tt.asked)
@@ -108,7 +108,7 @@ func TestADelaySetToZeroIsNotTheFigureTheLastRunKept(t *testing.T) {
 	c.DelayMS = 700
 	serveOn(t, c, ln)
 	peer, server, state := bringUp(t, c, ln)
-	if state.Player == nil || state.Player.StaticDelayMS != 700 {
+	if state.Player == nil || state.Player.OutputDelayMS != 700 {
 		t.Fatalf("the first state reported %v, want the 700 ms kept from the last run",
 			state.Player)
 	}
@@ -259,7 +259,7 @@ func TestADelaySetFromHomeAssistantDoesNotTakeThePlayerAway(t *testing.T) {
 		if err := json.Unmarshal(payload, &state); err != nil {
 			t.Fatal(err)
 		}
-		if state.Player != nil && state.Player.StaticDelayMS == 600 {
+		if state.Player != nil && state.Player.OutputDelayMS == 600 {
 			if !state.Available {
 				t.Error("the state carrying a delay Home Assistant set reported this" +
 					" player unavailable, so moving the control drops the dot out of" +
@@ -586,7 +586,7 @@ func TestADelaySetWhileAServerHoldsNoRoleIsReportedWhenTheRoleComesBack(t *testi
 		if err := json.Unmarshal(payload, &state); err != nil {
 			t.Fatal(err)
 		}
-		if state.Player != nil && state.Player.StaticDelayMS == 123 {
+		if state.Player != nil && state.Player.OutputDelayMS == 123 {
 			break
 		}
 	}
@@ -619,7 +619,7 @@ func TestADelaySetWhileAServerHoldsNoRoleIsReportedWhenTheRoleComesBack(t *testi
 		if state.Player == nil {
 			continue
 		}
-		if got := state.Player.StaticDelayMS; got != 600 {
+		if got := state.Player.OutputDelayMS; got != 600 {
 			t.Fatalf("the first state after this server took the player role back"+
 				" carried %d ms, want the 600 set while it held none: a figure moved"+
 				" while a server is between roles is one it never hears about, and it"+

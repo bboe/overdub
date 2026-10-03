@@ -15,7 +15,22 @@ import (
 )
 
 func delayCommand(ms *int) serverCommand {
-	return serverCommand{Player: &playerCommand{Command: commandStaticDelay, StaticDelayMS: ms}}
+	return serverCommand{Player: &playerCommand{Command: commandOutputDelay, OutputDelayMS: ms}}
+}
+
+func TestASetOutputDelayDecodesFromTheWire(t *testing.T) {
+	var cmd serverCommand
+	wire := `{"player":{"command":"set_output_delay","output_delay_ms":120}}`
+	if err := json.Unmarshal([]byte(wire), &cmd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cmd.Player == nil || cmd.Player.Command != "set_output_delay" ||
+		commandOutputDelay != "set_output_delay" {
+		t.Fatalf("%s decoded to %+v, and the client offers %q", wire, cmd.Player, commandOutputDelay)
+	}
+	if cmd.Player.OutputDelayMS == nil || *cmd.Player.OutputDelayMS != 120 {
+		t.Errorf("%s carried no output_delay_ms of 120", wire)
+	}
 }
 
 func TestADelayAServerSetsPlacesTheAudioThatMuchEarlier(t *testing.T) {
@@ -62,11 +77,11 @@ func TestTheStateOffersTheDelayCommandSoAServerCanSetItAtAll(t *testing.T) {
 		t.Fatal("client/state carried no player object while the player role is active")
 	}
 	if len(state.Player.SupportedCommands) != 1 ||
-		state.Player.SupportedCommands[0] != commandStaticDelay {
+		state.Player.SupportedCommands[0] != commandOutputDelay {
 		t.Errorf("client/state offers %v, want just %q: music assistant only shows the"+
 			" delay control for a player that names this command, so an empty list is"+
 			" a dot whose delay nobody can set", state.Player.SupportedCommands,
-			commandStaticDelay)
+			commandOutputDelay)
 	}
 }
 
@@ -74,13 +89,13 @@ func TestADelayOutsideWhatTheSpecAllowsIsHeldAtTheEndItPassed(t *testing.T) {
 	s := &Session{roles: []string{rolePlayerV1}}
 	for ms, want := range map[int]time.Duration{
 		-1:                   0,
-		MaxStaticDelayMS + 1: MaxStaticDelayMS * time.Millisecond,
+		MaxOutputDelayMS + 1: MaxOutputDelayMS * time.Millisecond,
 	} {
 		payload, err := json.Marshal(delayCommand(&ms))
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, asked, ok, err := s.StaticDelay(payload)
+		got, asked, ok, err := s.OutputDelay(payload)
 		if err != nil || !ok {
 			t.Fatalf("a delay of %d ms came back as (taken=%v, err=%v), and the spec says"+
 				" to hold one to the range rather than refuse it", ms, ok, err)
@@ -92,14 +107,14 @@ func TestADelayOutsideWhatTheSpecAllowsIsHeldAtTheEndItPassed(t *testing.T) {
 	}
 }
 
-func TestASetStaticDelayCarryingNoDelayIsNotTaken(t *testing.T) {
+func TestASetOutputDelayCarryingNoDelayIsNotTaken(t *testing.T) {
 	s := &Session{roles: []string{rolePlayerV1}}
 	payload, err := json.Marshal(delayCommand(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := s.StaticDelay(payload); err == nil || ok {
-		t.Error("set_static_delay with no static_delay_ms was taken, and a missing field" +
+	if _, _, ok, err := s.OutputDelay(payload); err == nil || ok {
+		t.Error("set_output_delay with no output_delay_ms was taken, and a missing field" +
 			" would otherwise read as the zero it is not")
 	}
 }
@@ -111,7 +126,7 @@ func TestADelayForARoleThisClientDoesNotHoldIsNotTaken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := s.StaticDelay(payload); err == nil || ok {
+	if _, _, ok, err := s.OutputDelay(payload); err == nil || ok {
 		t.Error("a delay was taken for a client holding no player role, so a server that" +
 			" never activated the player could still move where its audio lands")
 	}
@@ -124,7 +139,7 @@ func TestACommandThisPlayerDoesNotTakeIsNotADelay(t *testing.T) {
 		`{"player":{"command":"mute","mute":true}}`,
 		`{}`,
 	} {
-		delay, _, ok, err := s.StaticDelay(json.RawMessage(body))
+		delay, _, ok, err := s.OutputDelay(json.RawMessage(body))
 		if ok || err != nil || delay != 0 {
 			t.Errorf("%s came back as delay %s (taken=%v, err=%v), want it left alone for"+
 				" the line that says a command is not handled yet", body, delay, ok, err)
@@ -188,7 +203,7 @@ func TestADelayBeyondWhatTheLeadCarriesIsHeldAtWhatItCanAndReportedBack(t *testi
 	serveOn(t, c, ln)
 	peer, server, _ := bringUp(t, c, ln)
 
-	asked := MaxStaticDelayMS + 2000
+	asked := MaxOutputDelayMS + 2000
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
 
 	kind, payload := nextJSON(t, peer, server)
@@ -202,9 +217,9 @@ func TestADelayBeyondWhatTheLeadCarriesIsHeldAtWhatItCanAndReportedBack(t *testi
 	if err := json.Unmarshal(payload, &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Player == nil || state.Player.StaticDelayMS != MaxStaticDelayMS {
+	if state.Player == nil || state.Player.OutputDelayMS != MaxOutputDelayMS {
 		t.Errorf("reported %v back, want the %d ms the spec holds it to", state.Player,
-			MaxStaticDelayMS)
+			MaxOutputDelayMS)
 	}
 }
 
@@ -228,7 +243,7 @@ func TestEveryDelayTakenIsReportedBackSoAServerSchedulesForIt(t *testing.T) {
 	if err := json.Unmarshal(payload, &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Player == nil || state.Player.StaticDelayMS != asked {
+	if state.Player == nil || state.Player.OutputDelayMS != asked {
 		t.Errorf("reported %v back, want the %d ms just taken", state.Player, asked)
 	}
 }
@@ -284,7 +299,7 @@ func TestADelayIsRememberedAcrossTheNextConnection(t *testing.T) {
 	_ = peer.conn.Close()
 
 	_, _, state := bringUp(t, c, ln)
-	if state.Player == nil || state.Player.StaticDelayMS != asked {
+	if state.Player == nil || state.Player.OutputDelayMS != asked {
 		t.Errorf("the next connection reported %v, want the %d ms the last one set: the"+
 			" spec says a client keeps this across reconnections, and a server that"+
 			" reconnects without resending it would otherwise play %d ms out",
@@ -299,7 +314,7 @@ func TestADelayKeptFromAnEarlierRunIsWhatTheFirstStateCarries(t *testing.T) {
 	serveOn(t, c, ln)
 
 	_, _, state := bringUp(t, c, ln)
-	if state.Player == nil || state.Player.StaticDelayMS != 700 {
+	if state.Player == nil || state.Player.OutputDelayMS != 700 {
 		t.Errorf("a dot that kept 700 ms across a reboot reported %v, so the delay the"+
 			" spec says to persist is read back and then never used", state.Player)
 	}
@@ -332,7 +347,7 @@ func TestADelayAServerSetsToZeroIsStillZeroOnTheNextConnection(t *testing.T) {
 	serveOn(t, c, ln)
 
 	peer, server, first := bringUp(t, c, ln)
-	if first.Player == nil || first.Player.StaticDelayMS != 1000 {
+	if first.Player == nil || first.Player.OutputDelayMS != 1000 {
 		t.Fatalf("the first connection reported %v, want the 1000 ms kept from before",
 			first.Player)
 	}
@@ -345,7 +360,7 @@ func TestADelayAServerSetsToZeroIsStillZeroOnTheNextConnection(t *testing.T) {
 	_ = peer.conn.Close()
 
 	_, _, next := bringUp(t, c, ln)
-	if next.Player == nil || next.Player.StaticDelayMS != 0 {
+	if next.Player == nil || next.Player.OutputDelayMS != 0 {
 		t.Errorf("the next connection reported %v after a server set the delay to zero:"+
 			" zero is a delay a dot with no external amp is meant to have, and treating"+
 			" it as nothing brings the old figure back and plays that much early",

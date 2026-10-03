@@ -182,7 +182,7 @@ empty.
   from a standalone binary on the same Dot minutes later.
 - The cold start reads 27 ms low with the widest spread. The HAL buffer is still
   filling, so `delay` understates.
-- This is **not** Sendspin's `static_delay_ms`, which covers delay past the
+- This is **not** Sendspin's `output_delay_ms`, which covers delay past the
   device's audio port. The queue does not add to it: the first frame is at the
   head of the queue.
 
@@ -348,7 +348,7 @@ one at a time, as there is one player.
   141. The mapping was then placed again 3 times in 15 seconds, and the stream
   stayed off until the next one. A switch with the output already awake read
   141.
-- A server that honours `stream/request-format` replaces the stream instead. The
+- A server that honours the Dot's `format` replaces the stream instead. The
   Dot asks for 48 kHz once the speaker goes, and the new stream is placed
   afresh. Twice it was placed at 142 and 143 ms and played on.
 - That costs about 1 second of audio at each disconnect: the new streams were

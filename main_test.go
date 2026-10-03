@@ -889,16 +889,16 @@ func TestADelaySetWhileSendspinIsOffIsStillKept(t *testing.T) {
 		},
 	}
 
-	toggle.applyDelay(sendspin.MaxStaticDelayMS + 1000)
+	toggle.applyDelay(sendspin.MaxOutputDelayMS + 1000)
 
-	if len(saved) != 1 || saved[0] != sendspin.MaxStaticDelayMS {
+	if len(saved) != 1 || saved[0] != sendspin.MaxOutputDelayMS {
 		t.Errorf("a delay set with the surface off was kept as %v, want one held at the"+
 			" %d ms the spec allows: the next client reads this property for its"+
 			" starting figure, so a value out of range would be applied by nothing",
-			saved, sendspin.MaxStaticDelayMS)
+			saved, sendspin.MaxOutputDelayMS)
 	}
-	if got := toggle.Delay(); got != sendspin.MaxStaticDelayMS {
-		t.Errorf("the switch reports %d ms, want %d", got, sendspin.MaxStaticDelayMS)
+	if got := toggle.Delay(); got != sendspin.MaxOutputDelayMS {
+		t.Errorf("the switch reports %d ms, want %d", got, sendspin.MaxOutputDelayMS)
 	}
 	if woke != 1 {
 		t.Errorf("the api was woken %d times, want 1: the delay entity is read on the"+
@@ -906,7 +906,7 @@ func TestADelaySetWhileSendspinIsOffIsStillKept(t *testing.T) {
 			" figure for seconds after somebody moved it", woke)
 	}
 
-	toggle.applyDelay(sendspin.MaxStaticDelayMS)
+	toggle.applyDelay(sendspin.MaxOutputDelayMS)
 	if len(saved) != 1 {
 		t.Errorf("the same figure was written again (%v), and each write is two forks", saved)
 	}

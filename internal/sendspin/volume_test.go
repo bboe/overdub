@@ -2,6 +2,7 @@ package sendspin
 
 import (
 	"encoding/json"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -60,20 +61,20 @@ func volumeCommand(percent *int) serverCommand {
 	return serverCommand{Player: &playerCommand{Command: commandVolume, Volume: percent}}
 }
 
-func TestHelloOffersVolumeOnlyWhenThereIsAVolumeToSet(t *testing.T) {
+func TestTheStateOffersVolumeOnlyWhenThereIsAVolumeToSet(t *testing.T) {
 	if got := testConfig().playerCommands(); len(got) != 0 {
 		t.Errorf("a dot with no volume wiring offers %v; a server that takes the offer"+
 			" sends a command nothing here can carry out", got)
 	}
-	cfg := testConfig()
-	v := &fakeVolume{at: 40, ok: true}
-	cfg.Level, cfg.SetVolume = v.level, v.set
-	h := cfg.hello()
-	if got := h.PlayerSupport.SupportedCommands; len(got) != 1 || got[0] != commandVolume {
-		t.Errorf("client/hello offers %v, want just %q: aiosendspin 9.1.1 reads volume"+
-			" settability out of the hello support object, so a dot that stays silent"+
-			" here is left out of every group volume the server works out", got,
-			commandVolume)
+	ln := listenLocal(t)
+	c, _ := volumeClient(t)
+	serveOn(t, c, ln)
+	_, _, state := bringUp(t, c, ln)
+	want := []string{commandVolume, commandOutputDelay}
+	if got := state.Player.SupportedCommands; !slices.Equal(got, want) {
+		t.Errorf("client/state offers %v, want %v: the server reads volume settability"+
+			" out of client/state, so a dot that stays silent there is left out of every"+
+			" group volume the server works out", got, want)
 	}
 }
 
@@ -204,7 +205,7 @@ func mutingClient(t *testing.T) (*Client, *fakeVolume) {
 	return c, v
 }
 
-func TestHelloOffersMuteOnlyWhenThereIsAMuteToSet(t *testing.T) {
+func TestTheStateOffersMuteOnlyWhenThereIsAMuteToSet(t *testing.T) {
 	cfg := testConfig()
 	v := &fakeVolume{at: 40, ok: true}
 	cfg.Level, cfg.SetVolume = v.level, v.set
@@ -213,8 +214,7 @@ func TestHelloOffersMuteOnlyWhenThereIsAMuteToSet(t *testing.T) {
 	}
 	cfg.SetMute = func(bool) {}
 	if got := cfg.playerCommands(); len(got) != 2 || got[1] != commandMute {
-		t.Errorf("client/hello offers %v, want volume and mute: aiosendspin 9.1.1 reads"+
-			" both out of the hello support object", got)
+		t.Errorf("client/state offers %v, want volume and mute", got)
 	}
 }
 

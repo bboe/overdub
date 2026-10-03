@@ -433,7 +433,7 @@ func TestAFLACChunkDecodesToNoMoreThanTheSubsetsLargestBlock(t *testing.T) {
 		t.Errorf("a %d-byte frame claiming 65535 frames came back as %v; on a Dot it"+
 			" costs 5.6 ms to decode, 16 times a subset block", len(tiny), err)
 	}
-	bomb := slices.Repeat(tiny, (maxMessage-1-chunkStampBytes)/len(tiny))
+	bomb := slices.Repeat(tiny, (maxMessage-1-chunkHeadBytes)/len(tiny))
 	if _, err := s.AudioChunk(chunkBody(1, bomb)); !errors.Is(err, errFLACLong) {
 		t.Errorf("a %d-byte chunk of %d-byte frames came back as %v; decoded, it is"+
 			" %d MB of audio from one message", len(bomb), len(tiny), err,

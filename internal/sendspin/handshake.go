@@ -115,9 +115,8 @@ type Session struct {
 	matched  category
 	serverID string
 
-	writing  sync.Mutex
-	report   chan struct{}
-	reformat chan struct{}
+	writing sync.Mutex
+	report  chan struct{}
 
 	inFragment   bool
 	fragment     []byte
@@ -233,7 +232,6 @@ func Handshake(ws *Conn, keys Keys, psks PSKSet) (*Session, error) {
 		serverID: serverID,
 		clock:    newClock(),
 		report:   make(chan struct{}, 1),
-		reformat: make(chan struct{}, 1),
 	}, nil
 }
 

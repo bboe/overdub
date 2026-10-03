@@ -209,7 +209,7 @@ func syncClock(t *testing.T, peer *wsPeer, server *serverSide, offset int64) {
 }
 
 func chunkAt(stamp int64, samples int) []byte {
-	b := make([]byte, 1+chunkStampBytes+samples*frameBytes)
+	b := make([]byte, 1+chunkHeadBytes+samples*frameBytes)
 	b[0] = binaryAudioChunk
 	binary.BigEndian.PutUint64(b[1:1+chunkStampBytes], uint64(stamp))
 	return b

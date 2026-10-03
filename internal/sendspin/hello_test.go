@@ -319,14 +319,14 @@ func TestARoleRepeatedIsKeptOnce(t *testing.T) {
 	}
 }
 
-func TestHelloCarriesTheCommandsAServerRefusesUsWithout(t *testing.T) {
-	h := testConfig().hello()
-	if h.PlayerSupport == nil {
-		t.Fatalf("client/hello declares no %s support", rolePlayerV1)
+func TestHelloLeavesTheCommandsToClientState(t *testing.T) {
+	got, err := json.Marshal(testConfig().hello())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if h.PlayerSupport.SupportedCommands == nil {
-		t.Error("player@v1_support carries no supported_commands; aiosendspin 9.1.1 refuses" +
-			" client/hello outright without it, though the spec puts it only in client/state")
+	if strings.Contains(string(got), "supported_commands") {
+		t.Errorf("client/hello carries supported_commands, which the spec moved to"+
+			" client/state; a current server flags the client as non-compliant: %s", got)
 	}
 }
 
@@ -343,8 +343,8 @@ func TestClientHelloIsExactlyThisOnTheWire(t *testing.T) {
 		`"sample_rate":48000,"bit_depth":16},{"codec":"pcm","channels":2,` +
 		`"sample_rate":48000,"bit_depth":16},{"codec":"flac","channels":2,` +
 		`"sample_rate":44100,"bit_depth":16},{"codec":"pcm","channels":2,` +
-		`"sample_rate":44100,"bit_depth":16}],"buffer_capacity":65536,` +
-		`"supported_commands":[]},"unpaired_access":{"enabled":true}}}`
+		`"sample_rate":44100,"bit_depth":16}],"buffer_capacity":65536},` +
+		`"unpaired_access":{"enabled":true}}}`
 	if string(got) != want {
 		t.Errorf("client/hello is\n%s\nwant\n%s", got, want)
 	}

@@ -50,7 +50,7 @@ func runInterop(t *testing.T, player Player, outputRate func() int, args ...stri
 	defer cancel()
 	url := "ws://" + ln.Addr().String() + Path
 	cmd := exec.CommandContext(ctx, "uv", append([]string{"run", "--quiet",
-		"--with", "aiosendspin[server]==9.1.1",
+		"--with", "aiosendspin[server]==10.0.0",
 		"python", "testdata/interop_server.py",
 		"--url=" + url, "--client-id=" + keys.Identity.ClientID()}, args...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

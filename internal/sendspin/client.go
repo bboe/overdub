@@ -47,8 +47,6 @@ const (
 	typeStreamClear = "stream/clear"
 	typeStreamEnd   = "stream/end"
 	typeServerTime  = "server/time"
-
-	typeStreamRequestFormat = "stream/request-format"
 )
 
 const bootIDPath = "/proc/sys/kernel/random/boot_id"
@@ -81,25 +79,18 @@ func Advert(name string) mdns.Advert {
 }
 
 type playerState struct {
-	Volume             *int     `json:"volume,omitempty"`
-	Muted              *bool    `json:"muted,omitempty"`
-	StaticDelayMS      int      `json:"static_delay_ms"`
-	RequiredLeadTimeMS int      `json:"required_lead_time_ms"`
-	MinBufferMS        int      `json:"min_buffer_ms"`
-	SupportedCommands  []string `json:"supported_commands"`
+	Volume             *int         `json:"volume,omitempty"`
+	Muted              *bool        `json:"muted,omitempty"`
+	OutputDelayMS      int          `json:"output_delay_ms"`
+	RequiredLeadTimeMS int          `json:"required_lead_time_ms"`
+	MinBufferMS        int          `json:"min_buffer_ms"`
+	SupportedCommands  []string     `json:"supported_commands"`
+	Format             *audioFormat `json:"format,omitempty"`
 }
 
 type clientState struct {
 	Available bool         `json:"available"`
 	Player    *playerState `json:"player,omitempty"`
-}
-
-type formatRequest struct {
-	SampleRate int `json:"sample_rate"`
-}
-
-type requestFormat struct {
-	Player formatRequest `json:"player"`
 }
 
 type groupUpdate struct {
@@ -503,10 +494,6 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				stated = true
 			} else if regained {
 				c.tellServer()
-				select {
-				case session.reformat <- struct{}{}:
-				default:
-				}
 			}
 			once("sendspin: %q activated %s", name, strings.Join(roles, ","))
 		case typeGroupUpdate:
@@ -614,7 +601,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				once("sendspin: %q is setting this player's mute", name)
 				continue
 			}
-			want, asked, ours, err := session.StaticDelay(payload)
+			want, asked, ours, err := session.OutputDelay(payload)
 			if err != nil {
 				once("sendspin: %q sent a command this player will not take: %v", name, err)
 				continue
@@ -626,7 +613,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 			if asked != int(want/time.Millisecond) {
 				once("sendspin: %q asked for a %d ms output delay, and the spec holds one"+
 					" to 0 through %d, so %s is what this player takes", name, asked,
-					MaxStaticDelayMS, want)
+					MaxOutputDelayMS, want)
 			}
 			if !c.takeDelay(int(want / time.Millisecond)) {
 				continue
@@ -814,7 +801,6 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 	}
 	tick := time.NewTicker(waitOr(c.outputEvery, outputEvery))
 	defer tick.Stop()
-	asked := StreamRate
 	told := c.bluetooth.Load()
 	for {
 		rate := c.Config.OutputRate()
@@ -824,31 +810,18 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 		}
 		if held == session && c.bluetooth.Load() != told {
 			if err := c.state(session, available); err != nil {
-				c.Peer.Printf("sendspin: this player could not declare the lead and buffer"+
-					" its output needs, so its connection goes: %v", err)
+				c.Peer.Printf("sendspin: this player could not declare the format, lead and"+
+					" buffer its output needs, so its connection goes: %v", err)
 				nc.Close()
 				return
 			}
 			told = c.bluetooth.Load()
-		}
-		if held == session && rate != asked {
-			err := session.WriteJSON(typeStreamRequestFormat,
-				requestFormat{Player: formatRequest{SampleRate: rate}})
-			if err != nil {
-				c.Peer.Printf("sendspin: this player could not ask for audio at %d Hz, so"+
-					" its connection goes: %v", rate, err)
-				nc.Close()
-				return
-			}
-			asked = rate
 			c.Play.Printf("sendspin: this dot's output runs at %d Hz, so it asked %q for"+
 				" audio at that rate", rate, name)
 		}
 		select {
 		case <-stop:
 			return
-		case <-session.reformat:
-			asked = StreamRate
 		case <-tick.C:
 		}
 	}
@@ -858,10 +831,11 @@ func (c *Client) state(session *Session, available bool) error {
 	c.stating.Lock()
 	defer c.stating.Unlock()
 	player := &playerState{
-		StaticDelayMS:      int(c.heldDelay() / time.Millisecond),
+		OutputDelayMS:      int(c.heldDelay() / time.Millisecond),
 		RequiredLeadTimeMS: c.lead(),
 		MinBufferMS:        c.minBuffer(),
-		SupportedCommands:  []string{commandStaticDelay},
+		SupportedCommands:  append(c.Config.playerCommands(), commandOutputDelay),
+		Format:             c.format(),
 	}
 	if percent, on, ok := c.level(); ok {
 		if c.Config.setsVolume() {
@@ -877,6 +851,19 @@ func (c *Client) state(session *Session, available bool) error {
 		Available: available,
 		Player:    player,
 	})
+}
+
+func (c *Client) format() *audioFormat {
+	rate := StreamRate
+	if c.bluetooth.Load() {
+		rate = BluetoothRate
+	}
+	return &audioFormat{
+		Codec:      codecFLAC,
+		Channels:   StreamChannels,
+		SampleRate: rate,
+		BitDepth:   StreamBitDepth,
+	}
 }
 
 func (c *Client) lead() int {

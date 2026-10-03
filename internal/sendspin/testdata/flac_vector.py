@@ -1,6 +1,6 @@
 """Write the FLAC streams that flac_test.go decodes, with the reference encoder.
 
-    uv run --with 'aiosendspin[server]==9.1.1' python testdata/flac_vector.py
+    uv run --with 'aiosendspin[server]==10.2.1' python testdata/flac_vector.py
 
 aiosendspin-stereo.flac is aiosendspin's own encoder, so its header and frames
 are what a server sends a player that asked for flac: 2 blocks of the pattern,

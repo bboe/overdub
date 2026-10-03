@@ -301,7 +301,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 			log.Printf("sendspin: switched off at the last restart, so it stays off")
 		}
 		server.UseSendspin(toggle.On, toggle.Set)
-		server.UseSendspinDelay(sendspin.MaxStaticDelayMS, toggle.Delay, toggle.SetDelay)
+		server.UseSendspinDelay(sendspin.MaxOutputDelayMS, toggle.Delay, toggle.SetDelay)
 	}
 	if !up {
 		go sweepSendspinRule()

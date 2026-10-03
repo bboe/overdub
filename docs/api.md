@@ -584,7 +584,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   wiring before `Poll` and `Listen`. Do not take the lock to read them from the
   command path, which already holds it: that deadlocks, and the suite hangs.
 - `number.<name>_sendspin_output_delay` is the output delay. `serve.go` passes
-  `sendspin.MaxStaticDelayMS` as the maximum, so the control cannot offer a
+  `sendspin.MaxOutputDelayMS` as the maximum, so the control cannot offer a
   figure the client would clamp.
 - **The mode is a box, not a slider, which is why the step is 1 ms.** A slider
   sends a value per step dragged, each a property write (2 forks) and a

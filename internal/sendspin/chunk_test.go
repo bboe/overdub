@@ -12,7 +12,7 @@ import (
 )
 
 func chunkBody(stamp int64, pcm []byte) []byte {
-	body := make([]byte, chunkStampBytes, chunkStampBytes+len(pcm))
+	body := make([]byte, chunkHeadBytes, chunkHeadBytes+len(pcm))
 	binary.BigEndian.PutUint64(body, uint64(stamp))
 	return append(body, pcm...)
 }
@@ -35,11 +35,12 @@ func TestAChunkCarriesItsTimestampBigEndianAheadOfTheAudio(t *testing.T) {
 	}
 }
 
-func TestAChunkTooShortToHoldATimestampIsRefused(t *testing.T) {
-	for n := range chunkStampBytes {
+func TestAChunkTooShortToHoldItsHeaderIsRefused(t *testing.T) {
+	for n := range chunkHeadBytes {
 		if _, err := parseChunk(make([]byte, n)); err == nil {
-			t.Errorf("a %d-byte chunk was read for an 8-byte timestamp, which slices past"+
-				" the end and panics the daemon into the supervisor's restart loop", n)
+			t.Errorf("a %d-byte chunk was read for a %d-byte timestamp and send-ahead,"+
+				" which slices past the end and panics the daemon into the supervisor's"+
+				" restart loop", n, chunkHeadBytes)
 		}
 	}
 }

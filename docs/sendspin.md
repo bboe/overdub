@@ -10,8 +10,11 @@ Dot joins a synchronised group.
 - The repository has no tags and no releases, and changes continuously.
   `version: 1` on the wire is the core version and does not move with the
   document, so an unpinned citation rots silently.
-- The wire authority is `aiosendspin` 9.1.1, the version Music Assistant pins.
-  "The reference server", at the end, lists where it differs from the spec.
+- The wire authority is `aiosendspin` 10.0.0 (2026-10-05). Music Assistant
+  still pins 9.1.1, which refuses this wire's `client/hello`: this branch lands
+  only once Music Assistant ships the newer `aiosendspin`. Its PR #6716 bumps
+  the pin to 10.0.0 and is meant to reach stable as well.
+  "The reference server", at the end, lists what changed from 9.1.1.
 
 ## Connecting
 
@@ -221,26 +224,26 @@ once its operator approves the Dot.
   sized for that cap.
 - `min_buffer_ms` is `sendspinBuffer`, 500. Over Bluetooth it is 900; "Over
   Bluetooth" below says why.
-- `static_delay_ms` starts at **0**. It is not the place for the ~95 ms
+- `output_delay_ms` starts at **0**. It is not the place for the ~95 ms
   docs/audio.md measures: the spec says it is the delay *past* the audio port,
   and a Dot's speaker is before the port. Music Assistant exposes it as
   `CONF_SENDSPIN_STATIC_DELAY`, the knob an operator sets to 0 for a speaker
   with no external amp. A compensation declared there would vanish.
 - **The client applies the delay, not the server.** `aiosendspin`'s
-  `effective_ts_us = entry.timestamp_us - role.get_static_delay_us()` is only a
+  `effective_ts_us = entry.timestamp_us - role.get_output_delay_us()` is only a
   log field and the late-drop decision. A chunk is one message for a whole
   group, so its timestamp cannot carry a per-client delay. The server adds the
-  delay to its send-ahead: `max(min_buffer, required_lead) + static`. The
-  client subtracts it: `compute_play_time = client_time - static_delay`.
+  delay to its send-ahead: `max(min_buffer, required_lead) + output_delay`. The
+  client subtracts it: `compute_play_time = client_time - output_delay`.
 - So a larger delay makes the player sound **earlier**.
 - `required_lead_time_ms` is `sendspinLead`, **350**, derived from hardware.
   Before the first chunk can be placed, the frame-to-moment mapping needs 134 to
   164 ms of silence to settle, and the player and HAL hold 131 to 144 ms. At a
   200 ms lead the first 118.7 ms of a track was lost.
 - On the speaker it changes nothing on the wire. For a **buffered** stream the
-  server sends `max(min_buffer_ms, required_lead_time_ms) + static_delay_ms`
+  server sends `max(min_buffer_ms, required_lead_time_ms) + output_delay_ms`
   ahead, so 500 governs. For a **live** stream `aiosendspin` uses
-  `min_buffer_ms + static_delay_ms` and ignores the lead.
+  `min_buffer_ms + output_delay_ms` and ignores the lead.
   `DEFAULT_INITIAL_DELAY_US` (250 ms) applies only with no audio roles. The
   field keeps a smaller `min_buffer_ms` from taking the start of every track.
 
@@ -281,9 +284,9 @@ once its operator approves the Dot.
   length. The send-ahead is the largest across the group, so every member
   waits the same. For a buffered stream the lead adds no latency after the
   start: the queue grows past it within seconds.
-- `watchOutput` declares both in `client/state` before it sends
-  `stream/request-format`. `aiosendspin` reads both in order, and joins the
-  role at the new rate `max(100 ms, send_ahead)` ahead, from the new figures.
+- `watchOutput` declares both in the same `client/state` that carries the new
+  `format`, so the server joins the role at the new rate `max(100 ms,
+  send_ahead)` ahead, from the new figures.
 - A speaker connected mid-stream on Spotify, once. The old 48 kHz stream
   dropped 288 ms as late when the mapping moved to the new output. The new
   44.1 kHz stream's first chunk came 699 ms ahead, it played 436 ms of silence
@@ -354,9 +357,10 @@ buffer and keeps it open. Each reaches the player and the session.
 
 - Binary type bytes 4 to 7 are the player's; only **4** carries audio.
   `aiosendspin` defines nothing for 5 to 7.
-- The header is 9 bytes, `>Bq`: type, then a **big-endian signed 64-bit**
-  timestamp in microseconds. The PCM after it is little-endian. One endianness
-  for the whole message reads plausible rubbish instead of failing.
+- The header is 13 bytes, `>BqI`: type, a **big-endian signed 64-bit**
+  timestamp in microseconds, then `send_ahead`, below. The PCM after it is
+  little-endian. One endianness for the whole message reads plausible rubbish
+  instead of failing.
 - A bad chunk is **dropped, not fatal**, and its message holds none of the
   server's numbers. The run loop logs each distinct message once, keyed on its
   filled-in arguments, and the list holds 16. A server stamping 25 ms chunks
@@ -364,16 +368,21 @@ buffer and keeps it open. Each reaches the player and the session.
 - The session survives a bad chunk. Otherwise a server that stamps every chunk
   wrongly disconnects on every stream, and Music Assistant stops retrying after
   about 8.5 minutes.
-- A body shorter than 8 bytes has no timestamp. Reading it anyway panics, which
-  is the supervisor's 5-second restart with the button ungrabbed.
+- A body shorter than its 12-byte header is refused. Reading it anyway
+  panics, which is the supervisor's 5-second restart with the button
+  ungrabbed.
 - Audio that is not a whole number of frames is refused. At 16 bits one stray
   byte misaligns every later sample for the rest of the stream.
 - A chunk with no stream open is dropped: only a `stream/start` names its
   format.
-- **`send_ahead` is not a wire field.** The server computes it from
-  `min_buffer_ms`, `static_delay_ms` and `required_lead_time_ms`. The first
+- **An audio chunk's header is 12 bytes after its type:** the 8-byte timestamp,
+  then a 4-byte `send_ahead` (spec #167), the lead the server had when it sent
+  the chunk. The spec says it MUST NOT affect when the chunk plays, and the Dot
+  skips it. It exists to measure arrival delay, from which a player could size
+  `min_buffer_ms`; that is not done. The server computes the lead from
+  `min_buffer_ms`, `output_delay_ms` and `required_lead_time_ms`. The first
   chunk follows `stream/start` by about 1 ms.
-- `stream/request-format` asks for a rate; "Following the output" below.
+- `format` in `client/state` asks for a rate; "Following the output" below.
 
 ### FLAC
 
@@ -424,12 +433,12 @@ buffer and keeps it open. Each reaches the player and the session.
   speaker (docs/audio.md). AudioFlinger resamples a stream at the other rate,
   so a 44.1 kHz track to a Bluetooth speaker was resampled twice: by the
   server to 48 kHz, then back.
-- So the Dot asks the server for its output's rate. `stream/request-format`
-  carries only `sample_rate`, and the server keeps the codec.
-- The spec at `8fc2f8f` has no such message. Sendspin/spec#195 folded it into
-  `client/state`, where a player states a preference as `format`. `aiosendspin`
-  9.1.1 does not read that field.
-  The table at the end lists it.
+- So the Dot asks the server for its output's rate: every `client/state`
+  carries `format`, FLAC at the output's rate, one of the formats `client/hello`
+  offered (Sendspin/spec#195).
+- **Every state carries it.** A current server reads a state with no `format`
+  as no preference, and falls back to the first format offered, 48 kHz. 9.1.1
+  used `stream/request-format` instead; the table at the end lists it.
 - Music Assistant converts at 2 stages. It feeds `aiosendspin` at one rate per
   play, picked when playback starts from the rate the leader's role prefers
   (`_select_session_pcm_formats`), and converts the track to it with ffmpeg.
@@ -450,19 +459,19 @@ buffer and keeps it open. Each reaches the player and the session.
 - Not 44.1 kHz everywhere. The speaker would then resample every stream, and a
   48 kHz source twice.
 - The output is read every 2.5 seconds (`outputEvery`), about 1 ms a read.
-  The request goes only while the session holds the player role:
-  `aiosendspin` flags a payload for a role that is not active.
-- The server keeps the request on the role object. A role taken again starts
-  at the first format offered, so the Dot asks again after a roleless spell.
-  A reconnect sends a fresh `client/hello` and starts over the same way.
-- A request mid-stream is a new stream. `aiosendspin` sends `stream/start` in
+  A changed output sends a new `client/state` only while the session holds the
+  player role: `aiosendspin` flags a payload for a role that is not active.
+- A role taken again is told the format by the state that follows it, as is a
+  reconnect.
+- A new format mid-stream is a new stream. `aiosendspin` sends `stream/start` in
   the new format with its next chunk, and joins the role near the playhead,
-  `max(100 ms, min_buffer_ms + static_delay_ms)` ahead for a live source and
-  `max(100 ms, max(min_buffer_ms, required_lead_time_ms) + static_delay_ms)`
+  `max(100 ms, min_buffer_ms + output_delay_ms)` ahead for a live source and
+  `max(100 ms, max(min_buffer_ms, required_lead_time_ms) + output_delay_ms)`
   for a buffered one. The Dot closes the old stream and opens one at the new
   rate.
-- Measured with Music Assistant and a JBL Go 3: the new `stream/start` came 163
-  to 349 ms after the request, 3 times. At a lead of 350, before "Over
+- Measured with Music Assistant and a JBL Go 3, on 9.1.1's
+  `stream/request-format`: the new `stream/start` came 163 to 349 ms after the
+  request, 3 times. At a lead of 350, before "Over
   Bluetooth", connecting the speaker lost about 0.3 seconds of audio, about what
   a change of output costs the mapping on its own (330 ms), and disconnecting it
   about 1 second (docs/audio.md).
@@ -657,10 +666,11 @@ listener closed, rule deleted and no longer re-asserted, sessions ended.
   drops chunks, logs 1 line and keeps its slot. Every reachable `OpenStream`
   failure clears at the next `stream/start`; withdrawing would trade one silent
   track for a session outside the group.
-- There are two lists called `supported_commands`: `client/hello`'s
-  `player@v1_support` carries `volume` and `mute` (when the Dot can set them);
-  `client/state`'s player carries `set_static_delay` alone. Music Assistant
-  shows its delay control only for a player whose `client/state` names it.
+- `supported_commands` is in `client/state`'s player object only: `volume` and
+  `mute` when the Dot can set them, and always `set_output_delay` (spec #177).
+  A current server marks a client whose `client/hello` carries the list as on
+  the pre-#177 wire. Music Assistant shows its delay control only for a player
+  whose `client/state` names `set_output_delay`.
 
 ### Uninstalling takes the identity
 
@@ -743,8 +753,8 @@ Each is refused, and each has a test that fails without it.
 
 ### The delay a server sets
 
-- `server/command` `set_static_delay`. A figure outside 0 to 5,000 ms
-  (`MaxStaticDelayMS`) is clamped, because the spec says clients MUST clamp,
+- `server/command` `set_output_delay`. A figure outside 0 to 5,000 ms
+  (`MaxOutputDelayMS`) is clamped, because the spec says clients MUST clamp,
   and the clamp is logged. Refused: no figure (absent is not 0), and no player
   role. Neither drops the connection.
 - Applied as one subtraction where a server timestamp becomes a local moment.
@@ -818,7 +828,7 @@ Each is refused, and each has a test that fails without it.
 #### Set from Home Assistant
 
 - One figure, two writers: `number.<name>_sendspin_output_delay` over the
-  ESPHome API, and `set_static_delay` over Sendspin.
+  ESPHome API, and `set_output_delay` over Sendspin.
 - **Last writer wins.** The figure describes this Dot, so the operator is as
   authoritative as the server. The entity shows what is applied.
 - Both writers share the keeper's window when a client is up.
@@ -882,9 +892,8 @@ Each is refused, and each has a test that fails without it.
 
 - A player that names no `volume` command is **excluded from group volume**:
   the spec applies the delta only to players that support it.
-- **Where it is offered is `aiosendspin`'s answer, not the spec's.** The spec
-  moved all 3 commands into `client/state`; 9.1.1 refuses `volume` there and
-  the handshake never completes.
+- It is offered in `client/state` with the other commands. 9.1.1 refused
+  `volume` there and needed it in `client/hello`; the table at the end lists it.
 - **`mute` is offered too.** Setting it grabs the volume keys while held, so a
   press lifts the mute instead of moving an inaudible level.
 - The ESPHome server reads and sets the level. `serve.go` wires them, so
@@ -1014,30 +1023,28 @@ SENDSPIN_INTEROP=1 go test -run Interop ./internal/sendspin/
 - It fails on `non-compliant` or `Malformed` in the server's warnings, because
   one difference below is tolerated rather than reported.
 
-Differences between the spec at `8fc2f8f` and **aiosendspin 9.1.1**:
+What changed between **aiosendspin 9.1.1**, which Music Assistant pins, and
+**10.0.0**, which this client follows:
 
-| what | spec | aiosendspin 9.1.1 |
+| what | 9.1.1 | 10.0.0 (spec) |
 |---|---|---|
-| noise message 1 payload | `psk_id`, `psk_category` | `psk_id` alone |
-| `supported_pair_methods` | object by method | `list[PairMethodDescriptor]` |
-| `supported_commands` | in `client/state` | also in `player@v1_support` |
-| fixed output delay | `output_delay_ms` | `static_delay_ms` |
-| its command | `set_output_delay` | `set_static_delay` |
-| a player's preferred format | `format` in `client/state` | `stream/request-format` |
+| `supported_commands` | `volume`, `mute` in `player@v1_support`; `set_static_delay` in `client/state` | all in `client/state` (#177) |
+| fixed output delay | `static_delay_ms` | `output_delay_ms` |
+| its command | `set_static_delay` | `set_output_delay` |
+| a player's preferred format | `stream/request-format` | `format` in `client/state` (#195) |
+| audio chunk header | type, 8-byte timestamp | type, timestamp, 4-byte `send_ahead` (#167) |
 
-- All point the same way: the document is ahead of the library. The spec's
-  "Clarify output delay in the player sync target" is dated 2026-09-08. This
-  daemon follows the library, because the library is on the wire.
+- **The two cannot share a client.** 9.1.1 refuses a `client/hello` with no
+  `supported_commands` as malformed, and refuses `volume` in `client/state`.
+  10.0.0 accepts the old wire but flags it as non-compliant, and a hello
+  carrying the list puts the whole connection on the pre-#177 wire: the 9-byte
+  audio header among it. Both servers send `version: 1`, so the client cannot
+  tell them apart. The Dot follows the newer.
+- The interop test pins 10.0.0 as a release. It followed the unreleased
+  `3f57794` until that became an ancestor of the release, 8 fix commits back.
 - **An absent `psk_category` is the old shape.** The `psk_id` is matched
   against every candidate, and a miss falls back to the Sentinel. An empty
   string reaching the `default` arm kills every real handshake as
   `unknown psk_category ""`. A present category binds as the spec requires.
 - **No pairing method is advertised.** The two shapes cannot share one key,
   and the flow does not exist.
-- **`supported_commands` goes in both places, with different contents.**
-  `player@v1_support` takes `volume` and `mute`; `client/state` takes only
-  `set_static_delay`. Either in the other is a validation error.
-- **`static_delay_ms` goes on the wire.** The spec name is dropped as unknown,
-  and the server logs `non-compliant client: initial client/state omitted
-  required player timing fields` and, with `allow_noncompliant_clients` true by
-  default, carries on. That is why the interop test scrapes warnings.
