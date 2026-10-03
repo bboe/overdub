@@ -450,6 +450,29 @@ func TestHandshakeReportsAServerError(t *testing.T) {
 	}
 }
 
+func TestAServerErrorReasonIsCutBeforeItReachesTheError(t *testing.T) {
+	keys := testKeys(t)
+	c1, c2 := pipePair(t)
+	done := startClient(c1, keys, PSKSet{Pairing: keys.PairingPSK})
+	peer := newWSPeer(t, c2)
+	peer.upgrade("/sendspin")
+	peer.readRaw(typeClientInit)
+	body, err := marshalEnvelope(typeServerError,
+		serverErrorPayload{Reason: strings.Repeat("x", 1024)})
+	if err != nil {
+		t.Fatalf("marshalEnvelope: %v", err)
+	}
+	peer.writeText(body)
+	got := <-done
+	if !errors.Is(got.err, errServerSaid) {
+		t.Fatalf("err = %v, want %v", got.err, errServerSaid)
+	}
+	if n := len(got.err.Error()); n > 512 {
+		t.Errorf("a server's error reason reached the error at %d bytes: it is the"+
+			" server's own text, and every log line that carries it pays for all of it", n)
+	}
+}
+
 func TestHandshakeRefusesAnotherCoreVersion(t *testing.T) {
 	keys := testKeys(t)
 	c1, c2 := pipePair(t)

@@ -297,6 +297,7 @@ func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	s.memory = func() (float32, bool) { return 126.5, true }
 	s.jack = func() (bool, bool) { return true, true }
+	s.micMute = func() (bool, bool) { return false, true }
 	s.volumes = func() device.MusicVolume {
 		return device.MusicVolume{
 			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,

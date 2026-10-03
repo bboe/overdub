@@ -3,6 +3,7 @@ package esphome
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func listed(t *testing.T, s *Server) []map[int]pbField {
@@ -457,6 +458,8 @@ func sendspinSwitchIn(entities []map[int]pbField) map[int]pbField {
 
 func TestASendspinSwitchCommandReachesTheSwitchAndNothingElse(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	s.micSettle = time.Millisecond
+	wireFakeMic(s, false)
 	var told []bool
 	s.UseSendspin(func() bool { return true }, func(on bool) { told = append(told, on) })
 
@@ -477,6 +480,7 @@ func TestASendspinSwitchCommandReachesTheSwitchAndNothingElse(t *testing.T) {
 	if err := s.handle(c, msgSwitchCommand, other.b); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
+	waitMicIdle(t, s)
 	if len(told) != 1 {
 		t.Errorf("the microphone's command reached the Sendspin switch: %v", told)
 	}

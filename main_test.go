@@ -820,8 +820,7 @@ func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 
 func TestEverySettingThisDotKeepsFitsAPropertyName(t *testing.T) {
 	for _, name := range []string{sendspinFlag, sendspinDelay} {
-		if err := device.SetNumber(name, 0); err != nil &&
-			strings.Contains(err.Error(), "characters") {
+		if _, err := device.PropertyName(name); err != nil {
 			t.Errorf("%s cannot be kept on this device: %v", name, err)
 		}
 	}

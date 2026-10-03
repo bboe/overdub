@@ -12,7 +12,7 @@ const (
 	keyMax = 31
 )
 
-func key(name string) (string, error) {
+func PropertyName(name string) (string, error) {
 	full := Prefix + name
 	if len(full) > keyMax {
 		return "", fmt.Errorf("%s is %d characters, and this device refuses a property"+
@@ -22,7 +22,7 @@ func key(name string) (string, error) {
 }
 
 func Flag(name string) (on, known bool, err error) {
-	full, err := key(name)
+	full, err := PropertyName(name)
 	if err != nil {
 		return false, false, err
 	}
@@ -44,7 +44,7 @@ func SetFlag(name string, on bool) error {
 	if on {
 		value = "1"
 	}
-	full, err := key(name)
+	full, err := PropertyName(name)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func SetFlag(name string, on bool) error {
 }
 
 func Number(name string) (value int, known bool, err error) {
-	full, err := key(name)
+	full, err := PropertyName(name)
 	if err != nil {
 		return 0, false, err
 	}
@@ -78,7 +78,7 @@ func Number(name string) (value int, known bool, err error) {
 }
 
 func SetNumber(name string, value int) error {
-	full, err := key(name)
+	full, err := PropertyName(name)
 	if err != nil {
 		return err
 	}
