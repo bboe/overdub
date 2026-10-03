@@ -247,6 +247,36 @@ A warm restart hides all of this.
   count at 0. `settings get global` reads `musicMuteHappened`,
   `ttsMuteHappened` and `musicMuteByCloud`; all 3 read 0 on a Dot not muted.
 
+## Alexa's session
+
+- If the daemon is not running, the two endpoint properties still point at it and
+  Alexa cannot answer at all. They are cleared at shutdown, so only a crash leaves
+  them set, and the boot script's restart loop is what covers that.
+- `/system` is remounted for one write and put back in a deferred call, so a
+  failed write does not leave the partition writable for the rest of the boot.
+- The file the daemon adds under `/system` always lands under the same name,
+  because the name is a hash of a subject that never changes. A test pins it, and
+  `uninstall.py` names it directly: a second copy under another name is not a
+  thing that can happen, and a file kept to remember the path would be one more
+  thing to sweep in the right order.
+- `am force-stop amazon.speech.sim` **exits 0 and does nothing.** The app keeps
+  running with the same pid and the session it already had, so the daemon starts,
+  reports success, and nothing ever reaches it until the next reboot. Killing the
+  pid works: the system restarts the app, and it comes back in about 20 seconds.
+- The app reads where to send its session when it starts, so changing it under a
+  running app changes nothing. That is why the daemon kills it, and why
+  `uninstall.py` does too: with its session gone the app parks in
+  `DisconnectState`, aborts every wake word without dialling anything, and
+  answers "I'm having trouble understanding" until it is restarted. Measured
+  three times over, with `/proc/net/tcp` showing no connection attempt at all.
+- A path in `uninstall.py`'s sweep list that a later step removes aborts the run:
+  the sweep sees it, reports STILL PRESENT, and the steps after it never happen.
+  The same ordering costs `rmdir /data/local/bin`, which has to come after
+  everything that lives in there.
+- A test that waits on this session needs a deadline of its own. The failure it is
+  written to catch does not answer slowly, it does not answer at all, so a test
+  without one hangs instead of failing.
+
 ## Bluetooth and Wi-Fi share the radio
 
 - With a speaker connected, a weak Wi-Fi link collapses. At -75 dBm on 5 GHz,
