@@ -22,6 +22,21 @@ func commandServer(t *testing.T) (*Server, chan string) {
 	return s, sent
 }
 
+func nextCommand(t *testing.T, s *Server, sent chan string) string {
+	t.Helper()
+	if err := s.handle(&conn{sock: fakeAddr{}}, msgTextCommand,
+		keyedText(s.keyText, "what time is it")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-sent:
+		return got
+	case <-time.After(commandWait):
+		t.Fatal("nothing reached alexa, not even a command that should")
+		return ""
+	}
+}
+
 func keyedText(key uint32, text string) []byte {
 	var p pb
 	p.fixed32(1, key)
@@ -89,10 +104,8 @@ func TestACommandForAnotherKeyIsNotRun(t *testing.T) {
 		serviceCall(s.keyCommand+1, "unlock the front door")); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case got := <-sent:
+	if got := nextCommand(t, s, sent); got != "what time is it" {
 		t.Errorf("%q was run for a key that is not this entity's", got)
-	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -107,10 +120,8 @@ func TestAnEmptyCommandIsNotRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	select {
-	case got := <-sent:
+	if got := nextCommand(t, s, sent); got != "what time is it" {
 		t.Errorf("alexa was asked to run %q, which is nothing at all", got)
-	case <-time.After(100 * time.Millisecond):
 	}
 }
 

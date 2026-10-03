@@ -362,6 +362,23 @@ func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	s.adbSettle = time.Millisecond
 	f := wireFakeADB(s, true)
 	stubSensors(s)
+	s.wakeGap = time.Millisecond
+	reads := make(chan struct{}, 16)
+	s.uptime = func() (float32, bool) {
+		select {
+		case reads <- struct{}{}:
+		default:
+		}
+		return 1234, true
+	}
+	read := func(what string) {
+		t.Helper()
+		select {
+		case <-reads:
+		case <-time.After(5 * time.Second):
+			t.Fatal(what)
+		}
+	}
 
 	go s.PollSensors(MinSensorTick)
 	select {
@@ -369,6 +386,7 @@ func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the poll never asserted the rule at startup")
 	}
+	read("the poll never read the sensors at startup")
 
 	s.mu.Lock()
 	s.adbWorking = true
@@ -377,10 +395,11 @@ func TestThePollDoesNotReassertWhileAPositionIsBeingApplied(t *testing.T) {
 	case s.sensorWake <- struct{}{}:
 	default:
 	}
+	read("the poll never read the sensors again once woken")
 	select {
 	case <-f.done:
 		t.Error("the rule was re-asserted while a position was still being applied")
-	case <-time.After(3 * s.wakeGap):
+	default:
 	}
 
 	s.mu.Lock()

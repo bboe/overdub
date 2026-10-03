@@ -798,9 +798,12 @@ func TestRepeatingAnActivationCostsNeitherAStateNorAKeepalive(t *testing.T) {
 		}))
 	}
 
-	if !peer.quiet(400 * time.Millisecond) {
-		t.Error("a repeated activation was answered again: each one writes another" +
-			" client/state and leaves another keepalive ticker running")
+	probe := 901
+	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&probe)))
+	if got := delaySet(t, peer, server); got != probe {
+		t.Errorf("a repeated activation was answered with a %d ms client/state before"+
+			" the %d ms sent after it: each one writes another client/state and leaves"+
+			" another keepalive ticker running", got, probe)
 	}
 }
 

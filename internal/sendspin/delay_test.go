@@ -1,9 +1,11 @@
 package sendspin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -136,18 +138,34 @@ func TestADelaySetAgainToWhatItAlreadyIsIsNotReportedTwice(t *testing.T) {
 		saved = append(saved, ms)
 		return nil
 	}
+	building := make(chan struct{})
+	release := make(chan struct{})
+	var freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	var arm atomic.Bool
+	c.Config.Level = func() (int, bool, bool) {
+		if arm.CompareAndSwap(true, false) {
+			close(building)
+			<-release
+		}
+		return 50, false, true
+	}
 	serveOn(t, c, ln)
 	peer, server, _ := bringUp(t, c, ln)
 
+	arm.Store(true)
 	c.SetDelay(900)
-	if got := delaySet(t, peer, server); got != 900 {
-		t.Fatalf("the first set reported %d ms, want 900", got)
-	}
+	<-building
 	c.SetDelay(900)
-
-	if !noStateWithin(t, peer, server, 300*time.Millisecond) {
+	session, _ := c.reporting()
+	if len(session.report) != 0 {
 		t.Error("the same delay set twice was reported twice, so an operator holding a" +
 			" control at one figure is answered for nothing")
+	}
+	free()
+	if got := delaySet(t, peer, server); got != 900 {
+		t.Fatalf("the first set reported %d ms, want 900", got)
 	}
 	waitFor(t, "the change to reach the property", func() bool {
 		mu.Lock()
@@ -689,11 +707,19 @@ func TestTwoStateWritersLeaveTheServerWithTheFigureReadLast(t *testing.T) {
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
 	waitFor(t, "the server's own delay to be taken", func() bool { return c.Delay() == 200 })
 
-	if !noStateWithin(t, peer, server, 300*time.Millisecond) {
-		t.Fatal("a summary went out while another writer still held a figure it had" +
-			" read and not yet written, so the two can reach the server in the order" +
-			" opposite to the one they were read in")
-	}
+	waitFor(t, "the server's delay to wait for the summary another writer is building:"+
+		" one that goes out first lets the two reach the server in the order opposite"+
+		" to the one they were read in", func() bool {
+		stacks := make([]byte, 1<<20)
+		stacks = stacks[:runtime.Stack(stacks, true)]
+		for _, g := range bytes.Split(stacks, []byte("\n\n")) {
+			if bytes.Contains(g, []byte("sync.(*Mutex).Lock")) &&
+				bytes.Contains(g, []byte("(*Client).state(")) {
+				return true
+			}
+		}
+		return false
+	})
 	free()
 
 	if first := delaySet(t, peer, server); first != 100 {

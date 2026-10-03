@@ -245,34 +245,13 @@ func TestADelaySetAgainToWhatItAlreadyIsSaysNothing(t *testing.T) {
 		t.Fatalf("wanted the %s carrying the delay, got %s", typeClientState, kind)
 	}
 	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&asked)))
+	probe := 901
+	peer.writeBinary(server.sealJSON(t, typeServerComm, delayCommand(&probe)))
 
-	if !noStateWithin(t, peer, server, 300*time.Millisecond) {
-		t.Error("the same delay sent twice reported twice, so a server that re-asserts" +
-			" what it already set is answered every time for nothing")
-	}
-}
-
-func noStateWithin(t *testing.T, peer *wsPeer, server *serverSide, within time.Duration) bool {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		left := time.Until(deadline)
-		if left <= 0 {
-			return true
-		}
-		if err := peer.conn.SetReadDeadline(time.Now().Add(left)); err != nil {
-			t.Fatal(err)
-		}
-		_, err := peer.r.Peek(1)
-		if err := peer.conn.SetReadDeadline(time.Time{}); err != nil {
-			t.Fatal(err)
-		}
-		if err != nil {
-			return true
-		}
-		if kind, _ := readJSON(t, peer, server); kind == typeClientState {
-			return false
-		}
+	if got := delaySet(t, peer, server); got != probe {
+		t.Errorf("the same delay sent twice reported %d ms again before the %d ms sent"+
+			" after it, so a server that re-asserts what it already set is answered"+
+			" every time for nothing", got, probe)
 	}
 }
 
