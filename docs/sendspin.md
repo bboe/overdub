@@ -377,11 +377,27 @@ buffer and keeps it open. Each reaches the player and the session.
   format.
 - **An audio chunk's header is 12 bytes after its type:** the 8-byte timestamp,
   then a 4-byte `send_ahead` (spec #167), the lead the server had when it sent
-  the chunk. The spec says it MUST NOT affect when the chunk plays, and the Dot
-  skips it. It exists to measure arrival delay, from which a player could size
-  `min_buffer_ms`; that is not done. The server computes the lead from
-  `min_buffer_ms`, `output_delay_ms` and `required_lead_time_ms`. The first
-  chunk follows `stream/start` by about 1 ms.
+  the chunk. The spec says it MUST NOT affect when the chunk plays, and it does
+  not. The server computes the lead from `min_buffer_ms`, `output_delay_ms` and
+  `required_lead_time_ms`. The first chunk follows `stream/start` by about 1 ms.
+- **The Dot measures arrival delay from it**, the spec's
+  `arrival - compute_client_time(timestamp - send_ahead)`. Arrival is taken when
+  the chunk is read, before FLAC decodes it. A `send_ahead` of 0 or
+  `4294967295` is not a sample, and neither is a chunk before the clock
+  converges. The 30-second summary adds the median, 95th and 99th percentiles
+  and the maximum, from at most 4,096 chunks a window: a server sets how many
+  chunks arrive.
+- Arrival is when the read loop takes the chunk. A chunk that waits in the
+  socket while the loop decodes and writes the one before, or writes the
+  summary, counts that wait as delay. So the figures lean high, toward a
+  larger buffer.
+- It only measures. `min_buffer_ms` stays 500, or 900 over Bluetooth, until
+  the figures say what to declare. The spec sizes `min_buffer_ms` from the
+  upper tail, but here it also covers the Dot's own pipeline after a chunk is
+  read, which arrival delay does not see: the 900 is 650 ms for the Dot plus
+  110 for the server, rounded up.
+  Against the reference server on one host, 20 chunks arrived 687 us after they
+  were sent at the median and 1.6 ms at most.
 - `format` in `client/state` asks for a rate; "Following the output" below.
 
 ### FLAC

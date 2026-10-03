@@ -3,6 +3,8 @@ package sendspin
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/bboe/overdub/internal/untrustedlog"
@@ -17,10 +19,15 @@ const (
 	chunkSendAheadBytes = 4
 	chunkHeadBytes      = chunkStampBytes + chunkSendAheadBytes
 	frameBytes          = StreamChannels * StreamBitDepth / 8
+
+	sendAheadUnmeasured = math.MaxUint32
+	maxDelaySamples     = 4096
 )
 
 type audioChunk struct {
 	ServerTime int64
+	SendAhead  int64
+	Arrived    int64
 	PCM        []byte
 }
 
@@ -43,6 +50,10 @@ func chunkStamp(body []byte) (int64, error) {
 	return stamp, nil
 }
 
+func chunkSendAhead(body []byte) int64 {
+	return int64(binary.BigEndian.Uint32(body[chunkStampBytes:chunkHeadBytes]))
+}
+
 func parseChunk(body []byte) (*audioChunk, error) {
 	stamp, err := chunkStamp(body)
 	if err != nil {
@@ -53,7 +64,7 @@ func parseChunk(body []byte) (*audioChunk, error) {
 		return nil, fmt.Errorf("%w: audio that is not a whole number of %d-byte frames",
 			errTransport, frameBytes)
 	}
-	return &audioChunk{ServerTime: stamp, PCM: pcm}, nil
+	return &audioChunk{ServerTime: stamp, SendAhead: chunkSendAhead(body), PCM: pcm}, nil
 }
 
 func parseFLACChunk(body []byte, rate int) (*audioChunk, error) {
@@ -65,17 +76,35 @@ func parseFLACChunk(body []byte, rate int) (*audioChunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &audioChunk{ServerTime: stamp, PCM: pcm}, nil
+	return &audioChunk{ServerTime: stamp, SendAhead: chunkSendAhead(body), PCM: pcm}, nil
 }
 
 func (s *Session) AudioChunk(body []byte) (*audioChunk, error) {
 	if !s.streaming {
 		return nil, nil
 	}
+	arrived := nowMicros()
+	parse := parseChunk
 	if s.flac {
-		return parseFLACChunk(body, s.rate)
+		parse = func(body []byte) (*audioChunk, error) { return parseFLACChunk(body, s.rate) }
 	}
-	return parseChunk(body)
+	c, err := parse(body)
+	if err != nil {
+		return nil, err
+	}
+	c.Arrived = arrived
+	return c, nil
+}
+
+func (s *Session) ArrivalDelay(c *audioChunk) (int64, bool) {
+	if s.clock == nil || c.SendAhead == 0 || c.SendAhead == sendAheadUnmeasured {
+		return 0, false
+	}
+	sent, _, _, ok := s.clock.filter.sample(c.ServerTime - c.SendAhead)
+	if !ok {
+		return 0, false
+	}
+	return c.Arrived - sent, true
 }
 
 func (s *Session) Lead(serverTime int64) (lead, spread, offset int64, ok bool) {
@@ -102,6 +131,8 @@ type chunkRun struct {
 
 	leastLead int64
 	mostLead  int64
+
+	delays []int64
 
 	every time.Duration
 	due   time.Time
@@ -149,6 +180,9 @@ func (r *chunkRun) took(peer *untrustedlog.Log, name string, s *Session, c *audi
 		}
 		r.leadKnown = true
 	}
+	if d, ok := s.ArrivalDelay(c); ok && len(r.delays) < maxDelaySamples {
+		r.delays = append(r.delays, d)
+	}
 	if !r.announced {
 		r.announced = true
 		if known {
@@ -183,6 +217,18 @@ func (r *chunkRun) delaySet() string {
 		" delay"
 }
 
+func (r *chunkRun) arrivals() string {
+	if len(r.delays) == 0 {
+		return ""
+	}
+	d := slices.Clone(r.delays)
+	slices.Sort(d)
+	at := func(q float64) time.Duration { return micros(d[int(q*float64(len(d)-1))]) }
+	return fmt.Sprintf("; %d of them arrived %s after they were sent at the median, %s"+
+		" at the 95th percentile, %s at the 99th and %s at most", len(d), at(0.5),
+		at(0.95), at(0.99), at(1))
+}
+
 func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 	if r.chunks == 0 {
 		return
@@ -193,7 +239,8 @@ func (r *chunkRun) report(peer *untrustedlog.Log, name string) {
 			" %s and %s ahead, against a clock good to %s that moved %s; the player"+
 			" placed %s of audio against %s of silence%s", name,
 			r.chunks, r.frames, r.bytes, micros(r.leastLead), micros(r.mostLead),
-			micros(r.spread), micros(r.lastOff-r.firstOff), audio, silence, r.delaySet())
+			micros(r.spread), micros(r.lastOff-r.firstOff), audio, silence, r.delaySet()+
+				r.arrivals())
 	} else {
 		peer.Printf("sendspin: %q sent %d chunks, %d frames, %d bytes, with no clock"+
 			" to say when they were due; the player placed %s of audio against %s of"+

@@ -156,12 +156,14 @@ func TestAFLACStreamDecodesToTheSamplesThatWereEncoded(t *testing.T) {
 	}
 	var pcm []byte
 	for i, f := range frames {
-		c, err := s.AudioChunk(chunkBody(int64(1000+i), f))
+		body := chunkBody(int64(1000+i), f)
+		binary.BigEndian.PutUint32(body[chunkStampBytes:], uint32(500+i))
+		c, err := s.AudioChunk(body)
 		if err != nil {
 			t.Fatalf("frame %d: %v", i, err)
 		}
-		if c.ServerTime != int64(1000+i) {
-			t.Errorf("frame %d came back stamped %d", i, c.ServerTime)
+		if c.ServerTime != int64(1000+i) || c.SendAhead != int64(500+i) {
+			t.Errorf("frame %d came back stamped %d, %d ahead", i, c.ServerTime, c.SendAhead)
 		}
 		if c.Frames() != flacVectorBlock {
 			t.Errorf("frame %d decoded to %d frames, want %d", i, c.Frames(), flacVectorBlock)

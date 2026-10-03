@@ -87,6 +87,15 @@ func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 	if strings.Contains(said, "cannot read") {
 		t.Errorf("the daemon refused audio from the reference server:\n%s", said)
 	}
+	if !strings.Contains(said, "after they were sent at the median") {
+		t.Errorf("the daemon measured no arrival delay, so no chunk carried a send_ahead"+
+			" it could read. The daemon said:\n%s", said)
+	}
+	for line := range strings.Lines(said) {
+		if strings.Contains(line, "after they were sent") {
+			t.Log(strings.TrimSpace(line))
+		}
+	}
 	if player.count() == 0 {
 		t.Fatal("no stream reached the player")
 	}

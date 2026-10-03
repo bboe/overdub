@@ -451,3 +451,99 @@ func TestASummaryAfterAFreshStreamCountsFromItsOwnZero(t *testing.T) {
 			audio, silence, 30*time.Second, time.Second)
 	}
 }
+
+func TestAChunkCarriesItsSendAheadBigEndianAfterTheTimestamp(t *testing.T) {
+	body := []byte{
+		0, 0, 0, 0, 0x3a, 0xde, 0x68, 0xb1, // timestamp = 987654321
+		0, 0x06, 0x4a, 0xb9, // send_ahead = 412345
+		1, 2, 3, 4,
+	}
+	c, err := parseChunk(body)
+	if err != nil {
+		t.Fatalf("parseChunk: %v", err)
+	}
+	if c.ServerTime != 987_654_321 || c.SendAhead != 412_345 {
+		t.Errorf("read a timestamp of %d and a send-ahead of %d, want 987654321 and"+
+			" 412345", c.ServerTime, c.SendAhead)
+	}
+	if len(c.PCM) != 4 {
+		t.Errorf("the audio came back as %d bytes, want 4: the send-ahead is header,"+
+			" not audio", len(c.PCM))
+	}
+}
+
+func TestTheArrivalSummaryReadsEachPercentileByNearestRank(t *testing.T) {
+	var run chunkRun
+	for ms := range 100 {
+		run.delays = append(run.delays, int64(ms+1)*1_000)
+	}
+	got := run.arrivals()
+	want := "50ms after they were sent at the median, 95ms at the 95th percentile," +
+		" 99ms at the 99th and 100ms at most"
+	if !strings.Contains(got, want) {
+		t.Errorf("the summary reads %q, want it to contain %q", got, want)
+	}
+}
+
+func convergedAt(offset int64) *Session {
+	f := newTimeFilter()
+	feed(f, 8, offset, 500, 1_000_000, 1_000_000)
+	return &Session{clock: &clock{filter: f}}
+}
+
+func TestArrivalDelayIsTheTimeSinceTheServerSentTheChunk(t *testing.T) {
+	s := convergedAt(0)
+	c := &audioChunk{ServerTime: 20_000_000, SendAhead: 400_000, Arrived: 19_650_000}
+	got, ok := s.ArrivalDelay(c)
+	if !ok {
+		t.Fatal("no delay from a converged clock and a measured send-ahead")
+	}
+	if got < 49_999 || got > 50_001 {
+		t.Errorf("a chunk sent at 19.6 s and arriving at 19.65 s was %d us late, want"+
+			" 50000: arrival - client(timestamp - send_ahead)", got)
+	}
+}
+
+func TestArrivalDelaySkipsWhatTheSpecSaysIsNotASample(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		s    *Session
+		c    *audioChunk
+	}{
+		{"no clock", &Session{}, &audioChunk{ServerTime: 20_000_000, SendAhead: 1}},
+		{"a clock that has not converged", &Session{clock: newClock()},
+			&audioChunk{ServerTime: 20_000_000, SendAhead: 1}},
+		{"a send-ahead of 0, sent at or after its timestamp", convergedAt(0),
+			&audioChunk{ServerTime: 20_000_000}},
+		{"a saturated send-ahead", convergedAt(0),
+			&audioChunk{ServerTime: 20_000_000, SendAhead: sendAheadUnmeasured}},
+	} {
+		if d, ok := tt.s.ArrivalDelay(tt.c); ok {
+			t.Errorf("%s gave a delay of %d us; the spec says it is not a sample", tt.name, d)
+		}
+	}
+}
+
+func TestAChunkRunReportsArrivalsAndHoldsABoundedNumber(t *testing.T) {
+	s := convergedAt(0)
+	var run chunkRun
+	for i := range maxDelaySamples + 10 {
+		run.took(&untrustedlog.Log{}, "server", s, &audioChunk{
+			ServerTime: 20_000_000, SendAhead: 400_000,
+			Arrived: 19_600_000 + int64(i%100)*1_000, PCM: make([]byte, 4),
+		})
+	}
+	if len(run.delays) != maxDelaySamples {
+		t.Errorf("the run kept %d delays, want %d: a server sets how many chunks a window"+
+			" holds", len(run.delays), maxDelaySamples)
+	}
+	got := run.arrivals()
+	if !strings.Contains(got, "49ms after they were sent at the median") ||
+		!strings.Contains(got, "99ms at most") {
+		t.Errorf("the summary reads %q", got)
+	}
+	run.report(&untrustedlog.Log{}, "server")
+	if len(run.delays) != 0 {
+		t.Error("the run kept its delays after reporting them, so each window repeats the last")
+	}
+}
