@@ -345,6 +345,54 @@ func TestADelaySetBeforeThisClientServesSurvivesItStartingUp(t *testing.T) {
 	}
 }
 
+func TestADelayThatFailedToSaveBeforeServingIsSavedWhenServingStops(t *testing.T) {
+	ln := listenLocal(t)
+	c, _ := playingClient(t)
+	c.keepEvery = 50 * time.Millisecond
+	c.DelayMS = 700
+	var mu sync.Mutex
+	var saved []int
+	refuse := false
+	c.SaveDelay = func(ms int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if refuse {
+			refuse = false
+			return errors.New("setprop: killed")
+		}
+		saved = append(saved, ms)
+		return nil
+	}
+
+	c.SetDelay(300)
+	mu.Lock()
+	refuse = true
+	mu.Unlock()
+	c.SetDelay(700)
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = c.Serve(ln)
+	}()
+	waitFor(t, "this client to be listening", func() bool { return c.subject() != "" })
+	ln.Close()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("this client was still serving five seconds after its listener closed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(saved) == 0 || saved[len(saved)-1] != 700 {
+		t.Errorf("the property was written %v and left at the 300 ms written last, want"+
+			" the 700 ms in force: the keeper took the figure read at startup for the"+
+			" one on disk, so the set that failed before it started was never retried",
+			saved)
+	}
+}
+
 func TestADelaySetWhileThisClientIsStoppingIsStillKept(t *testing.T) {
 	ln := listenLocal(t)
 	c, _ := playingClient(t)
