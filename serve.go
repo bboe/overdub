@@ -70,6 +70,8 @@ var api atomic.Pointer[esphome.Server]
 
 var switched atomic.Pointer[sendspinSwitch]
 
+var voiced atomic.Bool
+
 func withdraw() {
 	if r := advertised.Load(); r != nil {
 		r.Goodbye()
@@ -80,6 +82,9 @@ func stopping() {
 	withdraw()
 	if s := switched.Load(); s != nil {
 		s.flush()
+	}
+	if voiced.Load() {
+		stopVoiceRelay()
 	}
 }
 
@@ -305,6 +310,8 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	if !up {
 		go sweepSendspinRule()
 	}
+
+	voiced.Store(startVoiceRelay())
 
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)

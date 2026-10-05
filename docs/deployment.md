@@ -168,6 +168,22 @@
   against both constants. The read-back alone would show a moved port only as a
   rule that would not delete.
 
+## What Alexa's session leaves on the device
+
+- Routing Alexa's session through the daemon writes outside this daemon's own
+  namespace: two properties, `persist.amazon.scl.host` and
+  `persist.amazon.scl.port`, and one file under `/system`, which needs `/system`
+  remounted.
+- So uninstall has three steps the rest of the daemon does not need. Each is read
+  back, and a failure warns rather than passing quietly:
+  1. Clear both properties, and delete their files under `/data/property`. A
+     property left set with nothing behind it is a Dot that cannot answer.
+  2. Remove the file the daemon added under `/system`. It always lands under the
+     same name, so the path is named directly rather than kept in a file.
+  3. Delete `/data/local/bin/.overdub-avs-identity`, which is what the daemon
+     made for itself on first run.
+- The identity is deleted with the binary, in the first sweep.
+
 ## Releases
 
 - A release is a tarball. Building needs an NDK, a JDK and an Android SDK, so it

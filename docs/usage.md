@@ -144,6 +144,33 @@ adb shell 'su -c "/data/local/bin/overdub -name kitchen"'
 Everything else is fixed in the binary: `event1`, keycodes 138 and 113,
 `mtk-kpd` for the clone, `wlan0`, tcp/6053 and tcp/8928.
 
+## Alexa's session
+
+Alexa's session runs through the daemon on its way to Amazon. Nothing turns this
+on or off: it happens on every Dot that installs the binary.
+
+Everything in the session is passed on unchanged, so Alexa answers as she did,
+and the daemon reads nothing out of what goes by.
+
+Three things change on the device, and `uninstall.py` undoes all three:
+
+| what | where |
+|---|---|
+| where Alexa's app sends its session | `persist.amazon.scl.host`, `persist.amazon.scl.port` |
+| one file the daemon added | under `/system` |
+| what it made for itself on first run | `/data/local/bin/.overdub-avs-identity` |
+
+Nothing has to be put on the Dot for this. The log says it is up:
+
+```
+voice: Alexa's session goes through 127.0.0.1:8443
+```
+
+**If the daemon is not running, Alexa cannot answer.** The properties still point
+at it. They are cleared when the daemon shuts down, so only a crash leaves them
+set, and the boot script restarts the daemon 5 seconds later. An uninstall clears
+them whatever state the daemon is in.
+
 ## Uninstalling
 
 ```sh
@@ -163,7 +190,11 @@ deploy/uninstall.py
 - Removing the jar revokes nothing; see [Alexa commands](#alexa-commands).
 - The Sendspin identity matters as much as the API key: the pairing token
   derives from it, so a copy left behind stays valid.
-- Amazon's stack is untouched. Delete the device in Home Assistant when done.
+- Alexa's app is pointed back at Amazon and restarted, because it reads that
+  only when it starts, and the file the daemon added under `/system` is removed.
+  Both are read back; see [Alexa's session](#alexas-session).
+- Nothing else of Amazon's is touched. Delete the device in Home Assistant
+  when done.
 - A later install generates a new API key. `/data/misc/adb/adb_keys` stays:
   adbd reads it only while `ro.adb.secure` is 1, which nothing sets after an
   uninstall.

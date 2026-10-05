@@ -24,9 +24,9 @@ docker run --rm --platform linux/arm/v7 -v "$PWD":/src \
   -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.26 go test -count=2 ./...
 
 # -race has no arm build, so these run natively
-go test -race ./internal/alexa/ ./internal/audio/ ./internal/esphome/ \
-  ./internal/device/ ./internal/mdns/ ./internal/sendspin/ \
-  ./internal/untrustedlog/
+go test -race ./internal/alexa/ ./internal/audio/ ./internal/avs/ \
+  ./internal/esphome/ ./internal/device/ ./internal/mdns/ \
+  ./internal/sendspin/ ./internal/untrustedlog/
 
 git ls-files -z '*.sh' | xargs -0 shellcheck -S style   # as CI runs it
 pre-commit run --all-files    # CodeSorter and ruff, as CI runs them
@@ -88,6 +88,8 @@ pages imported below apply to everything. Read the page for a subsystem
 - `docs/sendspin.md`: the Sendspin client, its WebSocket, its handshake
 - `docs/usage.md`: what a user runs and sees -- the installer's output, the
   entities, uninstalling, troubleshooting
+- `docs/voice.md`: Alexa's session, what routing it through this daemon changes,
+  and what has to be undone
 
 @docs/constraints.md
 @docs/pitfalls.md
