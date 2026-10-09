@@ -1252,7 +1252,7 @@ func TestAChangeOfOutputPlacesTheStreamAfresh(t *testing.T) {
 	s.observe(Point{At: later, Bursty: true})
 	if s.anchored {
 		t.Fatal("the output changed under the stream and the old mapping was kept; the" +
-			" depth moves by about 200 ms, which the average would creep towards for" +
+			" depth moves by about 200 ms, which the average would creep toward for" +
 			" seconds")
 	}
 	for range anchorTake - 1 {
