@@ -57,6 +57,11 @@ BLOCK_IMAGES = {
     "preloader": "images/preloader.img",
     "tee": "images/tz.img",
 }
+BOOT0_EMPTY = (
+    "boot0 has no preloader until the last step, so the Dot shows no light and"
+    " starts nothing until a run finishes: it waits in its bootrom, and this"
+    " script takes it from there by itself when it runs again on this computer"
+)
 BOOT_ROOT_SHA256 = "de49cc88b27a8e77cf97cf0156bee50e4ddc0e116c41aaede06b494e38397be0"
 BOOT_ROOT_URL = (
     "https://xdaforums.com/attachments/boot-root-zip.6388001/"
@@ -446,6 +451,7 @@ class Session:
     shown: Kind | None = None
     system_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     verified: set[pathlib.Path] = dataclasses.field(default_factory=set)
+    writing: bool = False
 
 
 SESSION = Session()
@@ -645,6 +651,8 @@ def _die(*, message: str, prefix: str = "ERROR: ") -> NoReturn:
     text = prefix + message
     if "\n" not in text:
         text = textwrap.fill(text, 79)
+    if SESSION.writing and ERASED.exists():
+        text += "\n\n" + textwrap.fill(BOOT0_EMPTY + ".", 79)
     if prefix and color(sys.stderr):
         text = f"\033[{ANSIColor.RED.value}m{text}\033[0m"
     raise SystemExit(text)
@@ -931,8 +939,10 @@ def bootrom(  # ruff: ignore[complex-structure, too-many-branches, too-many-stat
                 if SESSION.short:
                     brom.kill()
                     _die(
-                        message="the Dot's bootrom did not answer. Nothing was"
-                        " written. Unplug the Dot. " + again()
+                        message="the Dot's bootrom did not answer."
+                        + ("" if ERASED.exists() else " Nothing was written.")
+                        + " Unplug the Dot. "
+                        + again()
                     )
                 PROGRESS.note(
                     "The Dot's bootrom did not answer. Unplug the Dot and plug it"
@@ -950,7 +960,10 @@ def bootrom(  # ruff: ignore[complex-structure, too-many-branches, too-many-stat
         ):
             _die(
                 message="the Dot's eMMC did not answer, most likely because the"
-                " short was still on. Nothing was written. Unplug the Dot. " + again()
+                " short was still on."
+                + ("" if ERASED.exists() else " Nothing was written.")
+                + " Unplug the Dot. "
+                + again()
             )
         _die(message=f"v1.1.0's bootrom step failed; see {log_path}")
     if "Reboot to unlocked fastboot" not in log_path.read_text(errors="replace"):
@@ -1359,8 +1372,7 @@ def clear_boot0() -> None:
         ERASED.unlink(missing_ok=True)
         restore_failed(
             "boot0's header did not clear, so a failure from here would brick"
-            " rather than fall into the bootrom; nothing else was written",
-            bootable=True,
+            " rather than fall into the bootrom; nothing else was written"
         )
     restore_failed(
         "boot0 did not read back, so whether its header cleared is unknown;"
@@ -2830,12 +2842,7 @@ def restore(
         run(args=["adb", "shell", "-n", "reboot"], timeout=60)
 
 
-def restore_failed(message: str, *, bootable: bool = False) -> NoReturn:
-    if not bootable and ERASED.exists():
-        message = message.rstrip(".") + (
-            ". boot0 has no preloader until the last step, so the Dot will not"
-            " start at all until this run finishes"
-        )
+def restore_failed(message: str) -> NoReturn:
     _die(message=message)
 
 
@@ -2973,6 +2980,7 @@ def restore_stage() -> None:  # ruff: ignore[complex-structure, too-many-branche
 
 
 def root() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
+    SESSION.writing = True
     usage = run(args=["fastboot", "--help"], timeout=30).stdout
     if not any(line.split()[:1] == ["-S"] for line in usage.splitlines()):
         _die(
