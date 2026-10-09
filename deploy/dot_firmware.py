@@ -3356,12 +3356,17 @@ def sliced_system(*, slices: list[pathlib.Path], system: str) -> str:
             ],
             timeout=900,
         )
-        if GUNZIP_FAILED in result.stdout:
-            return f"{piece.name} did not unpack on the Dot"
+        said = result.stdout.strip()
+        if said.split("\n")[-1] == GUNZIP_FAILED:
+            piece.unlink(missing_ok=True)
+            return (
+                f"{piece.name} arrived intact but did not unpack on the Dot, so the"
+                " cached image was discarded and the next run rebuilds it"
+            )
         if result.returncode:
-            return result.stdout.strip() or f"it exited with {result.returncode}"
-        if SLICE_OK not in result.stdout:
-            return result.stdout.strip() or f"the Dot said nothing about {piece.name}"
+            return said or f"it exited with {result.returncode}"
+        if said.split("\n")[-1] != SLICE_OK:
+            return said or f"the Dot said nothing about {piece.name}"
     return ""
 
 
@@ -3471,7 +3476,9 @@ def stdin_carries() -> bool:
         remote = DOT_TMP / "stdin-probe"
         try:
             with probe.open("rb") as f:
-                sent = run(args=["adb", "shell", f"cat > {remote}"], stdin=f)
+                sent = run(
+                    args=["adb", "shell", f"cat > {remote}"], stdin=f, timeout=60
+                )
             read = adb_shell(command=f"md5sum {remote}; rm -f {remote}", timeout=60)
             cut = read.split("\n")[-1].split(" ")[0] != digest(kind="md5", path=probe)
             SESSION.carries = not cut and not sent.returncode
@@ -3546,36 +3553,54 @@ def stock_gpt(  # ruff: ignore[too-many-locals]
     return primary, backup, backup_lba - 32, parts
 
 
+def streamed(*, args: list[str], pieces: list[pathlib.Path]) -> tuple[int, str]:
+    with subprocess.Popen(
+        args,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as adb:
+        output = bytearray()
+
+        def feed() -> None:
+            try:
+                for piece in pieces:
+                    adb.stdin.write(piece.read_bytes())
+            except (OSError, ValueError):
+                pass
+            finally:
+                with contextlib.suppress(OSError, ValueError):
+                    adb.stdin.close()
+
+        def drain() -> None:
+            output.extend(adb.stdout.read())
+
+        threads = [threading.Thread(daemon=True, target=work) for work in (feed, drain)]
+        for thread in threads:
+            thread.start()
+        try:
+            adb.wait(timeout=SYSTEM_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            adb.kill()
+            raise
+        for thread in threads:
+            thread.join()
+    return adb.returncode, output.decode(errors="replace").replace("\r", "").strip()
+
+
 def streamed_system(*, slices: list[pathlib.Path], system: str) -> str:
     stream = Shell.SYSTEM_STREAM.value.format(
         dd=SESSION.dd,
         notrunc=" conv=notrunc" if SESSION.dd == "toybox dd" else "",
         system=system,
     )
-    with subprocess.Popen(
-        ["adb", "shell", stream],
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-    ) as adb:
-        try:
-            for piece in slices:
-                adb.stdin.write(piece.read_bytes())
-        except OSError:
-            pass
-        try:
-            said = (adb.communicate(timeout=SYSTEM_TIMEOUT)[0] or b"").decode(
-                errors="replace"
-            )
-        except subprocess.TimeoutExpired:
-            adb.kill()
-            return f"adb shell did not finish in {SYSTEM_TIMEOUT} seconds"
-    if GUNZIP_FAILED in said:
+    code, said = streamed(args=["adb", "shell", stream], pieces=slices)
+    if said.split("\n")[-1] == GUNZIP_FAILED:
         return "gunzip could not read the stream"
-    if adb.returncode:
-        return said.strip() or f"it exited with {adb.returncode}"
-    if STREAM_OK not in said:
-        return said.strip() or "the Dot said nothing about the write"
+    if code:
+        return said or f"it exited with {code}"
+    if said.split("\n")[-1] != STREAM_OK:
+        return said or "the Dot said nothing about the write"
     return ""
 
 
@@ -4072,15 +4097,20 @@ def write_system(system: str) -> None:
             reconnect(system)
         try:
             said = carry(slices=slices, system=system)
-            if not said:
-                if adb_shell(command=read_back, timeout=300).split(" ")[0] == want:
-                    return
+            if (
+                not said
+                and adb_shell(command=read_back, timeout=300).split(" ")[0] != want
+            ):
                 said = "its md5 read back did not match"
         except subprocess.TimeoutExpired as error:
             said = (
                 f"{' '.join(map(str, error.cmd))} did not finish in"
                 f" {error.timeout:.0f} seconds"
             )
+        if not said:
+            return
+        if not all(path.exists() for path in slices):
+            break
     if said == "its md5 read back did not match":
         slices[0].unlink(missing_ok=True)
         said += ". The cached image was discarded, so the next run rebuilds it"

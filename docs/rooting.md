@@ -701,8 +701,12 @@ ring read white.
   a failed `gunzip` read as success and only the md5 said anything was wrong.
   On Fire OS 6, which has no `gunzip` at all, the stream exited 0 having
   written nothing. So `gunzip` touches a file when it fails, `dd`'s own status
-  ends the pipeline, and the command's last word says `stream-ok`, `slice-ok`
-  or `gunzip-failed`. A write is accepted on that word, not on silence.
+  ends the pipeline, and the command's last line says `stream-ok`, `slice-ok`
+  or `gunzip-failed`. A write is accepted on that line alone, not on silence
+  or on the word elsewhere in the output.
+- The stream's deadline covers the transfer, not only the wait after it: one
+  thread feeds the slices, another reads adb's output, and a stalled adb is
+  killed when the 30 minutes run out.
 - TWRP 3.2.3 used `adb exec-in`: 65 s on macOS, 76 s on Windows 11. It is
   binary-safe but returns before the Dot has finished, with no status of its
   own, so a read taken when it returns can differ from what lands.

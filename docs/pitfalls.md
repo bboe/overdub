@@ -224,8 +224,12 @@ docs/rooting.md has both routes.
   (`gzread: incorrect data check`), so the marker appears for both. On input
   with no gzip magic it exits 0 and behaves like `cat`: 17,000 bytes in,
   17,000 straight out, which `dd` would then write to the partition. So each
-  slice is checked for the gzip magic on the host before the cache is used,
-  where it also catches a build that did not finish.
+  slice is checked for the gzip magic on the host before the cache is used.
+  A build that did not finish never reaches the cache: it is renamed into
+  place only after its `md5` file is written.
+- A slice that arrived intact, by its md5 on the Dot, and still did not unpack
+  can only be bad on the host. The sliced route deletes it and stops, so the
+  next run rebuilds the image rather than failing the same way.
 - Outbound is the same class. `adb shell` on Windows expands LF to CRLF, and
   the partition table, its backup copy and `misc`'s boot control block all come
   off the Dot that way, where a corrupted read would be written back. They use
