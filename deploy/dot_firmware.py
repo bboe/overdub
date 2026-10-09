@@ -58,9 +58,10 @@ BLOCK_IMAGES = {
     "tee": "images/tz.img",
 }
 BOOT0_EMPTY = (
-    "boot0 has no preloader until the last step, so the Dot shows no light and"
-    " starts nothing until a run finishes: it waits in its bootrom, and this"
-    " script takes it from there by itself when it runs again on this computer"
+    "boot0 may hold no preloader until the last step, so a Dot that restarts"
+    " before then shows no light and starts nothing: it waits in its bootrom,"
+    " and this script takes it from there by itself when it runs again on this"
+    " computer"
 )
 BOOT_ROOT_SHA256 = "de49cc88b27a8e77cf97cf0156bee50e4ddc0e116c41aaede06b494e38397be0"
 BOOT_ROOT_URL = (
@@ -1702,10 +1703,13 @@ def emos_stage() -> None:
 
 
 def erase_by_fastboot() -> str:
-    for args in (["fastboot", "erase", "boot0"], ["fastboot", "reboot"]):
-        result = run(args=args, timeout=60)
-        if result.returncode != 0:
-            return f"{' '.join(args)} failed:\n{result.stdout}"
+    erased = run(args=["fastboot", "erase", "boot0"], timeout=60)
+    if erased.returncode != 0:
+        ERASED.unlink(missing_ok=True)
+        return f"fastboot erase boot0 failed:\n{erased.stdout}"
+    rebooted = run(args=["fastboot", "reboot"], timeout=60)
+    if rebooted.returncode != 0:
+        return f"fastboot reboot failed:\n{rebooted.stdout}"
     return ""
 
 
@@ -3027,7 +3031,6 @@ def restore_stage() -> None:  # ruff: ignore[complex-structure, too-many-branche
 
 
 def root() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
-    SESSION.writing = True
     usage = run(args=["fastboot", "--help"], timeout=30).stdout
     if not any(line.split()[:1] == ["-S"] for line in usage.splitlines()):
         _die(
@@ -3057,6 +3060,7 @@ def root() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
             DOWNLOADER.start()
         if current not in {State.NONE, State.STARTING, *TWRPS}:
             ERASED.unlink(missing_ok=True)
+        SESSION.writing = True
         if current != State.NONE:
             SESSION.short = False
         if current == State.NONE and (ERASED.exists() or SESSION.short) and not resumed:
