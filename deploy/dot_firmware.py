@@ -3477,12 +3477,7 @@ def stdin_carries() -> bool:
             SESSION.carries = not cut and not sent.returncode
         finally:
             probe.unlink(missing_ok=True)
-        if cut and not sent.returncode:
-            say(
-                text="This computer's adb cuts a stream at the first 0x1a byte, so"
-                " the image goes over in pieces instead."
-            )
-        elif not SESSION.carries:
+        if sent.returncode:
             say(
                 text="This computer's adb did not carry a 1 KiB probe either way,"
                 " so the image goes over in pieces, which needs no stream."
