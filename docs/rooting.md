@@ -45,6 +45,22 @@ target.
   also needs `sys.boot_completed` to be 1.
 - Each state is acted on at most once per run, so a stale read cannot repeat a
   stage. The downgrade ends with v1-fastboot's stage, and counts as both.
+- That stage needs amonet's fastboot, and the bootrom step does not always
+  leave the Dot in it. On a resumed run reported from Windows the step wrote
+  v1.1.0 and the Dot came back in v1's own **locked** fastboot: a solid green
+  ring, `unlock_status` `false`, and `restricted on locked hw` from the first
+  `fastboot flash`, which is all a locked LK answers. So the stage reads
+  `unlock_status` first and returns where it is `false`, and a stage that
+  returns that way counts none of the states it would otherwise pass. That
+  leaves locked-v1-fastboot's own stage to unlock the Dot again, where the
+  once-per-run rule would otherwise have the run wait out its 10 minutes on a
+  state already counted. The chain then goes
+  in from v2.0.0's TWRP, which is the route a rerun took to rooted Fire OS 5
+  in 7 min 45 s.
+- Why the Dot came back locked is not known. Its table already held
+  `boot_a_x`, so the surgery had finished, and the preloader and LK were
+  v1.1.0's. What that leaves is the microloader in amonet's own `boot_a` and
+  `boot_b`, or the boot control block.
 - The script waits without limit for a Dot and for the fastboot gesture. Any
   other state unchanged for 10 minutes stops it, and the next run redoes that
   stage.

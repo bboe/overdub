@@ -571,7 +571,7 @@ sync; umount $m
 
 
 class Stage(NamedTuple):
-    run: Callable[[], None]
+    run: Callable[[], bool | None]
     steps: int
     then: State | None
     passes: frozenset[State] = frozenset()
@@ -1522,7 +1522,7 @@ def dot_details(*, asked: Callable[..., str]) -> list[str]:
     return said
 
 
-def downgrade() -> None:
+def downgrade() -> bool:
     amonet = unpack(AMONET_V1)
     wheel = fetch(PYSERIAL)
     if getvar("unlock_status").lower() != "true":
@@ -1542,7 +1542,7 @@ def downgrade() -> None:
         payload=v2_payload(),
         wheel=wheel,
     )
-    v1_recovery()
+    return v1_recovery()
 
 
 def download(build: str) -> pathlib.Path:
@@ -3225,8 +3225,8 @@ def root() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         if stage:
             left = remaining(start=current, table=table)
             PROGRESS.steps = 0 if left is None else PROGRESS.step + left
-            stage.run()
-            done.update(stage.passes)
+            if stage.run() is not False:
+                done.update(stage.passes)
         seen = None
 
 
@@ -3878,7 +3878,14 @@ def v1_chain() -> None:
     PROGRESS.begin(estimate="4 min", label="waiting for rooted Fire OS 5 to boot")
 
 
-def v1_recovery() -> None:
+def v1_recovery() -> bool:
+    if getvar("unlock_status").lower() == "false":
+        PROGRESS.note(
+            "The Dot came back in its own locked fastboot rather than amonet's,"
+            " which accepts nothing this needs. This run unlocks it again and"
+            " writes amonet v1.1.0 from v2.0.0's recovery."
+        )
+        return False
     amonet = unpack(AMONET_V1)
     twrp = fetch(TWRP)
     PROGRESS.begin(estimate="30 s", label=f"waiting for TWRP {TWRP_VERSION}")
@@ -3894,6 +3901,7 @@ def v1_recovery() -> None:
         timeout=120,
     )
     run(args=["fastboot", "oem", "reboot-recovery"], check=True, cwd=amonet, timeout=60)
+    return True
 
 
 def v2_payload() -> pathlib.Path:
