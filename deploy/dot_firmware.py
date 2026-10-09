@@ -23,6 +23,7 @@ import http.client
 import lzma
 import os
 import pathlib
+import platform
 import re
 import shlex
 import shutil
@@ -77,6 +78,7 @@ CHAIN_TEE = ("tee2", "tee1")
 CMDLINE_SIZE = 512
 DISK = "/dev/block/mmcblk0"
 DOT_TMP = pathlib.PurePosixPath("/tmp")  # ruff: ignore[hardcoded-temp-file]
+EMMC_FIELDS = ("name", "manfid", "oemid", "prv", "life_time", "pre_eol_info")
 EMOS_USB_ID = (0x1949, 0x2007)
 FASTBOOT_MODE = (
     "Unplug the USB cable, press and hold the action button (the one with a dot),"
@@ -84,6 +86,7 @@ FASTBOOT_MODE = (
 )
 FTVDB = "https://ftvdb.com/echo/firmware/com.amazon.biscuit.android.os/"
 GPT_HEADER_SIZE = 92
+GUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 HANDSHAKE_WAIT = 10
 HEAD_CHECK = 1 << 20
 IMAGES = ("preloader", "lk", "tee", "boot", "system")
@@ -93,6 +96,8 @@ MEDIATEK_VID = 0x0E8D
 MEGA = 1e6
 MINUTE = 60
 MIRROR = "https://github.com/hkfuertes/amazon_device_biscuit/releases/download/none"
+MMC_LOG = 'dmesg | grep -iE "mmc|msdc" | tail -60'
+MMC_LOG_REACHES_BOOT = "MMC card at address"
 MORE_THAN_ONE = (
     "more than one Dot on USB: set ANDROID_SERIAL to one's serial (adb"
     " devices lists them)"
@@ -121,14 +126,25 @@ adb kill-server
 Then run it again with the new group, which a new login also has:
 
 """  # ruff: ignore[line-too-long]
+PARTITION_FIELDS = 4
 PAYLOAD_VERSION = 2
 PRELOADER_PID = 0x2000
 PUSH_TRIES = 3
+REPORT_PROPS = (
+    "ro.product.device",
+    "ro.build.version.name",
+    "ro.build.version.number",
+    "ro.build.type",
+    "ro.twrp.version",
+    "ro.boot.lk_build_desc",
+)
 SHORT_WAIT = 5
 SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 STOCK_PARTITIONS = 16
 STOCK_STEPS = 16
+SYSTEM_FIELDS = 2
 TABLE_FIELDS = 6
+TABLE_OK = "table-ok"
 TRANSFER_FIELDS = 2
 TWRP_VERSION = "3.7.0_9-bboe2"
 TWRP_VERSIONS = ("3.2.", "3.7.")
@@ -651,7 +667,7 @@ def amonet_chain() -> None:
             _die(
                 message=f"{node} did not answer with an md5 of its first"
                 f" {local.stat().st_size} bytes: {held or 'nothing'}. Nothing"
-                " was written. " + again()
+                " was written. " + again() + " " + asked_for()
             )
     _die(
         message="lk_a holds neither amonet v2.0.0's nor v1.1.0's LK, so this Dot"
@@ -659,6 +675,14 @@ def amonet_chain() -> None:
         " Nothing was written. Unlock it first: unplug the USB cable, hold the"
         " action button, plug it back in, and let go when the ring turns green. "
         + again()
+    )
+
+
+def asked_for() -> str:
+    return (
+        "If it fails the same way, run dot_firmware.py --report and paste what"
+        " it prints into an issue: it says what this Dot's eMMC and partitions"
+        " are."
     )
 
 
@@ -1418,6 +1442,24 @@ def digest(*, kind: str, limit: int = 0, path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def dot_details(*, asked: Callable[..., str]) -> list[str]:
+    said = [
+        labelled(label=name, value=asked(f"getprop {name}")) for name in REPORT_PROPS
+    ]
+    for name in EMMC_FIELDS:
+        where = f"/sys/block/{node_held(target=DISK)}/device/{name}"
+        said.append(
+            labelled(
+                label=f"eMMC {name}",
+                value=asked(f"cat {where} 2>/dev/null || echo '<absent>'"),
+            )
+        )
+    window = asked("dmesg | head -1 | tr -d '[]' | tr -s ' ' | cut -d' ' -f2")
+    held = asked("cut -d' ' -f1 /proc/uptime")
+    said.append(labelled(label="uptime", value=f"{held} s, dmesg from {window} s"))
+    return said
+
+
 def downgrade() -> None:
     amonet = unpack(AMONET_V1)
     wheel = fetch(PYSERIAL)
@@ -1916,6 +1958,73 @@ def install_magisk(*, magisk: pathlib.Path, work: pathlib.Path) -> None:
         _die(message="Magisk 17.3's files did not verify on the Dot")
 
 
+def into_recovery(*, line: Callable[[str, object], None]) -> bool:
+    asked = False
+    deadline = time.monotonic() + WAIT
+    while time.monotonic() < deadline:
+        if state() in TWRPS:
+            PROGRESS.end()
+            return True
+        if in_fastboot():
+            unlocked = getvar("unlock_status")
+            for name, value in (
+                ("product", getvar("product")),
+                ("unlock_status", unlocked),
+                ("lk_build_desc", getvar("lk_build_desc")),
+            ):
+                line("fastboot " + name, value or "<nothing>")
+            if not unlocked:
+                say(
+                    text="This Dot's fastboot did not say whether it is unlocked,"
+                    " so this stops rather than guess. Check the cable, and that no"
+                    " other program holds the Dot, then run it again."
+                )
+                return False
+            if unlocked.lower() != "true":
+                say(
+                    text="This Dot's bootloader is locked, so it holds no recovery"
+                    " to collect from and nothing here can give it one. Root it"
+                    " first: run this script again without --report, and follow"
+                    " what it asks."
+                )
+                return False
+            PROGRESS.begin(estimate="40 s", label="restarting the Dot in its recovery")
+            run(args=["fastboot", "oem", "reboot-recovery"], timeout=60)
+        elif run(args=["adb", "get-state"], timeout=30).stdout.strip() == "device":
+            PROGRESS.begin(estimate="40 s", label="restarting the Dot in its recovery")
+            run(args=["adb", "reboot", "recovery"], timeout=60)
+        else:
+            if not asked:
+                asked = True
+                say(
+                    text="The rest of this report comes from the Dot's recovery."
+                    " Start the Dot in fastboot mode and this goes on by itself. "
+                    + FASTBOOT_MODE
+                    + " A Dot already unlocked with amonet v2.0.0 has no fastboot:"
+                    " hold the + button instead while you plug it back in, which"
+                    " starts its TWRP. A Dot that shows nothing on USB is in its"
+                    " bootrom, and only a root run brings it back. Ctrl-C stops"
+                    " this."
+                )
+            status(text="Waiting for the Dot in fastboot mode, with a green ring.")
+            time.sleep(2)
+            continue
+        try:
+            run(args=["adb", "wait-for-recovery"], timeout=180)
+        except subprocess.TimeoutExpired:
+            PROGRESS.halt()
+            return False
+        time.sleep(5)
+        PROGRESS.end()
+        return state() in TWRPS
+    PROGRESS.halt()
+    return False
+
+
+def labelled(*, label: str, value: object) -> str:
+    return f"{label:<24} {value}"
+
+
 def magisk_binary(magiskinit: bytes) -> bytes:
     at = magiskinit.find(b"\xfd7zXZ\0")
     while at != -1:
@@ -1989,6 +2098,13 @@ def main() -> None:
         " time, and each state the Dot reaches",
     )
     parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print what the Dot and this computer are, and the Dot's partition"
+        " table, for an issue report; it starts the Dot's recovery to read them"
+        " and writes no partition",
+    )
+    parser.add_argument(
         "--short",
         action="store_true",
         help="for a Dot that shows no light and needs its test point shorted:"
@@ -2030,6 +2146,9 @@ def main() -> None:
     check_adb()
     move_old_caches()
     SESSION.short = options.short
+    if options.report:
+        report()
+        return
     root()
 
 
@@ -2041,9 +2160,31 @@ def mark() -> str:
     return "\u2705"
 
 
+def masked(*, text: str) -> str:
+    text = re.sub(flags=re.IGNORECASE, pattern=GUID, repl="<guid>", string=text)
+    serial = os.environ.get("ANDROID_SERIAL", "")
+    return text.replace(serial, "<serial>") if serial else text
+
+
 def md5_mismatch(*, command: str, want: str) -> str:
     got = [*adb_shell(command=command).split("\n")[-1].split(" "), ""][0]
     return "" if got == want else f": read {got or 'nothing'}, expected {want}"
+
+
+def mmc_said(*, asked: Callable[..., str]) -> list[str]:
+    logged = asked(MMC_LOG)
+    if MMC_LOG_REACHES_BOOT in logged:
+        return [logged]
+    if not any(word in logged.lower() for word in ("mmc", "msdc")):
+        unread = "\nThat is not the kernel's log, so it says nothing either way."
+        return [logged, unread]
+    gone = (
+        "\nThat log no longer reaches the boot, so the card's own lines are gone."
+        " They come back from a restart into this recovery, which is safe only"
+        " when a run is not part-way through writing. Restart it yourself and"
+        " run this again if they are wanted."
+    )
+    return [logged, gone]
 
 
 def move_old_caches() -> None:
@@ -2071,6 +2212,35 @@ def no_port_help() -> str:
     if sys.platform == "darwin":
         return "No new /dev/cu.usbmodem* port appeared."
     return "No new COM port appeared. Windows may need a driver for USB ID 0e8d:0003."
+
+
+def node_held(*, target: str) -> str:
+    return target.rsplit("/", maxsplit=1)[-1]
+
+
+def node_names(*, listing: str) -> dict[str, str]:
+    found = {}
+    for row in listing.split("\n"):
+        name, arrow, target = row.partition(" -> ")
+        if arrow:
+            found[name.split()[-1]] = target.strip()
+    for name, target in tuple(found.items()):
+        if not node_order(node=target):
+            found[name] = found.get(node_held(target=target), target)
+    return found
+
+
+def node_order(*, node: str) -> int:
+    disk, _, number = node_held(target=node).partition("p")
+    return int(number) if disk.startswith("mmcblk") and number.isdigit() else 0
+
+
+def node_sizes(*, partitions: str) -> dict[str, int]:
+    return {
+        field[-1]: int(field[2]) * 1024
+        for field in (row.split() for row in partitions.split("\n"))
+        if len(field) == PARTITION_FIELDS and field[2].isdigit()
+    }
 
 
 def on_usb(line: str) -> bool:
@@ -2103,11 +2273,45 @@ def partition_field(*, name: str, number: int) -> str:
     return ""
 
 
+def partition_row(*, row: str) -> int:
+    field = row.split()
+    if not field or not field[0].isdigit():
+        return 0
+    return int(field[0]) if len(field) >= TABLE_FIELDS else 0
+
+
+def partition_rows(*, names: dict[str, str], printed: str) -> list[str]:
+    said = [row.rstrip() for row in printed.split("\n")]
+    if said[-1:] != [TABLE_OK] or not any(partition_row(row=row) for row in said):
+        return [*said, "", "That is not a whole table, so no name was matched to it."]
+    said = said[:-1]
+    held: dict[str, list[str]] = {}
+    for name, target in sorted(names.items()):
+        key = node_held(target=target) if node_order(node=target) else target
+        held.setdefault(key, []).append(name)
+    header = next((row for row in said if row.lstrip().startswith("Number ")), None)
+    width = max(len(row) for row in said if partition_row(row=row) or row == header)
+    rows = []
+    for row in said:
+        number = partition_row(row=row)
+        if not number:
+            rows.append(
+                f"{row:<{width}}  {'node':<10}  alias" if row == header else row
+            )
+            continue
+        node = f"{node_held(target=DISK)}p{number}"
+        linked = held.pop(node, [])
+        called = [name for name in linked if name != row.split()[-1]]
+        alias = ", ".join(called) if called else "" if linked else "<no name>"
+        rows.append(f"{row:<{width}}  {node:<10}  {alias}".rstrip())
+    return rows + unreal_rows(held=held)
+
+
 def partition_table() -> str:
-    command = f"sgdisk --print {DISK}; echo table-ok"
+    command = f"sgdisk --print {DISK}; echo {TABLE_OK}"
     for attempt in range(PUSH_TRIES):
         said = adb_shell(command=command, timeout=30).split("\n")
-        if said[-1] == "table-ok" and any(" userdata" in line for line in said):
+        if said[-1] == TABLE_OK and any(" userdata" in line for line in said):
             return "\n".join(said[:-1])
         if attempt + 1 < PUSH_TRIES:
             reconnect(DISK)
@@ -2252,7 +2456,7 @@ def push_checked(*, local: pathlib.Path, remote: str | pathlib.PurePosixPath) ->
             )
     _die(
         message=f"{remote} did not arrive intact after {PUSH_TRIES} tries;"
-        f" the last: {said}"
+        f" the last: {said}. " + asked_for()
     )
 
 
@@ -2339,6 +2543,53 @@ def replace_twrp() -> None:
             " running. " + again()
         )
     run(args=["adb", "reboot", "recovery"], check=True, timeout=60)
+
+
+def report() -> None:
+    def line(label: str, value: object) -> None:
+        show(text=labelled(label=label, value=value))
+
+    def asked(command: str, timeout: float = 60) -> str:
+        try:
+            said = adb_shell(command=command, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return "<timed out>"
+        return masked(text=said) or "<nothing>"
+
+    show(text="Paste everything below into the issue.\n")
+    line("script", pathlib.Path(__file__).name)
+    line("host", f"{sys.platform} ({os.name}), {platform.platform()}")
+    line("python", sys.version.split()[0])
+    said = run(args=["adb", "version"], timeout=30).stdout.split("\n")
+    line("adb", ", ".join(part.strip() for part in said[:2] if part.strip()))
+    line("state", state().value)
+    if not into_recovery(line=line):
+        show(text="\nThe report stops with what is above.")
+        return
+    line("state in recovery", state().value)
+    for text in dot_details(asked=asked):
+        show(text=text)
+    held = CACHE / f"system-{FIREOS.sha256[:12]}" / "md5"
+    recorded = held.read_text().split() if held.is_file() else []
+    needs = 0
+    if len(recorded) >= SYSTEM_FIELDS and recorded[1].isdigit():
+        needs = int(recorded[1]) * 4096
+        line("system image", f"{needs} bytes, md5 {recorded[0]}")
+    else:
+        line("system image", "not built yet, so its size is unknown")
+    sizes = node_sizes(partitions=asked("cat /proc/partitions"))
+    names = node_names(listing=asked(f"ls -l {BY_NAME}/"))
+    holds = sizes.get(node_held(target=names.get("system_a", "")), 0)
+    line("system_a", f"{names.get('system_a') or '<unknown>'}, {holds} bytes")
+    if holds and needs:
+        line("system_a spare", f"{holds - needs} bytes")
+    show(text="\npartition table, with each name's node and any other name for it")
+    printed = asked(f"sgdisk --print {DISK}; echo {TABLE_OK}", timeout=120)
+    for row in partition_rows(names=names, printed=printed):
+        show(text=row)
+    show(text="\nwhat the kernel says about the eMMC")
+    for text in mmc_said(asked=asked):
+        show(text=text)
 
 
 def rerun() -> str:
@@ -3068,7 +3319,7 @@ def system_chunks(*, dat: IO[bytes], ranges: list[tuple[int, int]]) -> Iterator[
 def system_image() -> tuple[pathlib.Path, str, int]:
     target = CACHE / f"system-{FIREOS.sha256[:12]}"
     with hold(SESSION.system_lock):
-        if not (target / "md5").is_file():
+        if not (target / "md5").is_file() or not (target / "system.img.gz").is_file():
             shutil.rmtree(target, ignore_errors=True)
             build_system(target)
     want, blocks = (target / "md5").read_text().split()
@@ -3138,6 +3389,16 @@ def unpack(download: Download) -> pathlib.Path:
                 z.extractall(part)
             part.replace(target)
         return target / "amonet"
+
+
+def unreal_rows(*, held: dict[str, list[str]]) -> list[str]:
+    if not held:
+        return []
+    pairs = sorted((", ".join(called), target) for target, called in held.items())
+    width = max(len(called) for called, _ in pairs)
+    return ["", "names that point at no partition"] + [
+        f"{called:<{width}}  {target}" for called, target in pairs
+    ]
 
 
 def usb_serial() -> str | None:
@@ -3464,11 +3725,11 @@ def write_system(system: str) -> None:
                 f" {error.timeout:.0f} seconds"
             )
     if said == "its md5 read back did not match":
-        (image.parent / "md5").unlink(missing_ok=True)
+        image.unlink(missing_ok=True)
         said += ". The cached image was discarded, so the next run rebuilds it"
     _die(
         message=f"{system} was not written intact after {PUSH_TRIES} tries;"
-        f" the last: {said}"
+        f" the last: {said}. " + asked_for()
     )
 
 
