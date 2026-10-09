@@ -23,8 +23,10 @@ GOOS=linux GOARCH=arm GOARM=7 go test -exec qemu-arm-static ./...
 docker run --rm --platform linux/arm/v7 -v "$PWD":/src \
   -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.26 go test -count=2 ./...
 
-# -race has no arm build, so these run natively
-go test -race ./internal/alexa/ ./internal/audio/ ./internal/esphome/ \
+# -race has no 32-bit ARM build, so it runs as 64-bit Linux
+docker run --rm --platform linux/amd64 -v "$PWD":/src \
+  -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.26 \
+  go test -race ./internal/alexa/ ./internal/audio/ ./internal/esphome/ \
   ./internal/device/ ./internal/mdns/ ./internal/sendspin/ \
   ./internal/untrustedlog/
 
