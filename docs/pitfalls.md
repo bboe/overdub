@@ -65,9 +65,18 @@ covering whatever you are about to touch.
   end well before the pattern starts, so the writes stay raw and nothing is
   mounted while they land. The layout is pinned rather than inherited, because
   the boundary has to be an input: `-J size=4 -N 8192` with
-  `-O ^sparse_super,^resize_inode -E packed_meta_blocks=1` puts every metadata
-  block inside the first 6.11 MiB of a 784 MiB cache, measured, against a
+  `-O ^sparse_super,^resize_inode -E packed_meta_blocks=1` puts the primary
+  superblock, the group descriptors, the bitmaps, the inode tables and the
+  journal inside the first 6.11 MiB of a 784 MiB cache, measured, against a
   16 MiB margin.
+- `^sparse_super` also puts a backup superblock in every block group, at 128,
+  256 and up to 768 MiB (mke2fs 1.47), and the pattern overwrites those. The
+  filesystem still mounts on its primary. The last format writes all of it
+  again: a filesystem over all of `cache` but its last 1 MiB.
+- A write that does not answer in 30 minutes leaves `cache` as it is. `dd` may
+  still be writing on the Dot, and a format under it could leave a filesystem
+  that reads as fresh and is not. The one already there ends before the
+  pattern starts, so the Dot still boots, and a rerun formats it first.
 - `e2fsck` will not catch it if that boundary is wrong. With the default
   layout the journal is one extent at 12.33-28.33 MiB, and after overwriting
   from 16 MiB `e2fsck -fn` passed all five passes on a filesystem missing

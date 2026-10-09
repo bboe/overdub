@@ -1645,10 +1645,18 @@ def emmc_leg(
     )
     PROGRESS.end()
     took = time.monotonic() - started
-    answer = said.split("\n")[-1]
-    read = answer.partition("card:")[2].split(" ")[0] if "card:" in answer else ""
+    if said == "<timed out>":
+        line(
+            "the test did not finish",
+            f"no answer in {EMMC_TIMEOUT} s. dd may still be writing {EMMC_TARGET},"
+            " so it is left as it is: its own filesystem ends before the pattern"
+            " starts. Wait a few minutes, then run this again, which formats it"
+            " first.",
+        )
+        return
+    answer = said.strip().split("\n")[-1]
+    read = answer[len("card:") :].split(" ")[0] if answer.startswith("card:") else ""
     want = repeat_md5(blocks=chunk, times=rounds)
-    asked(f"rm -f {DOT_TMP / 'usb-test'}")
     line("md5 read back", read or "<nothing>")
     line("md5 of what was written", want)
     line(
@@ -1662,7 +1670,7 @@ def emmc_leg(
         line(
             "verdict",
             f"the eMMC took {written} MiB and gave it back unchanged, with nothing"
-            " crossing USB, so a failed install is the cable or the host"
+            " crossing USB, so the card is not at fault"
             if read == want
             else "THE eMMC DID NOT GIVE BACK WHAT IT TOOK. Nothing crossed USB,"
             " so the card or its driver is at fault, not the cable",
@@ -1671,8 +1679,8 @@ def emmc_leg(
     line(
         "fresh filesystem",
         "yes"
-        if formatted.split("\n")[-1] == "formatted"
-        else f"NO, so {EMMC_TARGET} holds no filesystem: {formatted}",
+        if formatted.strip().split("\n")[-1] == "formatted"
+        else f"NO: {formatted or '<nothing>'}",
     )
 
 
@@ -3815,34 +3823,41 @@ def usb_leg(*, asked: Callable[..., str], line: Callable[[str, object], None]) -
         return
     remote = DOT_TMP / "usb-test"
     local = CACHE / "usb-test.bin"
-    want = pattern_file(blocks=blocks, path=local)
-    started = time.monotonic()
     try:
-        pushed = run(args=["adb", "push", local, remote], timeout=EMMC_TIMEOUT)
-        failed = pushed.stdout if pushed.returncode else ""
-    except subprocess.TimeoutExpired:
-        failed = f"it did not finish in {EMMC_TIMEOUT} seconds"
-    took = time.monotonic() - started
-    read = (
-        ""
-        if failed
-        else asked(f"md5sum {remote}", timeout=300).split("\n")[-1].split(" ")[0]
-    )
-    local.unlink(missing_ok=True)
-    carried = read == want and not failed
-    SESSION.carried = blocks if carried else 0
+        want = pattern_file(blocks=blocks, path=local)
+        started = time.monotonic()
+        try:
+            pushed = run(args=["adb", "push", local, remote], timeout=EMMC_TIMEOUT)
+            failed = pushed.stdout if pushed.returncode else ""
+        except subprocess.TimeoutExpired:
+            failed = f"it did not finish in {EMMC_TIMEOUT} seconds"
+        took = time.monotonic() - started
+    finally:
+        local.unlink(missing_ok=True)
     line("over USB", f"{blocks} MiB pushed into {DOT_TMP}, which is RAM")
-    line("md5 read back", read or "<nothing>")
+    if failed:
+        line("adb push said", masked(text=failed).strip().split("\n")[-1])
+        line(
+            "verdict",
+            "USB DID NOT CARRY IT. No eMMC was written, so the cable, the port or"
+            " this computer is at fault",
+        )
+        return
+    answer = asked(f"md5sum {remote}", timeout=300).strip()
+    read = answer.split("\n")[-1].split(" ")[0]
+    if not re.fullmatch(f"[0-9a-f]{{{MD5_DIGITS}}}", read):
+        line("the test did not run", f"md5sum answered {answer or '<nothing>'}")
+        return
+    SESSION.carried = blocks if read == want else 0
+    line("md5 read back", read)
     line("md5 pushed", want)
     line("rate", f"{blocks / max(took, 1):.0f} MiB a second, over {took:.0f} s")
-    if failed:
-        line("adb push said", masked(text=failed).split("\n")[-1])
     line(
         "verdict",
-        "USB carried it intact, so a failed install is the eMMC, not the cable"
-        if carried
-        else "USB DID NOT CARRY IT. No eMMC was written, so the cable, the port"
-        " or the host is at fault",
+        "USB carried it intact, so the cable and this computer are not at fault"
+        if read == want
+        else "USB DID NOT CARRY IT. No eMMC was written, so the cable, the port or"
+        " this computer is at fault",
     )
 
 
@@ -4221,14 +4236,25 @@ def write_test() -> None:
     if asked("toybox dd --help >/dev/null 2>&1 && echo yes").split("\n")[-1] == "yes":
         SESSION.dd = "toybox dd"
     line("dd on the Dot", SESSION.dd)
-    node = node_names(listing=asked(f"ls -l {BY_NAME}/")).get(EMMC_TARGET, "")
-    sizes = node_sizes(partitions=asked("cat /proc/partitions"))
-    blocks = sizes.get(node_held(target=node), 0) // MEBI
+    listing = whole(
+        marker=LISTING_OK, said=asked(f"ls -l {BY_NAME}/; echo {LISTING_OK}")
+    )
+    partitions = whole(
+        marker=PARTITIONS_OK, said=asked(f"cat /proc/partitions; echo {PARTITIONS_OK}")
+    )
     usb_leg(asked=asked, line=line)
-    emmc_leg(asked=asked, blocks=blocks, line=line, node=node)
+    if listing is None or partitions is None:
+        line("over the eMMC", "skipped: the Dot's partition lists did not arrive whole")
+    else:
+        node = node_names(listing=listing).get(EMMC_TARGET, "")
+        sizes = node_sizes(partitions=partitions)
+        blocks = sizes.get(node_held(target=node), 0) // MEBI
+        emmc_leg(asked=asked, blocks=blocks, line=line, node=node)
+    asked(f"rm -f {DOT_TMP / 'usb-test'}")
     show(text="\nwhat the kernel says about the eMMC")
     for text in mmc_said(asked=asked):
         show(text=text)
+    show(text="\n" + LEFT_IN_RECOVERY)
 
 
 if __name__ == "__main__":
