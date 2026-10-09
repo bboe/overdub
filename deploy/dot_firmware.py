@@ -3908,13 +3908,23 @@ def v1_chain() -> None:
 
 
 def v1_recovery() -> bool:
-    if getvar("unlock_status").lower() == "false":
+    unlocked = ""
+    for _ in range(PUSH_TRIES):
+        unlocked = getvar("unlock_status").lower()
+        if unlocked in {"true", "false"}:
+            break
+        time.sleep(1)
+    if unlocked == "false":
         PROGRESS.note(
             "The Dot came back in its own locked fastboot rather than amonet's,"
             " which accepts nothing this needs. This run unlocks it again and"
-            " writes amonet v1.1.0 from v2.0.0's recovery."
+            " goes on from v2.0.0's recovery."
         )
         return False
+    if unlocked != "true":
+        _die(
+            message="the Dot's fastboot did not say whether it is unlocked. " + again()
+        )
     amonet = unpack(AMONET_V1)
     twrp = fetch(TWRP)
     PROGRESS.begin(estimate="30 s", label=f"waiting for TWRP {TWRP_VERSION}")

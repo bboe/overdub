@@ -57,6 +57,9 @@ target.
   state already counted. The chain then goes
   in from v2.0.0's TWRP, which is the route a rerun took to rooted Fire OS 5
   in 7 min 45 s.
+- `getvar` can answer nothing, so the stage reads `unlock_status` up to 3
+  times. A fastboot that never answers `true` or `false` stops the run with a
+  message, not with a flash a locked LK refuses.
 - Why the Dot came back locked is not known. Its table already held
   `boot_a_x`, so the surgery had finished, and the preloader and LK were
   v1.1.0's. What that leaves is the microloader in amonet's own `boot_a` and
