@@ -96,6 +96,8 @@ FASTBOOT_MODE = (
 FTVDB = "https://ftvdb.com/echo/firmware/com.amazon.biscuit.android.os/"
 GPT_HEADER_SIZE = 92
 GUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+GUNZIP_FAILED = "gunzip-failed"
+GZIP_MAGIC = b"\x1f\x8b"
 HANDSHAKE_WAIT = 10
 HEAD_CHECK = 1 << 20
 IMAGES = ("preloader", "lk", "tee", "boot", "system")
@@ -149,10 +151,14 @@ REPORT_PROPS = (
     "ro.boot.lk_build_desc",
 )
 SHORT_WAIT = 5
+SLICE_OK = "slice-ok"
 SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 STOCK_PARTITIONS = 16
 STOCK_STEPS = 16
+STREAM_OK = "stream-ok"
 SYSTEM_FIELDS = 2
+SYSTEM_SLICE = 128
+SYSTEM_TIMEOUT = 1800
 TABLE_FIELDS = 6
 TABLE_OK = "table-ok"
 TRANSFER_FIELDS = 2
@@ -445,6 +451,7 @@ class Progress:
 @dataclasses.dataclass
 class Session:
     carried: int = 0
+    carries: bool | None = None
     dd: str = "dd"
     probing: bool = False
     short: bool = False
@@ -510,6 +517,19 @@ cd /; cpio -idu < /tmp/magisk.cpio 2>/dev/null
 chmod 700 /data/adb; chmod -R 755 /data/adb/magisk; chmod 600 /data/adb/magisk.db
 sync
 """
+    SYSTEM_STREAM = (
+        "rm -f /tmp/gunzip-failed;"
+        " ( gunzip -c || touch /tmp/gunzip-failed )"
+        " | {dd} of={system} bs=1048576{notrunc} || exit 9;"
+        " [ -f /tmp/gunzip-failed ] && echo gunzip-failed || echo stream-ok"
+    )
+    SYSTEM_SLICE = (
+        "rm -f /tmp/gunzip-failed;"
+        " ( gunzip -c {held} || touch /tmp/gunzip-failed )"
+        " | {dd} of={system} bs=1048576 seek={seek}{notrunc} || exit 9;"
+        " rm -f {held};"
+        " [ -f /tmp/gunzip-failed ] && echo gunzip-failed || echo slice-ok"
+    )
     SYSTEM = """\
 set -e
 m=/tmp/fireos-system
@@ -995,13 +1015,13 @@ def build_system(target: pathlib.Path) -> None:
         blocks = int(commands["erase"].split(",")[-1])
         bounds = [int(n) for n in commands["new"].split(",")[1:]]
         ranges = [*zip(bounds[::2], bounds[1::2]), (blocks, blocks)]
-        image = part / "system.img.gz"
-        with z.open("system.new.dat") as dat:  # ruff: ignore[multiple-with-statements]
-            with gzip.open(image, "wb", compresslevel=6) as out:
-                for chunk in system_chunks(dat=dat, ranges=ranges):
-                    checksum.update(chunk)
-                    out.write(chunk)
-    (part / "md5").write_text(f"{checksum.hexdigest()} {blocks}\n")
+        with z.open("system.new.dat") as dat:
+            slices = sliced(
+                checksum=checksum,
+                chunks=system_chunks(dat=dat, ranges=ranges),
+                part=part,
+            )
+    (part / "md5").write_text(f"{checksum.hexdigest()} {blocks} {slices}\n")
     for path in part.iterdir():
         with path.open("rb+") as f:
             os.fsync(f.fileno())
@@ -1904,6 +1924,14 @@ def gpt_intact(*, entries: bytes, hdr: bytes) -> bool:
     )
 
 
+def gzip_member(*, path: pathlib.Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(len(GZIP_MAGIC)) == GZIP_MAGIC
+    except OSError:
+        return False
+
+
 def hide_updater() -> None:
     def hidden() -> bool:
         out = adb_shell(command=f"su -c 'dumpsys package {UPDATER}'", timeout=60)
@@ -2479,6 +2507,25 @@ def pattern_file(*, blocks: int, path: pathlib.Path) -> str:
             out.write(chunk)
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def portions(
+    *, checksum: hashlib._Hash, chunks: Iterator[bytes]
+) -> Iterator[list[bytes]]:
+    held: list[bytes] = []
+    size = 0
+    for chunk in chunks:
+        checksum.update(chunk)
+        view = memoryview(chunk)
+        while view:
+            took = min(SYSTEM_SLICE * MEBI - size, len(view))
+            held.append(bytes(view[:took]))
+            view, size = view[took:], size + took
+            if size == SYSTEM_SLICE * MEBI:
+                yield held
+                held, size = [], 0
+    if held:
+        yield held
 
 
 def prebuild() -> None:
@@ -3274,6 +3321,50 @@ def since(start: float) -> str:
     return f"{seconds // 60}m {seconds % 60:02d}s"
 
 
+def slice_path(*, index: int, part: pathlib.Path) -> pathlib.Path:
+    return part / f"system.{index:02d}.gz"
+
+
+def sliced(
+    *, checksum: hashlib._Hash, chunks: Iterator[bytes], part: pathlib.Path
+) -> int:
+    index = 0
+    for index, portion in enumerate(portions(checksum=checksum, chunks=chunks)):
+        path = slice_path(index=index, part=part)
+        with gzip.open(path, "wb", compresslevel=6) as out:
+            for chunk in portion:
+                out.write(chunk)
+    return index + 1
+
+
+def sliced_system(*, slices: list[pathlib.Path], system: str) -> str:
+    held = DOT_TMP / "system-slice.gz"
+    for index, piece in enumerate(slices):
+        push_checked(local=piece, remote=held)
+        result = run(
+            args=[
+                "adb",
+                "shell",
+                "-n",
+                Shell.SYSTEM_SLICE.value.format(
+                    dd=SESSION.dd,
+                    held=held,
+                    notrunc=" conv=notrunc" if SESSION.dd == "toybox dd" else "",
+                    seek=index * SYSTEM_SLICE,
+                    system=system,
+                ),
+            ],
+            timeout=900,
+        )
+        if GUNZIP_FAILED in result.stdout:
+            return f"{piece.name} did not unpack on the Dot"
+        if result.returncode:
+            return result.stdout.strip() or f"it exited with {result.returncode}"
+        if SLICE_OK not in result.stdout:
+            return result.stdout.strip() or f"the Dot said nothing about {piece.name}"
+    return ""
+
+
 def stages() -> dict[State, Stage]:
     downgrades = frozenset({
         State.AMONET_V2_TWRP,
@@ -3373,6 +3464,32 @@ def status(text: str) -> None:
         warn(text)
 
 
+def stdin_carries() -> bool:
+    if SESSION.carries is None:
+        probe = CACHE / "stdin-probe.bin"
+        probe.write_bytes(b"\x1a" * 16 + os.urandom(1008))
+        remote = DOT_TMP / "stdin-probe"
+        try:
+            with probe.open("rb") as f:
+                sent = run(args=["adb", "shell", f"cat > {remote}"], stdin=f)
+            read = adb_shell(command=f"md5sum {remote}; rm -f {remote}", timeout=60)
+            cut = read.split("\n")[-1].split(" ")[0] != digest(kind="md5", path=probe)
+            SESSION.carries = not cut and not sent.returncode
+        finally:
+            probe.unlink(missing_ok=True)
+        if cut and not sent.returncode:
+            say(
+                text="This computer's adb cuts a stream at the first 0x1a byte, so"
+                " the image goes over in pieces instead."
+            )
+        elif not SESSION.carries:
+            say(
+                text="This computer's adb did not carry a 1 KiB probe either way,"
+                " so the image goes over in pieces, which needs no stream."
+            )
+    return SESSION.carries
+
+
 def stock_gpt(  # ruff: ignore[too-many-locals]
     raw: bytes,
 ) -> tuple[bytes, bytes, int, dict[str, Partition]]:
@@ -3434,6 +3551,39 @@ def stock_gpt(  # ruff: ignore[too-many-locals]
     return primary, backup, backup_lba - 32, parts
 
 
+def streamed_system(*, slices: list[pathlib.Path], system: str) -> str:
+    stream = Shell.SYSTEM_STREAM.value.format(
+        dd=SESSION.dd,
+        notrunc=" conv=notrunc" if SESSION.dd == "toybox dd" else "",
+        system=system,
+    )
+    with subprocess.Popen(
+        ["adb", "shell", stream],
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as adb:
+        try:
+            for piece in slices:
+                adb.stdin.write(piece.read_bytes())
+        except OSError:
+            pass
+        try:
+            said = (adb.communicate(timeout=SYSTEM_TIMEOUT)[0] or b"").decode(
+                errors="replace"
+            )
+        except subprocess.TimeoutExpired:
+            adb.kill()
+            return f"adb shell did not finish in {SYSTEM_TIMEOUT} seconds"
+    if GUNZIP_FAILED in said:
+        return "gunzip could not read the stream"
+    if adb.returncode:
+        return said.strip() or f"it exited with {adb.returncode}"
+    if STREAM_OK not in said:
+        return said.strip() or "the Dot said nothing about the write"
+    return ""
+
+
 def swap_twrp() -> None:
     image, label = unpack(AMONET_V1) / "bin" / "twrp.img", "TWRP 3.2.3"
     if ARGS.target == "v1-bboe":
@@ -3467,14 +3617,29 @@ def system_chunks(*, dat: IO[bytes], ranges: list[tuple[int, int]]) -> Iterator[
         at = end
 
 
-def system_image() -> tuple[pathlib.Path, str, int]:
+def system_image() -> tuple[list[pathlib.Path], str, int]:
     target = CACHE / f"system-{FIREOS.sha256[:12]}"
     with hold(SESSION.system_lock):
-        if not (target / "md5").is_file() or not (target / "system.img.gz").is_file():
+        if not system_sliced(target=target):
             shutil.rmtree(target, ignore_errors=True)
             build_system(target)
-    want, blocks = (target / "md5").read_text().split()
-    return target / "system.img.gz", want, int(blocks)
+    want, blocks, slices = (target / "md5").read_text().split()
+    return (
+        [slice_path(index=index, part=target) for index in range(int(slices))],
+        want,
+        int(blocks),
+    )
+
+
+def system_sliced(*, target: pathlib.Path) -> bool:
+    try:
+        _, _, slices = (target / "md5").read_text().split()
+    except (OSError, ValueError):
+        return False
+    return all(
+        gzip_member(path=slice_path(index=index, part=target))
+        for index in range(int(slices))
+    )
 
 
 def transfer_command(words: list[str]) -> tuple[str, list[tuple[int, int]]]:
@@ -3886,7 +4051,7 @@ def write_preloader(*, image: pathlib.Path) -> None:
 
 
 def write_system(system: str) -> None:
-    image, want, blocks = system_image()
+    slices, want, blocks = system_image()
     ready = adb_shell(
         command="umount /system_root /tmp/fireos-system 2>/dev/null;"
         f' d=$(readlink -f {system}); [ -b "$d" ]'
@@ -3894,30 +4059,27 @@ def write_system(system: str) -> None:
     )
     if ready.split("\n")[-1] != "ready":
         _die(message=f"{system} is not a block device, or it stayed mounted")
-    stream = f"gunzip -c | dd of={system} bs=1048576 2>/dev/null"
     read_back = (
         "sync; echo 3 > /proc/sys/vm/drop_caches;"
-        f" dd if={system} bs=4096 count={blocks} 2>/dev/null | md5sum"
+        f" {SESSION.dd} if={system} bs=4096 count={blocks} 2>/dev/null | md5sum"
     )
+    carry = streamed_system if stdin_carries() else sliced_system
     for attempt in range(PUSH_TRIES):
         if attempt:
             reconnect(system)
-        try:  # ruff: ignore[too-many-statements-in-try-clause]
-            with image.open("rb") as f:
-                result = run(args=["adb", "shell", stream], stdin=f, timeout=600)
-            if result.returncode != 0:
-                said = result.stdout or f"it exited with {result.returncode}"
-                continue
-            if adb_shell(command=read_back, timeout=300).split(" ")[0] == want:
-                return
-            said = "its md5 read back did not match"
+        try:
+            said = carry(slices=slices, system=system)
+            if not said:
+                if adb_shell(command=read_back, timeout=300).split(" ")[0] == want:
+                    return
+                said = "its md5 read back did not match"
         except subprocess.TimeoutExpired as error:
             said = (
                 f"{' '.join(map(str, error.cmd))} did not finish in"
                 f" {error.timeout:.0f} seconds"
             )
     if said == "its md5 read back did not match":
-        image.unlink(missing_ok=True)
+        slices[0].unlink(missing_ok=True)
         said += ". The cached image was discarded, so the next run rebuilds it"
     _die(
         message=f"{system} was not written intact after {PUSH_TRIES} tries;"

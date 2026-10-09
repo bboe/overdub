@@ -194,6 +194,50 @@ A warm restart hides all of this.
   each matches the shape it expects, and a read that decides something ends
   with a word of its own, so silence and "no" differ.
 
+## What adb will carry
+
+Binary from the host goes by `adb push`, binary from the Dot by
+`adb exec-out`, and `adb shell` carries only text whose shape is checked. A
+transfer added any other way breaks on Windows and says nothing.
+
+The one exception is the `/system` write, which puts the image on `adb
+shell`'s stdin where a probe has shown that this host's adb carries 1 KiB
+holding 0x1a unchanged, and pushes it in pieces where it has not.
+docs/rooting.md has both routes.
+
+- A Windows adb reads its own stdin in text mode, where 0x1a ends the file, so
+  `adb shell` truncates a stream there. Every other byte survives: NUL, CR, LF
+  and EOT all arrive. Fire OS 5's system image holds 1,421,626 of them and the
+  first is at offset 238, so 238 of 385,745,930 bytes reach the Dot and
+  `gunzip` writes 12.
+- Nothing reports it. A pipeline carries its last command's status, so `gunzip`
+  fails, `dd` exits 0, and the only symptom is an md5 that does not match --
+  which reads as a failing eMMC. On Fire OS 6, which has no `gunzip` at all,
+  the same stream also exited 0 having written nothing. So each such command
+  ends in a word of its own, `gunzip` touches a file when it fails, and `dd`'s
+  own status ends the pipeline. The word is what the host accepts: silence is
+  a failure, because `adb shell` exits 0 whatever happened remotely, and a
+  `dd` that cannot write the card would otherwise read the same as a stream
+  that arrived.
+- `gunzip` reports a damaged gzip but not a missing one. toybox 0.7.6 exits 1
+  on a stream cut at 0x1a (`gzclose: Illegal seek`) and on a corrupted body
+  (`gzread: incorrect data check`), so the marker appears for both. On input
+  with no gzip magic it exits 0 and behaves like `cat`: 17,000 bytes in,
+  17,000 straight out, which `dd` would then write to the partition. So each
+  slice is checked for the gzip magic on the host before the cache is used,
+  where it also catches a build that did not finish.
+- Outbound is the same class. `adb shell` on Windows expands LF to CRLF, and
+  the partition table, its backup copy and `misc`'s boot control block all come
+  off the Dot that way, where a corrupted read would be written back. They use
+  `exec-out`, and each read checks its own length.
+- `exec-in` is not the way round it. It is binary-safe, but it returns before
+  the Dot has finished -- 4.7 MB still in flight at 16 MiB, complete and
+  identical 5 s later -- and reports no status at all: `exec-in 'exit 7'`
+  answers 0. On amonet v2.0.0's TWRP a pipeline through it either fails at once
+  or hangs with nothing started on the Dot.
+- Measured on one Dot from two hosts minutes apart, same recovery: Windows 11
+  with adb 36.0.1 against macOS with adb 37.0.0.
+
 ## Tests and emulation
 
 - qemu-user's socket options depend on the build. Under `qemu-arm-static` on

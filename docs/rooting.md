@@ -664,17 +664,38 @@ ring read white.
   the Dot unlocks and downgrades.
 - The built image matched `system_a` after a `twrp install` in every MiB that
   the root's own edits and ext4's mount metadata leave alone.
-- `adb shell` streams the gzip into `gunzip | dd` on the Dot, so transfer,
-  unpacking and writes overlap. `adb push` cannot feed a pipe.
-- TWRP 3.2.3 used `adb exec-in`: 65 s on macOS, 76 s on Windows 11. It
-  returned up to 10 s before `dd` ended.
-- This TWRP's `exec-in` drops unread input: 1 MiB arrived as 890,197 bytes.
-  Its `adb shell` carried 100 MB intact from macOS. This TWRP's `adb shell`
-  returns when `dd` ends, with `dd`'s status. Windows is untried.
+- It is built as 128 MiB slices, each its own gzip member, because a
+  concatenation of members is one stream to any decompressor. So one cache
+  serves both routes.
+- Where `adb shell` carries a stream, the slices go out back to back on its
+  stdin, `gunzip -c` reads them and `dd` writes the partition, which overlaps
+  the transfer with the write and needs no room on the Dot. Where it does not,
+  each slice is pushed to `/tmp` and unpacked at its own offset: 35 MB at a
+  time against a 240 MiB tmpfs, so nothing is staged on the eMMC.
+- The route is chosen by sending 1 KiB holding 0x1a and hashing it on the Dot,
+  not by naming an operating system. A probe that does not complete takes the
+  pieces, which need no stream.
+- A Windows adb cannot carry it. Measured on bryce in amonet v2.0.0's TWRP,
+  from Windows 11 with adb 36.0.1: `gunzip` read 12 bytes and stopped with
+  `gzclose: Illegal seek`, having written 12 bytes, while macOS carried 64 MiB
+  through the same recovery minutes apart. `adb push` of the same bytes is
+  intact from both, at 21.5 MB/s, so the sync protocol is the one that crosses
+  hosts. docs/pitfalls.md has the byte and the counts.
+- Nothing reported it. The pipeline returned `dd`'s status, not `gunzip`'s, so
+  a failed `gunzip` read as success and only the md5 said anything was wrong.
+  On Fire OS 6, which has no `gunzip` at all, the stream exited 0 having
+  written nothing. So `gunzip` touches a file when it fails, `dd`'s own status
+  ends the pipeline, and the command's last word says `stream-ok`, `slice-ok`
+  or `gunzip-failed`. A write is accepted on that word, not on silence.
+- TWRP 3.2.3 used `adb exec-in`: 65 s on macOS, 76 s on Windows 11. It is
+  binary-safe but returns before the Dot has finished, with no status of its
+  own, so a read taken when it returns can differ from what lands.
 - On a Dot the gzip reaches `cat > /dev/null` in 17.5 s. Through `gunzip`,
   with the output discarded, it takes 36.4 to 39.3 s. So `gunzip` on the Dot
   is the limit. The whole stage, with the eMMC and the md5 read-back, took
-  80 s. With TWRP 3.2.3 it took about 77 s.
+  80 s while it streamed, and about 77 s with TWRP 3.2.3. Slicing costs
+  23.4 s against 15.9 s for 256 MiB; the sliced route has not been timed
+  across a whole install.
 - The partition is then read back by md5: 12 s with 3.2.3.
 
 ## The boot image
