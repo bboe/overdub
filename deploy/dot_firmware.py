@@ -63,6 +63,7 @@ BOOT0_EMPTY = (
     " and this script takes it from there by itself when it runs again on this"
     " computer"
 )
+BOOT_LINE = 'dmesg | grep "MMC card at address" | head -1'
 BOOT_ROOT_SHA256 = "de49cc88b27a8e77cf97cf0156bee50e4ddc0e116c41aaede06b494e38397be0"
 BOOT_ROOT_URL = (
     "https://xdaforums.com/attachments/boot-root-zip.6388001/"
@@ -102,6 +103,8 @@ GZIP_MAGIC = b"\x1f\x8b"
 HANDSHAKE_WAIT = 10
 HEAD_CHECK = 1 << 20
 IMAGES = ("preloader", "lk", "tee", "boot", "system")
+LEFT_IN_RECOVERY = "The Dot stays in its recovery: adb reboot starts it again."
+LISTING_OK = "listing-ok"
 LK_DESC = re.compile(r"[0-9a-f]{7}-\d{8}_\d{6}")
 MD5_DIGITS = 32
 MEBI = 1048576
@@ -139,6 +142,7 @@ adb kill-server
 Then run it again with the new group, which a new login also has:
 
 """  # ruff: ignore[line-too-long]
+PARTITIONS_OK = "partitions-ok"
 PARTITION_FIELDS = 4
 PAYLOAD_VERSION = 2
 PRELOADER_PID = 0x2000
@@ -157,6 +161,10 @@ SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 STOCK_PARTITIONS = 16
 STOCK_STEPS = 16
 STREAM_OK = "stream-ok"
+SUPPORT = (
+    "Please stop by #support-device-unlocking in the EchoMuse Discord,"
+    " https://discord.gg/vq3pub8Kp, and paste everything below."
+)
 SYSTEM_FIELDS = 2
 SYSTEM_SLICE = 128
 SYSTEM_TIMEOUT = 1800
@@ -739,9 +747,10 @@ def amonet_chain() -> None:
 def asked_for() -> str:
     return (
         "If it fails the same way, run dot_firmware.py --report and paste what"
-        " it prints into an issue: it says what this Dot's eMMC and partitions"
-        " are. dot_firmware.py --write-test then tells a failing card from a"
-        " failing cable."
+        " it prints in #support-device-unlocking in the EchoMuse Discord,"
+        " https://discord.gg/vq3pub8Kp: it says what this Dot's eMMC and"
+        " partitions are. dot_firmware.py --write-test then tells a failing card"
+        " from a failing cable."
     )
 
 
@@ -1517,7 +1526,7 @@ def dot_details(*, asked: Callable[..., str]) -> list[str]:
                 value=asked(f"cat {where} 2>/dev/null || echo '<absent>'"),
             )
         )
-    window = asked("dmesg | head -1 | tr -d '[]' | tr -s ' ' | cut -d' ' -f2")
+    window = asked("dmesg | head -1 | sed -e 's/^\\[ *//' -e 's/\\].*//'")
     held = asked("cut -d' ' -f1 /proc/uptime")
     said.append(labelled(label="uptime", value=f"{held} s, dmesg from {window} s"))
     return said
@@ -2109,13 +2118,10 @@ def install_magisk(*, magisk: pathlib.Path, work: pathlib.Path) -> None:
         _die(message="Magisk 17.3's files did not verify on the Dot")
 
 
-def into_recovery(*, line: Callable[[str, object], None]) -> bool:
+def into_recovery(*, line: Callable[[str, object], None]) -> bool:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches]
     asked = False
     deadline = time.monotonic() + WAIT
     while time.monotonic() < deadline:
-        if state() in TWRPS:
-            PROGRESS.end()
-            return True
         if in_fastboot():
             unlocked = getvar("unlock_status")
             for name, value in (
@@ -2141,33 +2147,61 @@ def into_recovery(*, line: Callable[[str, object], None]) -> bool:
                 return False
             PROGRESS.begin(estimate="40 s", label="restarting the Dot in its recovery")
             run(args=["fastboot", "oem", "reboot-recovery"], timeout=60)
-        elif run(args=["adb", "get-state"], timeout=30).stdout.strip() == "device":
-            PROGRESS.begin(estimate="40 s", label="restarting the Dot in its recovery")
-            run(args=["adb", "reboot", "recovery"], timeout=60)
         else:
-            if not asked:
-                asked = True
-                say(
-                    text="The rest of this report comes from the Dot's recovery."
-                    " Start the Dot in fastboot mode and this goes on by itself. "
-                    + FASTBOOT_MODE
-                    + " A Dot already unlocked with amonet v2.0.0 has no fastboot:"
-                    " hold the + button instead while you plug it back in, which"
-                    " starts its TWRP. A Dot that shows nothing on USB is in its"
-                    " bootrom, and only a root run brings it back. Ctrl-C stops"
-                    " this."
+            adb_state = ""
+            if usb_serial():
+                adb_state = run(args=["adb", "get-state"], timeout=30).stdout
+            adb_state = adb_state.strip()
+            if adb_state == "recovery":
+                if not adb_shell(command="getprop ro.twrp.version", timeout=30)[
+                    :1
+                ].isdigit():
+                    say(
+                        text="This Dot is in a recovery that is not TWRP, so it"
+                        " holds nothing to collect from. It is left as it is."
+                    )
+                    return False
+                if "mtp" in adb_shell(command="getprop sys.usb.config", timeout=30):
+                    PROGRESS.end()
+                    return True
+                status(text="Waiting for TWRP to finish starting.")
+                time.sleep(2)
+                continue
+            if adb_state == "device":
+                if "uid=0" not in adb_shell(command="id; su -c id", timeout=30):
+                    say(
+                        text="This Dot runs Fire OS without root, so its recovery"
+                        " is Amazon's, which holds nothing to collect from. Root it"
+                        " first: run this script again without --report, and follow"
+                        " what it asks."
+                    )
+                    return False
+                PROGRESS.begin(
+                    estimate="40 s", label="restarting the Dot in its recovery"
                 )
-            status(text="Waiting for the Dot in fastboot mode, with a green ring.")
-            time.sleep(2)
-            continue
+                run(args=["adb", "reboot", "recovery"], timeout=60)
+            else:
+                if not asked:
+                    asked = True
+                    say(
+                        text="The rest of this report comes from the Dot's recovery."
+                        " Start the Dot in fastboot mode and this goes on by itself. "
+                        + FASTBOOT_MODE
+                        + " A Dot already unlocked with amonet v2.0.0 has no"
+                        " fastboot: hold the + button instead while you plug it back"
+                        " in, which starts its TWRP. A Dot that shows nothing on USB"
+                        " is in its bootrom, and only a root run brings it back."
+                        " Ctrl-C stops this."
+                    )
+                status(text="Waiting for the Dot in fastboot mode, with a green ring.")
+                time.sleep(2)
+                continue
         try:
             run(args=["adb", "wait-for-recovery"], timeout=180)
         except subprocess.TimeoutExpired:
             PROGRESS.halt()
             return False
         time.sleep(5)
-        PROGRESS.end()
-        return state() in TWRPS
     PROGRESS.halt()
     return False
 
@@ -2252,7 +2286,7 @@ def main() -> None:
         "--report",
         action="store_true",
         help="print what the Dot and this computer are, and the Dot's partition"
-        " table, for an issue report; it starts the Dot's recovery to read them"
+        " table, for a support request; it starts the Dot's recovery to read them"
         " and writes no partition",
     )
     parser.add_argument(
@@ -2334,8 +2368,11 @@ def md5_mismatch(*, command: str, want: str) -> str:
 
 def mmc_said(*, asked: Callable[..., str]) -> list[str]:
     logged = asked(MMC_LOG)
+    first = asked(BOOT_LINE).strip()
     if MMC_LOG_REACHES_BOOT in logged:
         return [logged]
+    if MMC_LOG_REACHES_BOOT in first:
+        return [first, "...", logged]
     if not any(word in logged.lower() for word in ("mmc", "msdc")):
         unread = "\nThat is not the kernel's log, so it says nothing either way."
         return [logged, unread]
@@ -2441,11 +2478,13 @@ def partition_row(*, row: str) -> int:
     return int(field[0]) if len(field) >= TABLE_FIELDS else 0
 
 
-def partition_rows(*, names: dict[str, str], printed: str) -> list[str]:
+def partition_rows(*, names: dict[str, str] | None, printed: str) -> list[str]:
     said = [row.rstrip() for row in printed.split("\n")]
     if said[-1:] != [TABLE_OK] or not any(partition_row(row=row) for row in said):
         return [*said, "", "That is not a whole table, so no name was matched to it."]
     said = said[:-1]
+    if names is None:
+        return [*said, "", "The Dot's names did not arrive whole, so none was matched."]
     held: dict[str, list[str]] = {}
     for name, target in sorted(names.items()):
         key = node_held(target=target) if node_order(node=target) else target
@@ -2633,6 +2672,13 @@ def probe() -> State:  # ruff: ignore[complex-structure, too-many-return-stateme
     return State.EMOS if emos("find") == "1" else State.NONE
 
 
+def probed() -> str:
+    try:
+        return state().value
+    except SystemExit as stop:
+        return "<unreadable: " + masked(text=str(stop)).strip().split("\n")[0] + ">"
+
+
 def push_checked(*, local: pathlib.Path, remote: str | pathlib.PurePosixPath) -> None:
     for attempt in range(PUSH_TRIES):
         if attempt:
@@ -2762,17 +2808,17 @@ def report() -> None:
             return "<timed out>"
         return masked(text=said) or "<nothing>"
 
-    show(text="Paste everything below into the issue.\n")
+    show(text=SUPPORT + "\n")
     line("script", pathlib.Path(__file__).name)
     line("host", f"{sys.platform} ({os.name}), {platform.platform()}")
     line("python", sys.version.split()[0])
     said = run(args=["adb", "version"], timeout=30).stdout.split("\n")
     line("adb", ", ".join(part.strip() for part in said[:2] if part.strip()))
-    line("state", state().value)
+    line("state", probed())
     if not into_recovery(line=line):
         show(text="\nThe report stops with what is above.")
         return
-    line("state in recovery", state().value)
+    line("state in recovery", probed())
     for text in dot_details(asked=asked):
         show(text=text)
     held = CACHE / f"system-{FIREOS.sha256[:12]}" / "md5"
@@ -2783,12 +2829,15 @@ def report() -> None:
         line("system image", f"{needs} bytes, md5 {recorded[0]}")
     else:
         line("system image", "not built yet, so its size is unknown")
-    sizes = node_sizes(partitions=asked("cat /proc/partitions"))
-    names = node_names(listing=asked(f"ls -l {BY_NAME}/"))
-    holds = sizes.get(node_held(target=names.get("system_a", "")), 0)
-    line("system_a", f"{names.get('system_a') or '<unknown>'}, {holds} bytes")
-    if holds and needs:
-        line("system_a spare", f"{holds - needs} bytes")
+    partitions = whole(
+        marker=PARTITIONS_OK, said=asked(f"cat /proc/partitions; echo {PARTITIONS_OK}")
+    )
+    listing = whole(
+        marker=LISTING_OK, said=asked(f"ls -l {BY_NAME}/; echo {LISTING_OK}")
+    )
+    names = None if listing is None else node_names(listing=listing)
+    for label, value in system_a_rows(names=names, needs=needs, partitions=partitions):
+        line(label, value)
     show(text="\npartition table, with each name's node and any other name for it")
     printed = asked(f"sgdisk --print {DISK}; echo {TABLE_OK}", timeout=120)
     for row in partition_rows(names=names, printed=printed):
@@ -2796,6 +2845,7 @@ def report() -> None:
     show(text="\nwhat the kernel says about the eMMC")
     for text in mmc_said(asked=asked):
         show(text=text)
+    show(text="\n" + LEFT_IN_RECOVERY)
 
 
 def rerun() -> str:
@@ -3627,6 +3677,20 @@ def swap_twrp() -> None:
         )
 
 
+def system_a_rows(
+    *, names: dict[str, str] | None, needs: int, partitions: str | None
+) -> list[tuple[str, str]]:
+    if names is None or partitions is None:
+        return [("system_a", "unknown: the Dot's partition lists did not arrive whole")]
+    holds = node_sizes(partitions=partitions).get(
+        node_held(target=names.get("system_a", "")), 0
+    )
+    rows = [("system_a", f"{names.get('system_a') or '<unknown>'}, {holds} bytes")]
+    if holds and needs:
+        rows.append(("system_a spare", f"{holds - needs} bytes"))
+    return rows
+
+
 def system_chunks(*, dat: IO[bytes], ranges: list[tuple[int, int]]) -> Iterator[bytes]:
     at = 0
     for start, end in ranges:
@@ -3736,7 +3800,7 @@ def unreal_rows(*, held: dict[str, list[str]]) -> list[str]:
         return []
     pairs = sorted((", ".join(called), target) for target, called in held.items())
     width = max(len(called) for called, _ in pairs)
-    return ["", "names that point at no partition"] + [
+    return ["", "names that point outside the partition table"] + [
         f"{called:<{width}}  {target}" for called, target in pairs
     ]
 
@@ -3983,6 +4047,11 @@ def warn(text: str) -> None:
 PROGRESS = Progress()
 
 
+def whole(*, marker: str, said: str) -> str | None:
+    rows = said.rstrip().split("\n")
+    return "\n".join(rows[:-1]) if rows[-1].strip() == marker else None
+
+
 def write(
     *,
     estimate: str,
@@ -4144,8 +4213,8 @@ def write_test() -> None:
         except subprocess.TimeoutExpired:
             return "<timed out>"
 
-    show(text="Paste everything below into the issue.\n")
-    line("state", state().value)
+    show(text=SUPPORT + "\n")
+    line("state", probed())
     if not into_recovery(line=line):
         show(text="\nThe test needs a recovery, so it stops here.")
         return
