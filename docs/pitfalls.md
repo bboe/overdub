@@ -48,6 +48,33 @@ covering whatever you are about to touch.
   and a single string survives that unchanged. The two scripts ran this way on
   macOS, Linux and Windows.
 
+## The cache partition
+
+- A Dot whose `cache` holds no filesystem roots fine and then cannot boot.
+  `fs_mgr_mount_all` fails in init's `on fs`, so `post-fs-data` and
+  `class_start main` never run: `zygote`, `netd` and `installd` have no
+  `init.svc.*` property at all, while every `class core` service is up. So the
+  Dot answers adb as root, `su` works, `/system` is mounted and read correctly
+  -- and `sys.boot_completed` never arrives. It reads like a bad `/system` or a
+  slow first boot. The reason is in dmesg, not logcat: `e2fsck: Bad magic
+  number in super-block`, then `fs_mgr: Failed to mount an un-encryptable or
+  wiped partition`, then `fs_mgr_mount_all returned unexpected error 255`.
+- `v2` wipes cache and `stock` formats it. `v1` and `v1-bboe` format userdata
+  only, so a cache damaged before a run survives it.
+- `--write-test` formats cache **first**, and small enough that its own blocks
+  end well before the pattern starts, so the writes stay raw and nothing is
+  mounted while they land. The layout is pinned rather than inherited, because
+  the boundary has to be an input: `-J size=4 -N 8192` with
+  `-O ^sparse_super,^resize_inode -E packed_meta_blocks=1` puts every metadata
+  block inside the first 6.11 MiB of a 784 MiB cache, measured, against a
+  16 MiB margin.
+- `e2fsck` will not catch it if that boundary is wrong. With the default
+  layout the journal is one extent at 12.33-28.33 MiB, and after overwriting
+  from 16 MiB `e2fsck -fn` passed all five passes on a filesystem missing
+  12.3 MiB of its 16 MiB journal: the journal's superblock survived, and its
+  body is not checked on a clean filesystem. A mount, a write, an unmount and
+  a second `e2fsck` are what prove a journal works.
+
 ## Paths and uids
 
 - `/system/bin/pm` has no shebang, so `execve` answers ENOEXEC. A shell runs it

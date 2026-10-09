@@ -79,6 +79,10 @@ CMDLINE_SIZE = 512
 DISK = "/dev/block/mmcblk0"
 DOT_TMP = pathlib.PurePosixPath("/tmp")  # ruff: ignore[hardcoded-temp-file]
 EMMC_FIELDS = ("name", "manfid", "oemid", "prv", "life_time", "pre_eol_info")
+EMMC_PATTERN = bytes(range(256)) + b"firebreak"
+EMMC_SPARE = 16
+EMMC_TARGET = "cache"
+EMMC_TIMEOUT = 1800
 EMOS_USB_ID = (0x1949, 0x2007)
 FASTBOOT_MODE = (
     "Unplug the USB cable, press and hold the action button (the one with a dot),"
@@ -92,6 +96,7 @@ HEAD_CHECK = 1 << 20
 IMAGES = ("preloader", "lk", "tee", "boot", "system")
 LK_DESC = re.compile(r"[0-9a-f]{7}-\d{8}_\d{6}")
 MD5_DIGITS = 32
+MEBI = 1048576
 MEDIATEK_VID = 0x0E8D
 MEGA = 1e6
 MINUTE = 60
@@ -155,6 +160,10 @@ UPDATE_HOSTS = (
     "amzndigitaldownloads.edgesuite.net",
     "amzdigital-a.akamaihd.com",
 )
+USB_TEST_BLOCKS = 128
+USB_TEST_COLUMN = 3
+USB_TEST_LEAST = 16
+USB_TEST_SPARE = 32
 USER_SERIAL = os.environ.get("ANDROID_SERIAL")
 V1_ALIGN = 0x400
 V1_APPEND = 0x6E000
@@ -430,6 +439,7 @@ class Progress:
 
 @dataclasses.dataclass
 class Session:
+    carried: int = 0
     dd: str = "dd"
     probing: bool = False
     short: bool = False
@@ -442,6 +452,25 @@ SESSION = Session()
 
 
 class Shell(enum.Enum):
+    EMMC = (
+        "umount /cache 2>/dev/null;"
+        " if mountpoint -q /cache; then echo cache is still mounted; exit 8; fi;"
+        " if [ ! -b {node} ]; then echo {node} is not a block device; exit 7; fi;"
+        " mke2fs -q -t ext4 -b 4096 -O ^sparse_super,^resize_inode"
+        " -E packed_meta_blocks=1 -J size=4 -N 8192 {node} || exit 6;"
+        " i=0;"
+        " while [ $i -lt {rounds} ]; do"
+        " {dd} if={source} of={node} bs=1048576"
+        " seek=$(( {spare} + i * {chunk} )){notrunc}"
+        " || exit 9; i=$(( i + 1 )); done;"
+        " sync; echo 3 > /proc/sys/vm/drop_caches;"
+        " echo card:$({dd} if={node} bs=1048576 skip={spare} count={blocks}"
+        " 2>/dev/null | md5sum)"
+    )
+    EMMC_FORMAT = (
+        "mke2fs -q -t ext4 -b 4096 {node}"
+        " $(( $(blockdev --getsize64 {node}) / 4096 - 256 )) && echo formatted"
+    )
     CLEAR_BOOT0 = (
         "d=dd; toybox dd --help >/dev/null 2>&1 && d='toybox dd'; "
         "echo 0 > /sys/block/mmcblk0boot0/force_ro; "
@@ -682,7 +711,8 @@ def asked_for() -> str:
     return (
         "If it fails the same way, run dot_firmware.py --report and paste what"
         " it prints into an issue: it says what this Dot's eMMC and partitions"
-        " are."
+        " are. dot_firmware.py --write-test then tells a failing card from a"
+        " failing cable."
     )
 
 
@@ -1527,6 +1557,83 @@ def download(build: str) -> pathlib.Path:
     return ota
 
 
+def emmc_leg(
+    *,
+    asked: Callable[..., str],
+    blocks: int,
+    line: Callable[[str, object], None],
+    node: str,
+) -> None:
+    chunk = SESSION.carried
+    if not blocks:
+        line("over the eMMC", f"skipped: this Dot has no {EMMC_TARGET} partition")
+        return
+    if not chunk:
+        line("over the eMMC", "skipped: nothing verified in RAM to write from")
+        return
+    rounds = max(blocks - EMMC_SPARE, 0) // chunk
+    if not rounds:
+        line(
+            "over the eMMC",
+            f"skipped: {EMMC_TARGET} holds under {chunk + EMMC_SPARE} MiB",
+        )
+        return
+    written = rounds * chunk
+    line(
+        "writing over",
+        f"{EMMC_TARGET}, {node}, {written} MiB behind a fresh filesystem"
+        f" whose own blocks end by {EMMC_SPARE} MiB",
+    )
+    started = time.monotonic()
+    PROGRESS.begin(
+        estimate=f"{written // 3} s", label=f"writing and reading {EMMC_TARGET}"
+    )
+    said = asked(
+        Shell.EMMC.value.format(
+            blocks=written,
+            chunk=chunk,
+            dd=SESSION.dd,
+            node=node,
+            notrunc=" conv=notrunc" if SESSION.dd == "toybox dd" else "",
+            rounds=rounds,
+            source=DOT_TMP / "usb-test",
+            spare=EMMC_SPARE,
+        ),
+        timeout=EMMC_TIMEOUT,
+    )
+    PROGRESS.end()
+    took = time.monotonic() - started
+    answer = said.split("\n")[-1]
+    read = answer.partition("card:")[2].split(" ")[0] if "card:" in answer else ""
+    want = repeat_md5(blocks=chunk, times=rounds)
+    asked(f"rm -f {DOT_TMP / 'usb-test'}")
+    line("md5 read back", read or "<nothing>")
+    line("md5 of what was written", want)
+    line(
+        "moved",
+        f"{2 * written} MiB written and read in {took:.0f} s,"
+        f" {2 * written / max(took, 1):.0f} MiB a second",
+    )
+    if not read:
+        line("the test did not run", masked(text=said) or "<nothing>")
+    else:
+        line(
+            "verdict",
+            f"the eMMC took {written} MiB and gave it back unchanged, with nothing"
+            " crossing USB, so a failed install is the cable or the host"
+            if read == want
+            else "THE eMMC DID NOT GIVE BACK WHAT IT TOOK. Nothing crossed USB,"
+            " so the card or its driver is at fault, not the cable",
+        )
+    formatted = asked(Shell.EMMC_FORMAT.value.format(node=node))
+    line(
+        "fresh filesystem",
+        "yes"
+        if formatted.split("\n")[-1] == "formatted"
+        else f"NO, so {EMMC_TARGET} holds no filesystem: {formatted}",
+    )
+
+
 def emos(action: str) -> str:
     if action != "find" and ARGS.verbose:
         show(text=f"{clock()} $ {shlex.join(child('emos', action))}")
@@ -2105,6 +2212,13 @@ def main() -> None:
         " and writes no partition",
     )
     parser.add_argument(
+        "--write-test",
+        action="store_true",
+        help=f"write a known pattern over the Dot's {EMMC_TARGET} partition and"
+        " read it back, which tells a failing eMMC from a failing USB cable"
+        " because nothing crosses USB; it leaves a fresh empty filesystem there",
+    )
+    parser.add_argument(
         "--short",
         action="store_true",
         help="for a Dot that shows no light and needs its test point shorted:"
@@ -2148,6 +2262,9 @@ def main() -> None:
     SESSION.short = options.short
     if options.report:
         report()
+        return
+    if options.write_test:
+        write_test()
         return
     root()
 
@@ -2332,6 +2449,24 @@ def partitions() -> dict[str, tuple[int, int, int]]:
 
 def passed(message: str) -> None:
     show(text=f"{mark()} {message}")
+
+
+def pattern_chunks(*, blocks: int) -> Iterator[bytes]:
+    buffer = EMMC_PATTERN * (MEBI // len(EMMC_PATTERN) + 1)
+    left = blocks * MEBI
+    while left:
+        chunk = buffer[: min(len(buffer), left)]
+        yield chunk
+        left -= len(chunk)
+
+
+def pattern_file(*, blocks: int, path: pathlib.Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("wb") as out:
+        for chunk in pattern_chunks(blocks=blocks):
+            out.write(chunk)
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def prebuild() -> None:
@@ -2519,6 +2654,14 @@ def remaining(*, start: State, table: dict[State, Stage]) -> int | None:
         total += stage.steps
         start = stage.then
     return None
+
+
+def repeat_md5(*, blocks: int, times: int) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    for _ in range(times):
+        for chunk in pattern_chunks(blocks=blocks):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def replace_twrp() -> None:
@@ -3401,6 +3544,47 @@ def unreal_rows(*, held: dict[str, list[str]]) -> list[str]:
     ]
 
 
+def usb_leg(*, asked: Callable[..., str], line: Callable[[str, object], None]) -> None:
+    fields = asked(f"df -k {DOT_TMP}").split("\n")[-1].split()
+    available = fields[3] if len(fields) > USB_TEST_COLUMN else ""
+    spare = int(available) // 1024 if available.isdigit() else 0
+    blocks = min(USB_TEST_BLOCKS, spare - USB_TEST_SPARE)
+    if blocks < USB_TEST_LEAST:
+        line("over USB", f"skipped: {DOT_TMP} has only {spare} MiB free")
+        return
+    remote = DOT_TMP / "usb-test"
+    local = CACHE / "usb-test.bin"
+    want = pattern_file(blocks=blocks, path=local)
+    started = time.monotonic()
+    try:
+        pushed = run(args=["adb", "push", local, remote], timeout=EMMC_TIMEOUT)
+        failed = pushed.stdout if pushed.returncode else ""
+    except subprocess.TimeoutExpired:
+        failed = f"it did not finish in {EMMC_TIMEOUT} seconds"
+    took = time.monotonic() - started
+    read = (
+        ""
+        if failed
+        else asked(f"md5sum {remote}", timeout=300).split("\n")[-1].split(" ")[0]
+    )
+    local.unlink(missing_ok=True)
+    carried = read == want and not failed
+    SESSION.carried = blocks if carried else 0
+    line("over USB", f"{blocks} MiB pushed into {DOT_TMP}, which is RAM")
+    line("md5 read back", read or "<nothing>")
+    line("md5 pushed", want)
+    line("rate", f"{blocks / max(took, 1):.0f} MiB a second, over {took:.0f} s")
+    if failed:
+        line("adb push said", masked(text=failed).split("\n")[-1])
+    line(
+        "verdict",
+        "USB carried it intact, so a failed install is the eMMC, not the cable"
+        if carried
+        else "USB DID NOT CARRY IT. No eMMC was written, so the cable, the port"
+        " or the host is at fault",
+    )
+
+
 def usb_serial() -> str | None:
     if USER_SERIAL:
         if ":" in USER_SERIAL:
@@ -3731,6 +3915,34 @@ def write_system(system: str) -> None:
         message=f"{system} was not written intact after {PUSH_TRIES} tries;"
         f" the last: {said}. " + asked_for()
     )
+
+
+def write_test() -> None:
+    def line(label: str, value: object) -> None:
+        show(text=labelled(label=label, value=value))
+
+    def asked(command: str, timeout: float = 60) -> str:
+        try:
+            return masked(text=adb_shell(command=command, timeout=timeout))
+        except subprocess.TimeoutExpired:
+            return "<timed out>"
+
+    show(text="Paste everything below into the issue.\n")
+    line("state", state().value)
+    if not into_recovery(line=line):
+        show(text="\nThe test needs a recovery, so it stops here.")
+        return
+    if asked("toybox dd --help >/dev/null 2>&1 && echo yes").split("\n")[-1] == "yes":
+        SESSION.dd = "toybox dd"
+    line("dd on the Dot", SESSION.dd)
+    node = node_names(listing=asked(f"ls -l {BY_NAME}/")).get(EMMC_TARGET, "")
+    sizes = node_sizes(partitions=asked("cat /proc/partitions"))
+    blocks = sizes.get(node_held(target=node), 0) // MEBI
+    usb_leg(asked=asked, line=line)
+    emmc_leg(asked=asked, blocks=blocks, line=line, node=node)
+    show(text="\nwhat the kernel says about the eMMC")
+    for text in mmc_said(asked=asked):
+        show(text=text)
 
 
 if __name__ == "__main__":
