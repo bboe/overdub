@@ -59,30 +59,12 @@ covering whatever you are about to touch.
   slow first boot. The reason is in dmesg, not logcat: `e2fsck: Bad magic
   number in super-block`, then `fs_mgr: Failed to mount an un-encryptable or
   wiped partition`, then `fs_mgr_mount_all returned unexpected error 255`.
-- `v2` wipes cache and `stock` formats it. `v1` and `v1-bboe` format userdata
+- In firebreak, `amonet-biscuit-v2.0.0` wipes cache and `stock` formats it.
+  `amonet-biscuit-v1.1.0` and `amonet-biscuit-v1.1.0-bboe` format userdata
   only, so a cache damaged before a run survives it.
-- `--write-test` formats cache **first**, and small enough that its own blocks
-  end well before the pattern starts, so the writes stay raw and nothing is
-  mounted while they land. The layout is pinned rather than inherited, because
-  the boundary has to be an input: `-J size=4 -N 8192` with
-  `-O ^sparse_super,^resize_inode -E packed_meta_blocks=1` puts the primary
-  superblock, the group descriptors, the bitmaps, the inode tables and the
-  journal inside the first 6.11 MiB of a 784 MiB cache, measured, against a
-  16 MiB margin.
-- `^sparse_super` also puts a backup superblock in every block group, at 128,
-  256 and up to 768 MiB (mke2fs 1.47), and the pattern overwrites those. The
-  filesystem still mounts on its primary. The last format writes all of it
-  again: a filesystem over all of `cache` but its last 1 MiB.
-- A write that does not answer in 30 minutes leaves `cache` as it is. `dd` may
-  still be writing on the Dot, and a format under it could leave a filesystem
-  that reads as fresh and is not. The one already there ends before the
-  pattern starts, so the Dot still boots, and a rerun formats it first.
-- `e2fsck` will not catch it if that boundary is wrong. With the default
-  layout the journal is one extent at 12.33-28.33 MiB, and after overwriting
-  from 16 MiB `e2fsck -fn` passed all five passes on a filesystem missing
-  12.3 MiB of its 16 MiB journal: the journal's superblock survived, and its
-  body is not checked on a clean filesystem. A mount, a write, an unmount and
-  a second `e2fsck` are what prove a journal works.
+- firebreak's
+  [docs/rooting.md](https://github.com/bboe/firebreak/blob/main/docs/rooting.md)
+  has what each run writes, `--write-test` included.
 
 ## Paths and uids
 
@@ -209,47 +191,17 @@ Binary from the host goes by `adb push`, binary from the Dot by
 `adb exec-out`, and `adb shell` carries only text whose shape is checked. A
 transfer added any other way breaks on Windows and says nothing.
 
-The one exception is the `/system` write, which puts the image on `adb
-shell`'s stdin where a probe has shown that this host's adb carries 1 KiB
-holding 0x1a unchanged, and pushes it in pieces where it has not.
-docs/rooting.md has both routes.
-
 - A Windows adb reads its own stdin in text mode, where 0x1a ends the file, so
-  `adb shell` truncates a stream there. Every other byte survives: NUL, CR, LF
-  and EOT all arrive. Fire OS 5's system image holds 1,421,626 of them and the
-  first is at offset 238, so 238 of 385,745,930 bytes reach the Dot and
-  `gunzip` writes 12.
-- Nothing reports it. A pipeline carries its last command's status, so `gunzip`
-  fails, `dd` exits 0, and the only symptom is an md5 that does not match --
-  which reads as a failing eMMC. On Fire OS 6, which has no `gunzip` at all,
-  the same stream also exited 0 having written nothing. So each such command
-  ends in a word of its own, `gunzip` touches a file when it fails, and `dd`'s
-  own status ends the pipeline. The word is what the host accepts: silence is
-  a failure, because `adb shell` exits 0 whatever happened remotely, and a
-  `dd` that cannot write the card would otherwise read the same as a stream
-  that arrived.
-- `gunzip` reports a damaged gzip but not a missing one. toybox 0.7.6 exits 1
-  on a stream cut at 0x1a (`gzclose: Illegal seek`) and on a corrupted body
-  (`gzread: incorrect data check`), so the marker appears for both. On input
-  with no gzip magic it exits 0 and behaves like `cat`: 17,000 bytes in,
-  17,000 straight out, which `dd` would then write to the partition. So each
-  slice is checked for the gzip magic on the host before the cache is used.
-  A build that did not finish never reaches the cache: it is renamed into
-  place only after its `md5` file is written.
-- A slice that arrived intact, by its md5 on the Dot, and still did not unpack
-  can only be bad on the host. The sliced route deletes it and stops, so the
-  next run rebuilds the image rather than failing the same way.
-- Outbound is the same class. `adb shell` on Windows expands LF to CRLF, and
-  the partition table, its backup copy and `misc`'s boot control block all come
-  off the Dot that way, where a corrupted read would be written back. They use
-  `exec-out`, and each read checks its own length.
-- `exec-in` is not the way round it. It is binary-safe, but it returns before
-  the Dot has finished -- 4.7 MB still in flight at 16 MiB, complete and
-  identical 5 s later -- and reports no status at all: `exec-in 'exit 7'`
-  answers 0. On amonet v2.0.0's TWRP a pipeline through it either fails at once
-  or hangs with nothing started on the Dot.
-- Measured on one Dot from two hosts minutes apart, same recovery: Windows 11
-  with adb 36.0.1 against macOS with adb 37.0.0.
+  `adb shell` truncates a stream there. Every other byte survives.
+- Outbound, `adb shell` on Windows expands LF to CRLF.
+- `exec-in` is binary-safe, but it returns before the Dot has finished and
+  reports no status at all: `exec-in 'exit 7'` answers 0.
+- `install.py` pushes the binary, the boot script, the keys and the MapDump
+  jar. It reads back only text: md5s, modes, keys and a word of its own.
+- firebreak's
+  [docs/rooting.md](https://github.com/bboe/firebreak/blob/main/docs/rooting.md#what-adb-shell-carries)
+  has the measurements, and the one write that puts a stream on `adb shell`'s
+  stdin.
 
 ## Tests and emulation
 

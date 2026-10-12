@@ -15,6 +15,14 @@
   `init` would need an `.rc` entry in a ramdisk this Magisk cannot patch, so
   `service.d` is the hook and a shell loop is the restart. It supplies the name;
   the daemon does everything else.
+- Both of firebreak's v1 targets, `amonet-biscuit-v1.1.0-bboe` (the default)
+  and `amonet-biscuit-v1.1.0`, install Magisk 17.3, which keeps `service.d` at
+  `/sbin/.core/img/.core/service.d`. From v18 the boot patch and that path
+  change. overdub needs only `su` and `service.d`, so 17.3 is enough.
+- An update would replace the boot image and remove root. The boot script stays
+  in `magisk.img` under `/data`, but nothing runs it: Magisk's init went with
+  the boot image. firebreak hides `com.amazon.device.software.ota` and points
+  the Amazon update hosts at `127.0.0.1`, so a rooted Dot can go on Wi-Fi.
 - The daemon waits up to 60 seconds for its input node, because `service.d` can
   run before the input drivers are up.
 - The loop truncates the log every 20 restarts. Otherwise a daemon that exits at
@@ -181,9 +189,9 @@
   the default, because none of that equals building it.
 - `THIRD-PARTY.txt` is in the tarball because the licences compiled into the
   binary ask for it there. Source distribution does not need it.
-- The tarball also carries `dot_firmware.py`. Nothing before the release
-  runs the tarball's copies, so CI lists the tarball and checks that each of
-  its 4 scripts is there and executable.
+- The tarball carries no rooting script: rooting is firebreak's. Nothing
+  before the release runs the tarball's copies, so CI lists the tarball and
+  checks that each of its 3 scripts is there and executable.
 - The two triggers do not overlap. A push to a fork raises no event here, so
   `pull_request` tests a contributor's work. `pull_request` never fires for a
   tag, so `push` (main and `v*` tags) cuts a release and tests the merge onto

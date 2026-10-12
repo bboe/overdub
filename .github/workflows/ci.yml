@@ -138,7 +138,28 @@ jobs:
         with:
           python-version: '3.9'
       - run: python -X oldparser -m py_compile deploy/dot_firmware.py
-      - run: ./deploy/dot_firmware.py --help
+      # dot_firmware.py runs firebreak, which needs the network, so a uvx that
+      # echoes its arguments stands in. The target is translated, the flags
+      # pass through, and the exit status comes back.
+      - name: dot_firmware.py runs firebreak with the translated target
+        run: |
+          mkdir fake
+          printf '#!/bin/sh\necho "$*"\nexit 3\n' > fake/uvx
+          chmod +x fake/uvx
+          check() {
+            want=$1
+            shift
+            status=0
+            got=$(PATH="$PWD/fake:$PATH" ./deploy/dot_firmware.py "$@" 2>/dev/null) || status=$?
+            [ "$got" = "$want" ] && [ "$status" = 3 ] ||
+              { echo "dot_firmware.py $*: got '$got', status $status; want '$want'"; exit 1; }
+          }
+          check 'firebreak@latest'
+          check 'firebreak@latest --help' --help
+          check 'firebreak@latest amonet-biscuit-v1.1.0-bboe --verbose' v1-bboe --verbose
+          check 'firebreak@latest --short amonet-biscuit-v1.1.0' --short v1
+          check 'firebreak@latest amonet-biscuit-v2.0.0' v2
+          check 'firebreak@latest stock 8146' stock 8146
       - run: python -X oldparser -m py_compile deploy/install.py
       - run: ./deploy/install.py --help
       - run: python -X oldparser -m py_compile deploy/uninstall.py
@@ -202,7 +223,7 @@ jobs:
       # The tarball is the whole install: the scripts, the binary, the jar, and
       # the documentation that explains them. Somebody unpacking it needs adb,
       # Python 3.9 or later and a rooted Dot, and no Go, NDK, JDK or Android
-      # SDK at all. Rooting a Dot also needs fastboot.
+      # SDK at all. Rooting a Dot is firebreak's, so no rooting script is in it.
       #
       # THIRD-PARTY.txt travels with it because clause 2 of the BSD licences
       # compiled into the binary asks that it does.
@@ -216,8 +237,7 @@ jobs:
           mkdir -p "$dir/build" "$dir/deploy/mapdump"
           cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
           cp -r docs "$dir/docs"
-          cp deploy/install.py deploy/uninstall.py deploy/overdub.sh \
-             deploy/dot_firmware.py "$dir/deploy/"
+          cp deploy/install.py deploy/uninstall.py deploy/overdub.sh "$dir/deploy/"
           cp build/overdub "$dir/build/overdub"
           cp deploy/mapdump/mapdump.jar "$dir/deploy/mapdump/"
           # Same inputs, same tarball: the mtimes, ordering and owner a tar
@@ -243,7 +263,7 @@ jobs:
       - name: The scripts travel with the binary, executable
         run: |
           listing=$(tar tvzf "overdub-$GITHUB_REF_NAME.tar.gz")
-          for f in install.py uninstall.py overdub.sh dot_firmware.py; do
+          for f in install.py uninstall.py overdub.sh; do
             awk -v p="overdub-$GITHUB_REF_NAME/deploy/$f" \
               '$1 == "-rwxr-xr-x" && $NF == p { ok = 1 } END { exit !ok }' <<<"$listing" ||
               { echo "not in the tarball, or not executable: deploy/$f"; exit 1; }

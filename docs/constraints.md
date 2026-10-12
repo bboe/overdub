@@ -2,6 +2,9 @@
 
 ## The target
 
+- overdub runs on Fire OS 5 only. Fire OS 6 on the Dot has no `app_process`,
+  AudioFlinger or OpenSL ES, so firebreak's `amonet-biscuit-v2.0.0` and
+  `stock` targets cannot host it.
 - `GOARCH=arm` is required. FireOS 5 on biscuit runs a 32-bit ARM userspace on
   an arm64 kernel.
 - `struct input_event` is 16 bytes there and 24 bytes in a 64-bit userspace. A

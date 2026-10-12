@@ -63,9 +63,11 @@ keep Alexa and add a Home Assistant button and some entities.
   `/sbin/.core/img/.core/service.d`. `install.py` writes the boot script only
   there, and fails if it cannot. A Magisk that uses `/data/adb/service.d`
   needs the path changed first.
-- `adb` and Python 3.9 or later on a macOS, Linux or Windows machine. A
+- `adb`, from Android
+  [platform-tools](https://developer.android.com/tools/releases/platform-tools),
+  and Python 3.9 or later on a macOS, Linux or Windows machine. A
   [release](#install-from-a-release) needs nothing else to install on a rooted
-  Dot. Rooting one also needs `fastboot`; see [Rooting a Dot](#rooting-a-dot).
+  Dot. Rooting one needs firebreak; see [Rooting a Dot](#rooting-a-dot).
 - To build it yourself: Go 1.25 or later, and an **Android NDK**
   (`brew install --cask android-ndk` on macOS, or
   [developer.android.com/ndk](https://developer.android.com/ndk)).
@@ -74,105 +76,45 @@ keep Alexa and add a Home Assistant button and some entities.
 
 ## Rooting a Dot
 
-`deploy/dot_firmware.py` takes a Dot from Amazon's stock Fire OS 6 to rooted
-Fire OS 5.5.5.4 with Magisk 17.3, which is what the requirements above ask for.
-With the Dot on USB:
+overdub needs [firebreak](https://github.com/bboe/firebreak)'s default
+target, `amonet-biscuit-v1.1.0-bboe`: rooted Fire OS 5.5.5.4 with Magisk 17.3.
+[firebreak's README](https://github.com/bboe/firebreak#run-it) has the install
+commands for macOS, Linux and Windows. With the Dot on USB:
 
 ```sh
-deploy/dot_firmware.py             # rooted Fire OS 5.5.5.4, about 7 minutes
+uvx firebreak@latest       # rooted Fire OS 5.5.5.4
 deploy/install.py kitchen
 ```
 
 Both directions, filmed from start to finish, the Dot beside the terminal. The
-films show the script's earlier names, `dot_root.py` and
-`dot_restore_stock.py`:
+films show the earlier scripts, `dot_root.py` and `dot_restore_stock.py`, which
+firebreak replaces:
 
 <a href="https://youtu.be/yB-SI6i5EZc"><img src="https://img.youtube.com/vi/yB-SI6i5EZc/maxresdefault.jpg" alt="Video: rooting a stock Echo Dot to Fire OS 5" width="49%"></a>
 <a href="https://youtu.be/hwVIYQENaBY"><img src="https://img.youtube.com/vi/hwVIYQENaBY/maxresdefault.jpg" alt="Video: returning a rooted Echo Dot to stock Fire OS 6" width="49%"></a>
 
-- It needs Python 3.9 or later and Android platform-tools (`adb` and
-  `fastboot`). The script is one file, so it runs without a checkout, as
-  below.
-- A stock Dot shows nothing on USB. `dot_firmware.py` asks for the fastboot
-  gesture and waits for it.
 - The rooted Dot finishes in setup mode, with an orange ring and no Wi-Fi.
   Home Assistant reaches it only over Wi-Fi, so add it in the Alexa app. That
-  is safe once rooted: `dot_firmware.py` hides the updater and blocks the
-  update hosts.
-- A Dot that shows no light at all, and no fastboot after the gesture, needs
-  its eMMC test point shorted. `dot_firmware.py --short` waits for its
-  bootrom, says when the short may come off, and goes on.
-- `dot_firmware.py v1` keeps amonet v1.1.0's own TWRP 3.2.3 in recovery.
-  `dot_firmware.py v2` follows amonet v2.0.0's own procedure and leaves
-  rooted Fire OS 6, which overdub does not run on. Run it again with another
-  target to move the Dot to it: [docs/switching.md](docs/switching.md) shows
-  each move.
-- `dot_firmware.py stock <build>` returns the Dot to stock Fire OS 6. It
-  erases the whole Dot, Wi-Fi and the Alexa registration included. To root it
-  again, do not set it up in the Alexa app first: on Wi-Fi a stock Dot can
-  take an update to a build `dot_firmware.py` has not met.
-- [docs/rooting.md](docs/rooting.md) says why each step is there.
+  is safe once rooted: firebreak hides the updater and blocks the update hosts.
+- `amonet-biscuit-v1.1.0` can also host overdub. `amonet-biscuit-v2.0.0` and
+  `stock` leave Fire OS 6, which overdub does not run on.
+- `deploy/dot_firmware.py` was the rooting script. It now prints the firebreak
+  command for its arguments, and runs it.
 
 ### macOS
 
-Install platform-tools. The `PATH` line lasts for that terminal only.
-`/usr/bin/python3` offers to install the Command Line Tools on first run.
-
-```sh
-curl -LO https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
-unzip -q platform-tools-latest-darwin.zip
-export PATH="$PWD/platform-tools:$PATH"
-```
-
-Root the Dot, or return it to stock:
-
-```sh
-curl -LO https://raw.githubusercontent.com/bboe/overdub/main/deploy/dot_firmware.py
-python3 dot_firmware.py              # root it
-python3 dot_firmware.py stock 8146   # or 4315, 4405, 5041, 6302, 8138, 8142
-```
+Moved to [macOS](https://github.com/bboe/firebreak#macos) in firebreak's
+README.
 
 ### Linux (Debian, Ubuntu)
 
-Install platform-tools:
-
-```sh
-sudo apt install adb fastboot curl
-```
-
-On other distributions, or when the script reports a tool too old, use
-Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools).
-Run the script without `sudo`. When udev does not let the user open the Dot,
-the script prints the rules and the commands to add them.
-
-Root the Dot, or return it to stock:
-
-```sh
-curl -LO https://raw.githubusercontent.com/bboe/overdub/main/deploy/dot_firmware.py
-python3 dot_firmware.py              # root it
-python3 dot_firmware.py stock 8146   # or 4315, 4405, 5041, 6302, 8138, 8142
-```
+Moved to [Linux](https://github.com/bboe/firebreak#linux) in firebreak's
+README.
 
 ### Windows
 
-Install platform-tools and Python in PowerShell, then open a new terminal, so
-that `PATH` has them:
-
-```powershell
-winget install Google.PlatformTools
-winget install Python.Python.3.12
-```
-
-The bootrom step needs MediaTek's VCOM driver (`cdc-acm.inf`, class Ports),
-installed by hand. Windows supplies every other driver.
-
-Root the Dot, or return it to stock:
-
-```powershell
-curl.exe -LO https://raw.githubusercontent.com/bboe/overdub/main/deploy/dot_firmware.py
-py -3 dot_firmware.py              # root it
-py -3 dot_firmware.py stock 8146   # or 4315, 4405, 5041, 6302, 8138, 8142
-```
+Moved to [Windows](https://github.com/bboe/firebreak#windows) in firebreak's
+README.
 
 ## Install from a release
 
@@ -239,10 +181,8 @@ defends against.
   clock
 - [Things that fail silently](docs/pitfalls.md): failures that report success
 - [Deployment](docs/deployment.md): installing and removing it
-- [Rooting](docs/rooting.md): `dot_firmware.py`, each target step by
-  step
-- [Switching root versions](docs/switching.md): getting the script, moving a
-  rooted Dot between targets with sample output, and `--short`
+- [Rooting](https://github.com/bboe/firebreak/blob/main/docs/rooting.md):
+  firebreak's record of each step, in its own repository
 
 ## Licence
 
