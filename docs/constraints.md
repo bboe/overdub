@@ -32,8 +32,9 @@
   about biscuit is a `const` in `serve.go` or beside the code that needs it.
 - Conditional things are read from the filesystem: the ESPHome key at
   `noiseKeyPath`, the Sendspin identity at `sendspinKeyPath`, which the
-  daemon creates when it is missing, and the Sendspin pairing records at
-  `sendspinPairsPath`, which a pairing writes.
+  daemon creates when it is missing, the Sendspin pairing records at
+  `sendspinPairsPath`, which a pairing writes, and the last server to play
+  over Sendspin at `sendspinLastPath`.
 - A flag whose only correct value is known, or that restates whether a file
   exists, is configuration that can be wrong for no gain.
 - Home Assistant sets two properties, and both outlive a reboot:

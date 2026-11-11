@@ -210,13 +210,17 @@ type Session struct {
 	writing sync.Mutex
 	report  chan struct{}
 
+	displaced atomic.Bool
+	streams   streamGate
+
 	inFragment   bool
 	fragment     []byte
 	fragmentType byte
 
-	offered  map[string]pairMethod
-	unpaired bool
-	roles    []string
+	offered    map[string]pairMethod
+	unpaired   bool
+	roles      []string
+	activities []string
 
 	streaming bool
 	flac      bool

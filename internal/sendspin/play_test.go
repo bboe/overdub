@@ -128,6 +128,7 @@ type fakePlayer struct {
 	opened  []*fakeStream
 	rates   []int
 	refusal error
+	single  bool
 }
 
 func (p *fakePlayer) OpenStream(rate int, _ func(string, ...any)) (Stream, error) {
@@ -135,6 +136,9 @@ func (p *fakePlayer) OpenStream(rate int, _ func(string, ...any)) (Stream, error
 	defer p.mu.Unlock()
 	if p.refusal != nil {
 		return nil, p.refusal
+	}
+	if p.single && len(p.opened) > 0 && p.opened[len(p.opened)-1].shut() == 0 {
+		return nil, errors.New("a stream is already open")
 	}
 	s := &fakeStream{}
 	p.opened = append(p.opened, s)

@@ -38,6 +38,7 @@ const (
 	noiseKeyPath      = "/data/local/bin/.overdub-noise-key"
 	sendspinKeyPath   = "/data/local/bin/.overdub-sendspin-key"
 	sendspinPairsPath = "/data/local/bin/.overdub-sendspin-pairs"
+	sendspinLastPath  = "/data/local/bin/.overdub-sendspin-last"
 
 	sendspinBuffer          = 500
 	sendspinBluetoothBuffer = 900
@@ -268,6 +269,10 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 
 	base := []mdns.Advert{esphome.Advert(name, mac, apiPort)}
 	keys, records, haveKeys := sendspinKeys()
+	last, err := sendspin.LoadLastPlayback(sendspinLastPath)
+	if err != nil {
+		log.Printf("sendspin: %v; no server counts as the last to play", err)
+	}
 	wantSendspin, known, err := device.Flag(sendspinFlag)
 	switch {
 	case err != nil:
@@ -285,7 +290,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	up := false
 	if haveKeys {
 		toggle := &sendspinSwitch{
-			name: name, mac: mac, keys: keys, records: records, player: player,
+			name: name, mac: mac, keys: keys, records: records, last: last, player: player,
 			responder: responder, base: base,
 			wake:      server.NoteSendspin,
 			peer:      &untrustedlog.Log{Subject: "sendspin"},
@@ -434,6 +439,7 @@ type sendspinSwitch struct {
 	name, mac string
 	keys      sendspin.Keys
 	records   *sendspin.Records
+	last      *sendspin.LastPlayback
 	player    sendspin.Player
 	responder advertiser
 	base      []mdns.Advert
@@ -737,7 +743,7 @@ func (s *sendspinSwitch) enable() bool {
 		delay, delayKnown = s.delayMS, false
 	}
 	s.tookDelayLocked(delay, delayKnown)
-	client := sendspinClient(s.name, s.mac, s.keys, s.records, s.player, s.peer, delay,
+	client := sendspinClient(s.name, s.mac, s.keys, s.records, s.last, s.player, s.peer, delay,
 		!delayKnown, s.keepDelay)
 	served := make(chan struct{})
 	s.on, s.client, s.ln, s.served, s.hold = true, client, ln, served, hold
@@ -1056,7 +1062,7 @@ func setSpeakerVolume(percent int) {
 }
 
 func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Records,
-	player sendspin.Player,
+	last *sendspin.LastPlayback, player sendspin.Player,
 	peer *untrustedlog.Log, delay int, unknown bool,
 	save func(ms int) error) *sendspin.Client {
 	config := sendspin.Config{
@@ -1088,6 +1094,7 @@ func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Reco
 		DelayUnknown:         unknown,
 		SaveDelay:            save,
 		Player:               player,
+		Last:                 last,
 		Peer:                 peer,
 	}
 }

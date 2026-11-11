@@ -6,6 +6,8 @@ With --play-seconds, the client must have a player: the server streams that
 much of flac_vector.pattern in whatever format the client prefers, and the Go
 side checks what arrived. With --pairing-psk, the server then pairs with that
 Pairing PSK, reconnects as a fresh server holding only the record, and unpairs.
+With --unapproved-seconds, the server never approves unpaired playback, as Music
+Assistant does after an unpair, and the client must keep that one connection.
 """
 
 from __future__ import annotations
@@ -68,7 +70,14 @@ def main() -> int:
     ap.add_argument("--client-id", required=True)
     ap.add_argument("--pairing-psk", default="")
     ap.add_argument("--play-seconds", default=0, type=float)
+    ap.add_argument("--unapproved-seconds", default=0, type=float)
     args = ap.parse_args()
+    if args.unapproved_seconds:
+        return asyncio.run(
+            unapproved(
+                client_id=args.client_id, seconds=args.unapproved_seconds, url=args.url
+            )
+        )
     return asyncio.run(
         run(
             client_id=args.client_id,
@@ -224,6 +233,46 @@ async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-st
     finally:
         await server.close()
 
+    for f in failures:
+        print(f"FAIL: {f}", file=sys.stderr)
+    if failures:
+        return 1
+    print("\nINTEROP OK")
+    return 0
+
+
+async def unapproved(*, client_id: str, seconds: float, url: str) -> int:
+    loop = asyncio.get_running_loop()
+    server = SendspinServer(
+        loop,
+        Identity.generate(),
+        "interop test server",
+        pairing_store=InMemoryServerPairingStore(),
+    )
+    failures: list[str] = []
+    try:
+        server.register_client_url(client_id, url)
+        await server.connect_to_client_and_wait(url)
+        client = server.get_or_create_client(client_id)
+        deadline = loop.time() + SETTLE_TIMEOUT_S
+        while loop.time() < deadline:
+            if client.is_connected:
+                break
+            await asyncio.sleep(POLL_S)
+        end = loop.time() + seconds
+        while loop.time() < end:
+            if not client.is_connected:
+                failures.append("the client dropped a server that had not approved it")
+                break
+            if client.active_role_ids:
+                failures.append(
+                    f"the server activated {sorted(client.active_role_ids)}"
+                )
+                break
+            await asyncio.sleep(POLL_S)
+        print(f"held unapproved     = {seconds}s")
+    finally:
+        await server.close()
     for f in failures:
         print(f"FAIL: {f}", file=sys.stderr)
     if failures:

@@ -133,6 +133,18 @@ func TestInteropStreamsAt44kToADotThatAsks(t *testing.T) {
 	}
 }
 
+func TestInteropKeepsAServerThatHasNotApprovedIt(t *testing.T) {
+	said := runInterop(t, nil, nil, false, "--unapproved-seconds=45")
+	if n := strings.Count(said, "handshake with"); n != 1 {
+		t.Errorf("the server connected %d times in 45 seconds, want once: the client"+
+			" dropped it and it redialed. The daemon said:\n%s", n, said)
+	}
+	if !strings.Contains(said, "holds no role now") {
+		t.Errorf("the server never activated without a role, so nothing was tested."+
+			" The daemon said:\n%s", said)
+	}
+}
+
 func TestInteropPairsWithTheReferenceServer(t *testing.T) {
 	said := runInterop(t, nil, nil, true)
 	for _, want := range []string{

@@ -174,6 +174,8 @@ Binary size, measured on a linux/arm build of the daemon:
 
 ### Pairing records
 
+- `sendspinLastPath` holds the last-playback server; "What a peer can make the
+  daemon do" has it. `uninstall.py` removes it too.
 - `sendspinPairsPath` holds one 64-byte record per server: the server's public
   key, then the long-term PSK. The file is `0600`, and a load refuses one that
   group or other can read, as for the key file.
@@ -722,12 +724,18 @@ listener closed, rule deleted and no longer re-asserted, sessions ended.
 
 - The spec ranks connections by activity, with provisional connections, a
   30-second window to declare, and pairing held beside playback.
-- Implemented: **one admitted connection**. A second server reaching activation
-  gets `client/goodbye` with `concurrent_attempt`, which the spec permits. The
-  slot frees when the holder goes.
-- Not implemented: ranking, displacing a lower-priority holder, and pairing
-  beside playback. With two servers the Dot keeps the first. This is a
-  deliberate floor.
+- Implemented: **one server holds the player, and the newest wins it.** A
+  second server that activates with `playback` takes the player, and the
+  holder gets `client/goodbye` with `another_server`, as the spec's
+  equal-rank rule says.
+- Implemented: the spec's admission, at activation. "What a peer can make the
+  daemon do" below has the rule.
+- Not implemented, and each a deliberate floor:
+  - At most one admitted connection with `pairing`. Two can pair at once,
+    and a peer holding the pairing token can fill every admitted slot with
+    pairing connections, which then never lose that rank.
+  - `pair/abort` with `concurrent_attempt` for a refused or displaced pairing
+    connection. It gets `client/goodbye` like any other.
 
 ### Reporting itself unavailable
 
@@ -812,8 +820,8 @@ Each is refused, and each has a test that fails without it.
   reference: the prediction divides by the interval.
 - Each outcome logs its own line; from outside the causes look alike.
 - **A connection with no roles keeps asking.** The reference pauses only in its
-  pairing-code flows, which this client does not offer. The roleless allowance is 30
-  seconds, so at most 150 questions.
+  pairing-code flows, which this client does not offer. A connection that gave
+  up its roles stays open, so it asks at the pace its clock had reached.
 - `Session.When` maps a chunk stamp to the Dot's monotonic clock. A chunk
   before convergence is dropped and said once per connection: at 40 chunks a
   second, a line each would spend the run's budget in about 2 minutes.
@@ -1042,19 +1050,71 @@ Each is refused, and each has a test that fails without it.
   when zero. Only tests set them; package variables would race connections a
   previous test is still closing.
 - **The handshake deadline is absolute**: 30 seconds to finish, then 30 more to
-  declare, lifted only by an activation that takes a role. Nothing a peer sends
-  refreshes either; otherwise a message every 29 seconds holds a slot forever.
-  After activation, a 150-second idle timeout refreshed by any frame, with a
-  ping every 60.
-- Giving up every role starts a timer that closes the connection. Releasing the
-  slot is not enough: 8 lingering connections fill `maxConns` and refuse Music
-  Assistant.
-- The roleless allowance is per connection, not per episode, so cycling a role
-  earns no fresh window.
-- It is a timer because the alternatives fail. A deadline is overwritten:
-  `readHeader` and `write` arm their own on every call. A check between messages
-  is never reached: `Conn.Read` answers pings and pongs internally, so a peer
-  that only answers keepalives stays inside one `Read`.
+  send `server/activate`, lifted by the first activation, with or without a
+  role. Nothing a peer sends refreshes either; otherwise a message every 29
+  seconds holds a slot forever. After activation, a 150-second idle timeout
+  refreshed by any frame, with a ping every 60.
+- **A connection that activates with no role stays open.** The spec drops only
+  a provisional connection that sends no `server/activate` in 30 seconds.
+  Music Assistant 2.10.9 holds an unpaired Dot this way, with no role, until
+  the operator pairs it or allows guest access.
+- Closing it makes a loop. The Dot used to close such a connection after 30
+  seconds with no goodbye, and `aiosendspin` redials a connection that ends
+  without a reason. After an unpair in Music Assistant 2.10.9 it reconnected
+  every 32 seconds and logged 3 lines each time: the peer budget would last
+  about 13 hours.
+- **Admission is the spec's, at activation.** A connection is admitted by its
+  first `server/activate`. At most 7 are admitted (`maxAdmitted`), one fewer
+  than the sockets, so a newcomer always has a socket to handshake on. A
+  socket past 8 is refused, and a bare socket displaces nothing.
+- **At most one admitted connection has `playback`.** Holding the player
+  counts as `playback`, whatever the activation declared. A `playback`
+  activation displaces any other `playback` connection, the player's holder
+  included. A pairing attempt is never displaced: an activation with
+  `pairing` cannot also hold `playback`, so it ranks `pairing`, and nothing
+  displaces that rank.
+  Without this, 7 peers declaring `playback` with no role fill every slot and
+  outrank no one.
+- A server taking the player takes it in the same step as its admission,
+  under the same lock, so no activation lands between the two.
+- **A handover closes the displaced holder's stream at once.** The player
+  holds one stream, and `OpenStream` refuses a second, so the newcomer's
+  `stream/start` would otherwise find the old stream open and play nothing.
+  The displaced connection then ignores every message until its socket
+  closes. A `stream/start` it read before the handover can still reach the
+  player, so each session opens its stream through a gate the handover shuts
+  under the same lock: the open finishes first and is closed, or it is
+  refused.
+- At 7 admitted, an activation that displaced no one is ranked against every
+  admitted connection with empty `activities`: `playback` above `pairing`
+  above empty. A newcomer that ranks higher displaces them all. An empty
+  newcomer wins only if it is the last-playback server and none of them is.
+- A displaced connection gets `client/goodbye` reason `another_server`, which
+  `aiosendspin` does not redial; a newcomer that loses gets
+  `concurrent_attempt`.
+- An activation the Dot answers with `pair/abort` is not admissible, so it is
+  not arbitrated: a provisional connection stays provisional, under its
+  30-second deadline.
+- **The last-playback server** is the `server_id` of the last connection
+  admitted with `playback` in its `activities`, which the spec requires a
+  client to keep. `aiosendspin` declares `playback` only while the group
+  plays, so taking the player while stopped does not count. A `server_id` is
+  the server's Noise static key, which the handshake proves the server holds,
+  so a peer cannot claim Music Assistant's without its private key.
+- `sendspinLastPath` holds that server's 32-byte public key, written by
+  rename. Any peer can declare `playback`, so the file is written at most
+  once a minute (`lastEvery`), and a change inside that minute is written
+  when the minute is up. Unthrottled, 2 peers taking turns rewrote it 400
+  times in 300 ms. Dropping the change instead would let a peer that wrote
+  first stay the last-playback server after Music Assistant played. A file
+  the Dot cannot read counts as no last-playback server.
+- 7 peers that activated with no role can keep an unpaired Music Assistant
+  waiting at its own empty activation, unless it was the last to play. Its
+  `playback` activation displaces them. 8 that never activate still keep
+  everyone out, for 60 seconds a time, as before.
+- A displaced session cannot take the player: an activation already in flight
+  gets `errBusy`. Its goodbye has the same 2 bounds as `Client.Close`'s, so a
+  peer that stops reading cannot hold its socket.
 - `SetDeadline` also sets the write deadline, so an absolute window would fail
   writes 30 seconds into a healthy session. `readHeader` and `write` arming
   their own deadlines prevent that.

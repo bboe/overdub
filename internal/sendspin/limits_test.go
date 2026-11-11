@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -269,21 +270,50 @@ func TestAGroupNameCannotStretchOrForgeALogLine(t *testing.T) {
 	}
 }
 
-func TestASessionHoldingNoRoleDoesNotKeepItsConnectionSlot(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 200 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
+func rolelessPeer(t *testing.T, c *Client, ln net.Listener) (*wsPeer, *serverSide) {
+	t.Helper()
+	peer, server := bringUpWith(t, c, ln, serverPlan{psk: SentinelPSK(), cat: categorySentinel})
 	none := []string{}
 	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
 		Activities:  []string{},
 		ActiveRoles: &none,
 	}))
+	handled(t, peer, server)
+	return peer, server
+}
 
-	waitForConns(t, c, 0, "a session that gave up every role kept its connection slot; eight"+
-		" such peers fill maxConns and Serve refuses music assistant before it handshakes")
+func fillTo(t *testing.T, c *Client, ln net.Listener, want int) {
+	t.Helper()
+	for n := c.conns(); n < want; n = c.conns() {
+		nc, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		t.Cleanup(func() { nc.Close() })
+		waitFor(t, "the connection to be accepted", func() bool { return c.conns() > n })
+	}
+}
+
+func TestARolelessSessionKeepsItsConnectionAndIsKeptAlive(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.provisionalAfter = 200 * time.Millisecond
+	c.pingEvery = 100 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server := rolelessPeer(t, c, ln)
+
+	time.Sleep(500 * time.Millisecond)
+	handled(t, peer, server)
+	if c.conns() != 1 {
+		t.Errorf("conns = %d, want 1: a server that activated with no role may stay,"+
+			" and closing it makes music assistant redial every 30 seconds", c.conns())
+	}
+	if err := peer.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if op, _ := peer.read(); op != opPing {
+		t.Errorf("the Dot sent %#x, want a ping: nothing would notice the peer going", op)
+	}
 }
 
 func TestAPeerThatNeverHandshakesLosesItsSlot(t *testing.T) {
@@ -320,6 +350,173 @@ func TestAPeerThatNeverActivatesLosesItsSlot(t *testing.T) {
 	waitForConns(t, c, 0, "a peer that handshook and never activated held its slot")
 }
 
+type peerAt struct {
+	peer   *wsPeer
+	server *serverSide
+}
+
+func rolelessPeers(t *testing.T, c *Client, ln net.Listener, n int) []peerAt {
+	t.Helper()
+	var out []peerAt
+	for range n {
+		peer, server := rolelessPeer(t, c, ln)
+		out = append(out, peerAt{peer, server})
+	}
+	return out
+}
+
+func activateNothing(t *testing.T, peer *wsPeer, server *serverSide) {
+	t.Helper()
+	none := []string{}
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{},
+		ActiveRoles: &none,
+	}))
+}
+
+func toldGoodbye(t *testing.T, peer *wsPeer, server *serverSide, want string) {
+	t.Helper()
+	kind, payload := nextJSON(t, peer, server)
+	var bye goodbye
+	if err := json.Unmarshal(payload, &bye); err != nil {
+		t.Fatalf("goodbye: %v", err)
+	}
+	if kind != typeClientGoodbye || bye.Reason != want {
+		t.Errorf("got %s %q, want %s %q", kind, bye.Reason, typeClientGoodbye, want)
+	}
+}
+
+func TestABareSocketDisplacesNobody(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, server := rolelessPeer(t, c, ln)
+	fillTo(t, c, ln, maxConns)
+
+	extra, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer extra.Close()
+	if err := extra.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if _, err := extra.Read(make([]byte, 1)); errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Error("a full Dot left the socket past its cap open")
+	}
+	handled(t, peer, server)
+	if n := c.conns(); n != maxConns {
+		t.Errorf("conns = %d, want %d: a socket that never activated displaced a server", n,
+			maxConns)
+	}
+}
+
+func TestAPlaybackActivationAtTheCapDisplacesEveryIdleServer(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	idle := rolelessPeers(t, c, ln, maxAdmitted)
+
+	bringUp(t, c, ln)
+	for _, p := range idle {
+		toldGoodbye(t, p.peer, p.server, goodbyeAnotherServer)
+	}
+	c.mu.Lock()
+	held, admitted := c.held, len(c.admitted)
+	c.mu.Unlock()
+	if held == nil || admitted != 1 {
+		t.Errorf("held = %v, admitted = %d; the server that outranked them should be the"+
+			" one left", held != nil, admitted)
+	}
+}
+
+func TestAnIdleActivationAtTheCapIsRefusedUnlessItPlayedLast(t *testing.T) {
+	for _, last := range []bool{false, true} {
+		ln := listenLocal(t)
+		c := testClient(t)
+		c.Last = &LastPlayback{}
+		serveOn(t, c, ln)
+		idle := rolelessPeers(t, c, ln, maxAdmitted)
+
+		peer, server := bringUpWith(t, c, ln, serverPlan{psk: SentinelPSK(), cat: categorySentinel})
+		if last {
+			if err := c.Last.set(server.pair.Public); err != nil {
+				t.Fatal(err)
+			}
+		}
+		activateNothing(t, peer, server)
+		if !last {
+			toldGoodbye(t, peer, server, goodbyeConcurrent)
+			for _, p := range idle {
+				handled(t, p.peer, p.server)
+			}
+			continue
+		}
+		for _, p := range idle {
+			toldGoodbye(t, p.peer, p.server, goodbyeAnotherServer)
+		}
+		handled(t, peer, server)
+	}
+}
+
+func TestANewcomerPlaysAfterAHandover(t *testing.T) {
+	ln := listenLocal(t)
+	c, player := playingClient(t)
+	player.single = true
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+	playing(t, peer, server)
+	waitFor(t, "a stream to be opened", func() bool { return player.count() == 1 })
+
+	peer, server, _ = bringUp(t, c, ln)
+	playing(t, peer, server)
+	waitFor(t, "the newcomer's stream to be opened", func() bool { return player.count() == 2 })
+}
+
+func TestADisplacedSessionCannotOpenAStream(t *testing.T) {
+	var gate streamGate
+	first := &fakeStream{}
+	if got, err := gate.open(func() (Stream, error) { return first, nil }); got != first || err != nil {
+		t.Fatalf("the gate gave %v, %v; want the stream it opened", got, err)
+	}
+	gate.close()
+	if first.shut() != 1 {
+		t.Errorf("closing the gate closed its stream %d times, want 1", first.shut())
+	}
+	opened := false
+	got, err := gate.open(func() (Stream, error) { opened = true; return &fakeStream{}, nil })
+	if opened || got != nil || err != nil {
+		t.Errorf("a closed gate opened a stream (%v, %v, %v): a server displaced while it"+
+			" read a stream/start holds the player against the newcomer", opened, got, err)
+	}
+}
+
+func TestTheServerThatLastPlayedIsKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "last")
+	last, err := LoadLastPlayback(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.Last = last
+	serveOn(t, c, ln)
+	peer, server, _ := bringUp(t, c, ln)
+	handled(t, peer, server)
+
+	again, err := LoadLastPlayback(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := again.id(); got != EncodeID(server.pair.Public) {
+		t.Errorf("the last server to play reloaded as %q, want %q", got,
+			EncodeID(server.pair.Public))
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("the file is %v, %v; want 0600", info, err)
+	}
+}
+
 func waitForConns(t *testing.T, c *Client, want int, complaint string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -333,97 +530,6 @@ func waitForConns(t *testing.T, c *Client, want int, complaint string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-func TestARolelessSessionCannotHoldOnWithControlFrames(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 200 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
-	none := []string{}
-	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-		Activities:  []string{},
-		ActiveRoles: &none,
-	}))
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if _, err := peer.conn.Write(frame(true, opPing, []byte("keepalive"))); err != nil {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}()
-
-	waitForConns(t, c, 0, "a roleless session held its slot for as long as it sent control frames")
-}
-
-func TestRegainingARoleCallsOffTheBound(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 300 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
-	none := []string{}
-	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-		Activities:  []string{},
-		ActiveRoles: &none,
-	}))
-	time.Sleep(100 * time.Millisecond)
-	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-		Activities:  []string{activityPlayback},
-		ActiveRoles: roles(rolePlayerV1),
-	}))
-
-	time.Sleep(600 * time.Millisecond)
-	conns := c.conns()
-	c.mu.Lock()
-	held := c.held
-	c.mu.Unlock()
-	if conns != 1 || held == nil {
-		t.Errorf("conns = %d, held = %v; declaring a role again must call off the bound",
-			conns, held != nil)
-	}
-}
-
-func TestRepeatedDeactivationDoesNotRestartTheBound(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 300 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
-	none := []string{}
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-				Activities:  []string{},
-				ActiveRoles: &none,
-			})); err != nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-
-	waitForConns(t, c, 0, "a peer held its slot by giving up its roles over and over")
 }
 
 func TestALongServerNameCannotStretchOrForgeALogLine(t *testing.T) {
@@ -539,117 +645,25 @@ func TestOrdinaryTrafficDoesNotSpendThePeerBudget(t *testing.T) {
 	}
 }
 
-func TestCyclingRolesCannotBuyMoreRolelessTime(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 300 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
-	none := []string{}
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-				Activities: []string{}, ActiveRoles: &none})); err != nil {
-				return
-			}
-			time.Sleep(150 * time.Millisecond)
-			if err := peer.pushBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-				Activities: []string{activityPlayback}, ActiveRoles: roles(rolePlayerV1)})); err != nil {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}()
-
-	waitForConns(t, c, 0, "a peer held its slot by cycling its roles rather than keeping one")
-}
-
-func TestTimeHoldingARoleIsNotChargedAsRoleless(t *testing.T) {
-	ln := listenLocal(t)
-	c := testClient(t)
-	c.rolelessAfter = 400 * time.Millisecond
-	serveOn(t, c, ln)
-	peer, server, _ := bringUp(t, c, ln)
-
-	none := []string{}
-	narrow := func() {
-		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-			Activities: []string{}, ActiveRoles: &none}))
-	}
-	widen := func() {
-		peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-			Activities: []string{activityPlayback}, ActiveRoles: roles(rolePlayerV1)}))
-	}
-
-	narrow()
-	time.Sleep(100 * time.Millisecond) // 100ms of the 400ms allowance
-	widen()
-	time.Sleep(600 * time.Millisecond) // working, and longer than the allowance
-	narrow()
-	time.Sleep(100 * time.Millisecond) // 200ms spent in total, still inside it
-	widen()
-	handled(t, peer, server)
-
-	conns := c.conns()
-	c.mu.Lock()
-	held := c.held
-	c.mu.Unlock()
-	if conns != 1 || held == nil {
-		t.Errorf("conns = %d, held = %v; the time it spent holding a role was charged"+
-			" against its roleless allowance", conns, held != nil)
-	}
-
-	narrow()
-	handled(t, peer, server)
-}
-
 func TestALeavingSessionDoesNotReleaseAnotherServersHold(t *testing.T) {
 	ln := listenLocal(t)
 	c := testClient(t)
 	serveOn(t, c, ln)
 
-	holder, _, _ := bringUp(t, c, ln)
-	_ = holder
+	first, firstServer, _ := bringUp(t, c, ln)
+	second, secondServer, _ := bringUp(t, c, ln)
+	if kind, _ := nextJSON(t, first, firstServer); kind != typeClientGoodbye {
+		t.Fatalf("the first server got %s, want %s", kind, typeClientGoodbye)
+	}
+	first.conn.Close()
+	waitForConns(t, c, 1, "the displaced server's connection was never torn down")
+	handled(t, second, secondServer)
+
 	c.mu.Lock()
 	held := c.held
 	c.mu.Unlock()
 	if held == nil {
-		t.Fatal("the first server never took the hold")
-	}
-
-	other := dialLocal(t, ln)
-	server := driveServer(t, other, serverPlan{
-		clientPublic: c.Keys.Identity.Public,
-		psk:          SentinelPSK(),
-		cat:          categorySentinel,
-	})
-	other.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "second"}))
-	if kind, _ := nextJSON(t, other, server); kind != typeClientHello {
-		t.Fatalf("wanted %s, got %s", typeClientHello, kind)
-	}
-	other.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-		Activities:  []string{activityPlayback},
-		ActiveRoles: roles(rolePlayerV1),
-	}))
-	if kind, _ := nextJSON(t, other, server); kind != typeClientGoodbye {
-		t.Fatalf("second server got %s, want %s", kind, typeClientGoodbye)
-	}
-	other.conn.Close()
-	waitForConns(t, c, 1, "the refused server's connection was never torn down")
-
-	c.mu.Lock()
-	still := c.held
-	c.mu.Unlock()
-	if still != held {
-		t.Error("a refused server's disconnect released the hold the first server still has")
+		t.Error("the displaced server's disconnect released the hold the second server took")
 	}
 }
 
@@ -1098,5 +1112,243 @@ func TestPlaybackCannotSpendTheBudgetTheHandshakeNeeds(t *testing.T) {
 	}
 	if c.Play.Written() == 0 {
 		t.Error("the streams were not logged at all")
+	}
+}
+
+func admittedAt(t *testing.T, c *Client, id string, r rank) (net.Conn, *Session) {
+	t.Helper()
+	nc, far := net.Pipe()
+	t.Cleanup(func() { nc.Close(); far.Close() })
+	s := &Session{serverID: id}
+	c.mu.Lock()
+	if c.live == nil {
+		c.live = map[net.Conn]*Session{}
+	}
+	c.live[nc] = s
+	c.mu.Unlock()
+	if r != rankEmpty || id != "" {
+		if _, err := c.admit(nc, s, r, false, false); err != nil {
+			t.Fatalf("admitting %q: %v", id, err)
+		}
+	}
+	return nc, s
+}
+
+func TestAServerThatIsPairingIsNotDisplaced(t *testing.T) {
+	c := testClient(t)
+	pairing, _ := admittedAt(t, c, "pairing", rankPairing)
+	for i := range maxAdmitted - 1 {
+		admittedAt(t, c, fmt.Sprint("idle ", i), rankEmpty)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	out, err := c.admit(nc, s, rankPlayback, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out[pairing]; ok || len(out) != maxAdmitted-1 {
+		t.Errorf("displaced %d servers, the pairing one among them: %v; only the idle ones"+
+			" rank below playback", len(out), ok)
+	}
+}
+
+func TestADisplacedServerCannotTakeThePlayer(t *testing.T) {
+	c := testClient(t)
+	var idle []*Session
+	for i := range maxAdmitted {
+		_, s := admittedAt(t, c, fmt.Sprint("idle ", i), rankEmpty)
+		idle = append(idle, s)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	if _, err := c.admit(nc, s, rankPlayback, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.hold(idle[0], true); !errors.Is(err, errBusy) {
+		t.Errorf("a displaced server took the player: %v", err)
+	}
+}
+
+func TestAnIdleNewcomerDoesNotDisplaceTheSameLastServer(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, keyLen)
+	c := testClient(t)
+	c.Last = &LastPlayback{server: key}
+	admittedAt(t, c, EncodeID(key), rankEmpty)
+	for i := range maxAdmitted - 1 {
+		admittedAt(t, c, fmt.Sprint("idle ", i), rankEmpty)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	s.serverID = EncodeID(key)
+	if _, err := c.admit(nc, s, rankEmpty, false, false); !errors.Is(err, errBusy) {
+		t.Errorf("an idle newcomer displaced an idle server with the same last-playback id: %v",
+			err)
+	}
+}
+
+func TestHoldingThePlayerRanksAsPlayback(t *testing.T) {
+	if got := rankOf(nil, []string{rolePlayerV1}); got != rankPlayback {
+		t.Errorf("a server holding the player with no activities ranks %d, want %d: an idle"+
+			" newcomer would displace it", got, rankPlayback)
+	}
+}
+
+func TestOnlyOneServerAtATimeIsAdmittedForPlayback(t *testing.T) {
+	c := testClient(t)
+	for i := range maxAdmitted {
+		nc, s := admittedAt(t, c, "", rankEmpty)
+		s.serverID = fmt.Sprint("playback ", i)
+		out, err := c.admit(nc, s, rankPlayback, false, false)
+		if err != nil {
+			t.Fatalf("playback %d: %v", i, err)
+		}
+		if i > 0 && len(out) != 1 {
+			t.Fatalf("playback %d displaced %d servers, want the 1 before it", i, len(out))
+		}
+	}
+	c.mu.Lock()
+	n := len(c.admitted)
+	c.mu.Unlock()
+	if n != 1 {
+		t.Errorf("admitted = %d, want 1: 7 servers declaring playback with no role filled"+
+			" every slot, and music assistant would get concurrent_attempt", n)
+	}
+}
+
+func TestANewcomerThatOutranksNoOneAtTheCapIsRefused(t *testing.T) {
+	c := testClient(t)
+	for i := range maxAdmitted {
+		admittedAt(t, c, fmt.Sprint("pairing ", i), rankPairing)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	if _, err := c.admit(nc, s, rankPlayback, false, false); !errors.Is(err, errBusy) {
+		t.Errorf("an eighth server was admitted with no idle server to displace: %v", err)
+	}
+}
+
+func TestAnAdmittedServerActivatingAgainAtTheCapIsNotRanked(t *testing.T) {
+	c := testClient(t)
+	nc, s := admittedAt(t, c, "again", rankEmpty)
+	for i := range maxAdmitted - 1 {
+		admittedAt(t, c, fmt.Sprint("idle ", i), rankEmpty)
+	}
+	out, err := c.admit(nc, s, rankEmpty, false, false)
+	if err != nil || len(out) != 0 {
+		t.Errorf("an admitted server activating again got %v and displaced %d", err, len(out))
+	}
+}
+
+func TestADisplacedServerIsNotAdmittedAgain(t *testing.T) {
+	c := testClient(t)
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	s.displaced.Store(true)
+	if _, err := c.admit(nc, s, rankEmpty, false, false); !errors.Is(err, errBusy) {
+		t.Errorf("a displaced server was admitted: %v", err)
+	}
+}
+
+func TestPairingRanksAboveNothing(t *testing.T) {
+	if got := rankOf([]string{activityPairing}, nil); got != rankPairing {
+		t.Errorf("a pairing server ranks %d, want %d", got, rankPairing)
+	}
+}
+
+func TestALeavingServerIsNoLongerAdmitted(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	serveOn(t, c, ln)
+	peer, _ := rolelessPeer(t, c, ln)
+	peer.conn.Close()
+	waitForConns(t, c, 0, "the server that hung up kept its connection")
+	c.mu.Lock()
+	n := len(c.admitted)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Errorf("admitted = %d after the server left, want 0: stale entries fill the cap", n)
+	}
+}
+
+func TestAnActivationAnsweredWithPairAbortAdmitsNothing(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.provisionalAfter = 300 * time.Millisecond
+	serveOn(t, c, ln)
+	peer, server := bringUpWith(t, c, ln, serverPlan{psk: SentinelPSK(), cat: categorySentinel})
+	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
+		Activities:  []string{activityPairing},
+		ActiveRoles: &[]string{},
+		Pairing:     &activatePairing{Method: methodPairingPSK},
+	}))
+	if kind, _ := nextJSON(t, peer, server); kind != typePairAbort {
+		t.Fatalf("got %s, want %s", kind, typePairAbort)
+	}
+	c.mu.Lock()
+	n := len(c.admitted)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Errorf("admitted = %d; the spec says not to arbitrate an activation that is not"+
+			" admissible", n)
+	}
+	waitForConns(t, c, 0, "the activation lifted the provisional deadline")
+}
+
+func TestAnActivationWithoutPlaybackIsNotTheLastToPlay(t *testing.T) {
+	ln := listenLocal(t)
+	c := testClient(t)
+	c.Last = &LastPlayback{}
+	serveOn(t, c, ln)
+	rolelessPeer(t, c, ln)
+	if got := c.Last.id(); got != "" {
+		t.Errorf("a server that declared nothing became the last to play: %q", got)
+	}
+}
+
+func TestAPlaybackNewcomerTakesThePlayerFromItsHolder(t *testing.T) {
+	c := testClient(t)
+	holderConn, holder := admittedAt(t, c, "", rankEmpty)
+	holder.serverID = "music assistant"
+	if _, err := c.admit(holderConn, holder, rankPlayback, true, true); err != nil {
+		t.Fatal(err)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	s.serverID = "newcomer"
+	out, err := c.admit(nc, s, rankPlayback, true, false)
+	if _, ok := out[holderConn]; err != nil || !ok {
+		t.Fatalf("the newcomer got %v and did not displace the holder", err)
+	}
+	if !holder.displaced.Load() || c.held != s {
+		t.Error("the player did not pass to the newcomer")
+	}
+
+	other, roleless := admittedAt(t, c, "", rankEmpty)
+	roleless.serverID = "roleless"
+	if _, err := c.admit(other, roleless, rankPlayback, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if c.held != nil {
+		t.Error("a holder displaced by a server taking no role is still reported as holding")
+	}
+}
+
+func TestAPlaybackNewcomerAtTheCapDisplacesOnlyThePlaybackServer(t *testing.T) {
+	c := testClient(t)
+	playing, _ := admittedAt(t, c, "playback", rankPlayback)
+	for i := range maxAdmitted - 1 {
+		admittedAt(t, c, fmt.Sprint("idle ", i), rankEmpty)
+	}
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	s.serverID = "newcomer"
+	out, err := c.admit(nc, s, rankPlayback, false, false)
+	if _, ok := out[playing]; err != nil || !ok || len(out) != 1 {
+		t.Errorf("got %v and displaced %d servers: displacing the playback server frees"+
+			" the slot, so the idle ones stay", err, len(out))
+	}
+}
+
+func TestAPairingNewcomerDoesNotDisplaceAPlaybackServer(t *testing.T) {
+	c := testClient(t)
+	playing, _ := admittedAt(t, c, "playback", rankPlayback)
+	nc, s := admittedAt(t, c, "", rankEmpty)
+	s.serverID = "pairing"
+	out, err := c.admit(nc, s, rankPairing, false, false)
+	if _, ok := out[playing]; err != nil || ok {
+		t.Errorf("a pairing activation displaced a playback server: %v", err)
 	}
 }

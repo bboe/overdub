@@ -23,6 +23,7 @@ const (
 	activityPlayback = "playback"
 	activityPairing  = "pairing"
 
+	goodbyeAnotherServer    = "another_server"
 	goodbyeShutdown         = "shutdown"
 	goodbyeUnauthorized     = "unauthorized"
 	goodbyePairingRequired  = "pairing_required"
@@ -322,9 +323,10 @@ func (s *Session) Activate(payload json.RawMessage) ([]string, error) {
 		if err := s.WriteJSON(typePairAbort, pairAbort{Reason: d.PairAbort}); err != nil {
 			return nil, err
 		}
-		return s.roles, nil
+		return s.roles, errInadmissible
 	}
 	s.roles = d.Roles
+	s.activities = act.Activities
 	if !holdsPlayer(s.roles) {
 		s.streaming = false
 	}

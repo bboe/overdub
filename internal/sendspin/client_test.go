@@ -160,33 +160,18 @@ func TestServeTakesAConnectionThroughToClientState(t *testing.T) {
 	}
 }
 
-func TestServeRefusesASecondServerWhileOneIsHeld(t *testing.T) {
+func TestASecondPlaybackServerTakesThePlayer(t *testing.T) {
 	ln := listenLocal(t)
 	c := testClient(t)
 	serveOn(t, c, ln)
 
+	first, firstServer, _ := bringUp(t, c, ln)
 	_, _, _ = bringUp(t, c, ln)
 
-	peer := dialLocal(t, ln)
-	server := driveServer(t, peer, serverPlan{
-		clientPublic: c.Keys.Identity.Public,
-		psk:          SentinelPSK(),
-		cat:          categorySentinel,
-	})
-	peer.writeBinary(server.sealJSON(t, typeServerHello, serverHello{Name: "second server"}))
-	if kind, _ := nextJSON(t, peer, server); kind != typeClientHello {
-		t.Fatalf("wanted %s, got %s", typeClientHello, kind)
-	}
-	peer.writeBinary(server.sealJSON(t, typeServerActivate, serverActivate{
-		Activities:  []string{activityPlayback},
-		ActiveRoles: roles(rolePlayerV1),
-	}))
-	kind, payload := nextJSON(t, peer, server)
-	if kind != typeClientGoodbye {
-		t.Fatalf("second server got %s, want %s", kind, typeClientGoodbye)
-	}
-	if !strings.Contains(string(payload), goodbyeConcurrent) {
-		t.Errorf("goodbye reason = %s, want %s", payload, goodbyeConcurrent)
+	kind, payload := nextJSON(t, first, firstServer)
+	if kind != typeClientGoodbye || !strings.Contains(string(payload), goodbyeAnotherServer) {
+		t.Errorf("the first server got %s %s, want %s %s: the spec hands the player to"+
+			" a newcomer of equal rank", kind, payload, typeClientGoodbye, goodbyeAnotherServer)
 	}
 }
 

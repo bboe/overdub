@@ -1,6 +1,9 @@
 package sendspin
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type Player interface {
 	OpenStream(rate int, say func(string, ...any)) (Stream, error)
@@ -35,6 +38,7 @@ type playback struct {
 	stream Stream
 	rate   int
 	held   func() time.Duration
+	gate   *streamGate
 
 	saidShut    bool
 	saidNoClock bool
@@ -54,7 +58,10 @@ func (p *playback) open(rate int) {
 		}
 		return
 	}
-	stream, err := p.player.OpenStream(rate, p.say)
+	stream, err := p.gate.open(func() (Stream, error) { return p.player.OpenStream(rate, p.say) })
+	if stream == nil && err == nil {
+		return
+	}
 	if err != nil {
 		if !p.saidShut {
 			p.saidShut = true
@@ -118,5 +125,45 @@ func (p *playback) stop() {
 		return
 	}
 	p.stream.Close()
+	p.gate.forget()
 	p.stream = nil
+}
+
+type streamGate struct {
+	mu     sync.Mutex
+	shut   bool
+	stream Stream
+}
+
+func (g *streamGate) open(f func() (Stream, error)) (Stream, error) {
+	if g == nil {
+		return f()
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.shut {
+		return nil, nil
+	}
+	stream, err := f()
+	g.stream = stream
+	return stream, err
+}
+
+func (g *streamGate) forget() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stream = nil
+}
+
+func (g *streamGate) close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.shut = true
+	if g.stream != nil {
+		g.stream.Close()
+		g.stream = nil
+	}
 }

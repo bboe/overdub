@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,8 @@ const (
 	bufferSeconds  = 2
 	BufferCapacity = StreamRate * StreamChannels * (StreamBitDepth / 8) * bufferSeconds
 
-	maxConns = 8
+	maxConns    = 8
+	maxAdmitted = maxConns - 1
 
 	maxNoted = 16
 
@@ -113,6 +115,7 @@ type Client struct {
 	SaveDelay            func(ms int) error
 
 	Player Player
+	Last   *LastPlayback
 
 	delay      atomic.Int64
 	bluetooth  atomic.Bool
@@ -125,7 +128,6 @@ type Client struct {
 
 	handshakeAfter   time.Duration
 	provisionalAfter time.Duration
-	rolelessAfter    time.Duration
 	pingEvery        time.Duration
 	goodbyeAfter     time.Duration
 	timeEvery        time.Duration
@@ -145,13 +147,34 @@ type Client struct {
 	held      *Session
 	heldReady bool
 	live      map[net.Conn]*Session
+	admitted  map[net.Conn]rank
 	closed    bool
 }
 
+type rank int
+
+const (
+	rankEmpty rank = iota
+	rankPairing
+	rankPlayback
+)
+
+func rankOf(activities, roles []string) rank {
+	switch {
+	case len(roles) > 0, slices.Contains(activities, activityPlayback):
+		return rankPlayback
+	case slices.Contains(activities, activityPairing):
+		return rankPairing
+	default:
+		return rankEmpty
+	}
+}
+
 var (
-	errBusy   = errors.New("another server already holds this client")
-	errNoRoom = errors.New("too many connections already")
-	errClosed = errors.New("sendspin is switched off")
+	errBusy         = errors.New("another server already holds this client")
+	errNoRoom       = errors.New("too many connections already")
+	errClosed       = errors.New("sendspin is switched off")
+	errInadmissible = errors.New("an activation this client answered with pair/abort")
 )
 
 type noteSet struct {
@@ -271,6 +294,73 @@ func (c *Client) leave(nc net.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.live, nc)
+	delete(c.admitted, nc)
+}
+
+func (c *Client) admit(nc net.Conn, s *Session, r rank, holds, ready bool) (
+	map[net.Conn]*Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s.displaced.Load() {
+		return nil, errBusy
+	}
+	out := map[net.Conn]*Session{}
+	if r == rankPlayback {
+		for other, held := range c.admitted {
+			if other == nc || held != rankPlayback {
+				continue
+			}
+			out[other] = c.live[other]
+		}
+	}
+	if _, ok := c.admitted[nc]; !ok && len(c.admitted)-len(out) >= maxAdmitted {
+		last := c.Last.id()
+		for other, held := range c.admitted {
+			if held != rankEmpty {
+				continue
+			}
+			if r == rankEmpty && (last == "" || s.ServerID() != last ||
+				c.live[other].ServerID() == last) {
+				return nil, errBusy
+			}
+			out[other] = c.live[other]
+		}
+		if len(out) == 0 {
+			return nil, errBusy
+		}
+	}
+	for other, gone := range out {
+		gone.displaced.Store(true)
+		delete(c.admitted, other)
+		if c.held == gone {
+			c.held, c.heldReady = nil, false
+		}
+	}
+	c.setAdmitted(nc, r)
+	if holds {
+		c.held, c.heldReady = s, ready
+	}
+	return out, nil
+}
+
+func (c *Client) setAdmitted(nc net.Conn, r rank) {
+	if c.admitted == nil {
+		c.admitted = map[net.Conn]rank{}
+	}
+	c.admitted[nc] = r
+}
+
+func (c *Client) displace(nc net.Conn, s *Session) {
+	c.Peer.Printf("sendspin: a connection made room for one the spec ranks above it")
+	budget := waitOr(c.goodbyeAfter, goodbyeWait)
+	cut := time.AfterFunc(2*budget, func() { nc.Close() })
+	defer cut.Stop()
+	_ = nc.SetWriteDeadline(time.Now().Add(budget))
+	if s != nil {
+		s.ws.setIdle(budget)
+		_ = s.Goodbye(goodbyeAnotherServer)
+	}
+	nc.Close()
 }
 
 func (c *Client) conns() int {
@@ -355,6 +445,9 @@ func (c *Client) hold(s *Session, ready bool) error {
 	if c.held != nil && c.held != s {
 		return errBusy
 	}
+	if s.displaced.Load() {
+		return errBusy
+	}
 	c.held, c.heldReady = s, ready
 	return nil
 }
@@ -389,20 +482,14 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	synced := false
 	available := false
 	rekeyed := false
-	var roleless *time.Timer
-	var rolelessSince time.Time
-	var rolelessSpent time.Duration
-	defer func() {
-		if roleless != nil {
-			roleless.Stop()
-		}
-	}()
+	alive := false
+	roleless := false
 	stop := make(chan struct{})
 	defer close(stop)
 
 	var noted noteSet
 	play := playback{player: c.Player, say: c.Play.Printf, name: name,
-		held: c.heldDelay}
+		held: c.heldDelay, gate: &session.streams}
 	defer play.stop()
 	heard := chunkRun{every: waitOr(c.reportEvery, reportEvery), play: &play}
 	defer func() { heard.done(c.Play, name) }()
@@ -416,6 +503,10 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 		msg, body, err := session.Read()
 		if err != nil {
 			return err
+		}
+		if session.displaced.Load() {
+			play.stop()
+			continue
 		}
 		heard.tick(c.Play, name)
 		if msg != msgJSON {
@@ -459,6 +550,9 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 		switch kind {
 		case typeServerActivate:
 			roles, err := session.Activate(payload)
+			if errors.Is(err, errInadmissible) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -468,42 +562,39 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				heard.done(c.Play, name)
 				play.stop()
 			}
+			out, err := c.admit(nc, session, rankOf(session.activities, roles), len(roles) > 0,
+				available)
+			if err != nil {
+				_ = session.Goodbye(goodbyeConcurrent)
+				return err
+			}
+			for other, gone := range out {
+				gone.streams.close()
+				go c.displace(other, gone)
+			}
+			if slices.Contains(session.activities, activityPlayback) {
+				if err := c.Last.set(session.peer); err != nil {
+					c.Peer.Printf("sendspin: the last server to play was not kept: %v", err)
+				}
+			}
+			if !alive {
+				ws.setIdle(idleWait)
+				go c.keepalive(ws, nc, stop, waitOr(c.pingEvery, pingAfter))
+				alive = true
+			}
 			if len(roles) == 0 {
 				c.release(session)
-				allowance := waitOr(c.rolelessAfter, provisionalWait)
-				if rolelessSince.IsZero() {
-					rolelessSince = time.Now()
-				}
-				left := allowance - rolelessSpent
-				if left <= 0 {
-					return fmt.Errorf("held no role for %s of this connection", allowance)
-				}
-				if roleless == nil {
-					roleless = time.AfterFunc(left, func() {
-						c.Peer.Printf("sendspin: %q held no role for %s, so its connection goes",
-							name, allowance)
-						nc.Close()
-					})
-				}
+				roleless = true
 				once("sendspin: %q holds no role now", name)
 				continue
 			}
-			regained := !rolelessSince.IsZero()
+			regained := roleless
 			if err := c.hold(session, available); err != nil {
 				_ = session.Goodbye(goodbyeConcurrent)
 				return err
 			}
-			if !rolelessSince.IsZero() {
-				rolelessSpent += time.Since(rolelessSince)
-				rolelessSince = time.Time{}
-			}
-			if roleless != nil {
-				roleless.Stop()
-				roleless = nil
-			}
+			roleless = false
 			if !stated {
-				ws.setIdle(idleWait)
-				go c.keepalive(ws, nc, stop, waitOr(c.pingEvery, pingAfter))
 				if err := c.state(session, available); err != nil {
 					return err
 				}

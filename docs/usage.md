@@ -161,10 +161,10 @@ deploy/uninstall.py
   running, not a supervisor respawning a half-deleted install.
 - The daemon gets `SIGTERM`, so it releases the button and destroys its uinput
   clones.
-- It removes the boot script, the binary, the API key, the Sendspin identity
-  and its pairing records, `/data/local/map`, the log, and every
-  `persist.overdub.*` property. A new
-  install starts with Sendspin on and no output delay.
+- It removes the boot script, the binary, the API key, the Sendspin identity,
+  its pairing records and the last server to play, `/data/local/map`, the log,
+  and every `persist.overdub.*` property. A new install starts with Sendspin on
+  and no output delay.
 - `/data/local/bin` goes too if it is then empty.
 - The tcp/6053 and tcp/8928 rules go once the daemon is confirmed gone, so no
   reboot is needed. An uninstall that reports trouble stops before this step.
@@ -471,6 +471,9 @@ To register a Dot:
 - Unpairing in Music Assistant while the Dot is connected and paired removes
   the record on the Dot as well. Otherwise the Dot keeps a record no server
   uses, until 9 newer pairings evict it.
+- After an unpair, Music Assistant does not reconnect by itself. When the
+  daemon next starts, Music Assistant connects again, unpaired, and plays
+  nothing until you pair the Dot again or allow guest access.
 
 ### Encryption
 

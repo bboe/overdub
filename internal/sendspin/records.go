@@ -136,7 +136,15 @@ func (r *Records) save(next []record) error {
 	for _, rec := range next {
 		raw = append(append(raw, rec.server...), rec.psk...)
 	}
-	f, err := os.CreateTemp(filepath.Dir(r.path), filepath.Base(r.path)+".new-")
+	if err := replaceFile(r.path, raw); err != nil {
+		return err
+	}
+	r.list = next
+	return nil
+}
+
+func replaceFile(path string, raw []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".new-")
 	if err != nil {
 		return err
 	}
@@ -153,9 +161,5 @@ func (r *Records) save(next []record) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, r.path); err != nil {
-		return err
-	}
-	r.list = next
-	return nil
+	return os.Rename(tmp, path)
 }
