@@ -142,14 +142,18 @@ func TestPairingMethodMustMatchTheMatchedPSK(t *testing.T) {
 	}
 }
 
-func TestOfferingNoPairingMethodRefusesEveryPairingActivation(t *testing.T) {
-	for _, method := range []string{methodPairingPSK, "static_pairing_code", "dynamic_pairing_code"} {
+func TestOnlyThePairingPSKMethodIsOffered(t *testing.T) {
+	for _, c := range []struct{ method, want string }{
+		{methodPairingPSK, ""},
+		{"static_pairing_code", abortMethodNotSupported},
+		{"dynamic_pairing_code", abortMethodNotSupported},
+	} {
 		d := decideActivate(categoryPairing, true, offeredPairMethods(), serverActivate{
 			Activities: []string{activityPairing},
-			Pairing:    &activatePairing{Method: method},
+			Pairing:    &activatePairing{Method: c.method},
 		}, nil)
-		if d.PairAbort != abortMethodNotSupported {
-			t.Errorf("%s: abort = %q, want %q", method, d.PairAbort, abortMethodNotSupported)
+		if d.PairAbort != c.want {
+			t.Errorf("%s: abort = %q, want %q", c.method, d.PairAbort, c.want)
 		}
 	}
 }
@@ -185,8 +189,10 @@ func TestHelloDeclaresPlayerAndTheFormatWeCanPlay(t *testing.T) {
 			" until the client asks for another, and the speaker runs at 48 kHz",
 			offered, want)
 	}
-	if len(h.SupportedPairMethods) != 0 {
-		t.Error("no pairing method is implemented yet, so none may be advertised")
+	if _, ok := h.SupportedPairMethods[methodPairingPSK]; !ok || len(h.SupportedPairMethods) != 1 {
+		t.Errorf("supported_pair_methods = %v, want pairing_psk alone: a client must offer"+
+			" it, and a server flags a hello without it as non-compliant",
+			h.SupportedPairMethods)
 	}
 	if !h.UnpairedAccess.Enabled {
 		t.Error("unpaired_access did not carry the configured value")
@@ -344,6 +350,7 @@ func TestClientHelloIsExactlyThisOnTheWire(t *testing.T) {
 		`"sample_rate":48000,"bit_depth":16},{"codec":"flac","channels":2,` +
 		`"sample_rate":44100,"bit_depth":16},{"codec":"pcm","channels":2,` +
 		`"sample_rate":44100,"bit_depth":16}],"buffer_capacity":65536},` +
+		`"supported_pair_methods":{"pairing_psk":{}},` +
 		`"unpaired_access":{"enabled":true}}}`
 	if string(got) != want {
 		t.Errorf("client/hello is\n%s\nwant\n%s", got, want)

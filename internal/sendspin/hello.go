@@ -243,7 +243,9 @@ func (c Config) playerCommands() []string {
 	return out
 }
 
-func offeredPairMethods() map[string]pairMethod { return map[string]pairMethod{} }
+func offeredPairMethods() map[string]pairMethod {
+	return map[string]pairMethod{methodPairingPSK: {}}
+}
 
 func supportedRoles() []string { return []string{rolePlayerV1} }
 
@@ -305,10 +307,16 @@ func (s *Session) Activate(payload json.RawMessage) ([]string, error) {
 	if err := json.Unmarshal(payload, &act); err != nil {
 		return nil, fmt.Errorf("%w: server/activate: %w", errHandshake, err)
 	}
+	s.endQuiet()
+	s.endAttempt()
+	pairing := slices.Contains(act.Activities, activityPairing)
+	if pairing {
+		s.countPairing()
+	}
 	d := decideActivate(s.matched, s.unpaired, s.offered, act, s.roles)
 	switch {
 	case d.Goodbye != "":
-		_ = s.WriteJSON(typeClientGoodbye, goodbye{Reason: d.Goodbye})
+		_ = s.Goodbye(d.Goodbye)
 		return nil, fmt.Errorf("%w: refused server/activate: %s", errHandshake, d.Goodbye)
 	case d.PairAbort != "":
 		if err := s.WriteJSON(typePairAbort, pairAbort{Reason: d.PairAbort}); err != nil {
@@ -320,6 +328,11 @@ func (s *Session) Activate(payload json.RawMessage) ([]string, error) {
 	if !holdsPlayer(s.roles) {
 		s.streaming = false
 	}
+	if pairing {
+		if err := s.startPairing(waitOr(s.attemptWait, attemptWait)); err != nil {
+			return nil, err
+		}
+	}
 	return s.roles, nil
 }
 
@@ -330,7 +343,11 @@ func (s *Session) closeWS(code int, reason string) error {
 }
 
 func (s *Session) Goodbye(reason string) error {
-	return s.WriteJSON(typeClientGoodbye, goodbye{Reason: reason})
+	body, err := marshalEnvelope(typeClientGoodbye, goodbye{Reason: reason})
+	if err != nil {
+		return err
+	}
+	return s.writeTyped(msgJSON, body, true)
 }
 
 const (

@@ -171,6 +171,9 @@
   section says the same.
 - The filter is an allowlist, not "anything echoed", because `adb` merges
   stderr into stdout and a linker warning from `su` would read as a leftover.
+- The Sendspin paths are Go constants too. `main_test.go` checks that
+  `install.py` names `sendspinKeyPath`, and that `uninstall.py` names it and
+  `sendspinPairsPath`.
 - The ports are Go constants (`apiPort`, `sendspin.Port`), which Python cannot
   read, so the script assigns its own constants. `main_test.go` compares them
   against both constants. The read-back alone would show a moved port only as a

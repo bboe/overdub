@@ -133,6 +133,7 @@ type Client struct {
 	volumeEvery      time.Duration
 	outputEvery      time.Duration
 	answerAfter      time.Duration
+	attemptAfter     time.Duration
 
 	Peer *untrustedlog.Log
 	Play *untrustedlog.Log
@@ -332,6 +333,7 @@ func (c *Client) serveConn(nc net.Conn) {
 		c.Peer.Printf("sendspin: %v", err)
 		return
 	}
+	session.attemptWait = c.attemptAfter
 	c.track(nc, session)
 	name, err := session.Greet(c.Config)
 	if err != nil {
@@ -386,6 +388,7 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 	stated := false
 	synced := false
 	available := false
+	rekeyed := false
 	var roleless *time.Timer
 	var rolelessSince time.Time
 	var rolelessSpent time.Duration
@@ -438,12 +441,29 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 		if err != nil {
 			return err
 		}
+		switch {
+		case kind == typeNoiseHandshake:
+			if err := session.Rehandshake(payload, c.Keys, c.PSKs); err != nil {
+				return err
+			}
+			rekeyed = true
+			c.Peer.Printf("sendspin: %q re-keyed the connection onto the %s psk", name,
+				session.Matched())
+			continue
+		case pairingKind(kind):
+			if err := c.pairingMessage(session, kind, payload, name, once); err != nil {
+				return err
+			}
+			continue
+		}
 		switch kind {
 		case typeServerActivate:
 			roles, err := session.Activate(payload)
 			if err != nil {
 				return err
 			}
+			resync := rekeyed
+			rekeyed = false
 			if !holdsPlayer(roles) {
 				heard.done(c.Play, name)
 				play.stop()
@@ -492,6 +512,10 @@ func (c *Client) run(nc net.Conn, ws *Conn, session *Session, name string) error
 				go c.watchVolume(stop)
 				go c.watchOutput(session, nc, stop, name)
 				stated = true
+			} else if resync {
+				if err := c.state(session, available); err != nil {
+					return err
+				}
 			} else if regained {
 				c.tellServer()
 			}

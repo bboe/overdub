@@ -140,6 +140,8 @@ type serverSide struct {
 	send *noise.CipherState
 	recv *noise.CipherState
 	id   string
+	pair noise.DHKey
+	hash []byte
 }
 
 func (v *serverSide) sealJSON(t *testing.T, kind string, payload any) []byte {
@@ -269,7 +271,7 @@ func driveServer(t *testing.T, p *wsPeer, plan serverPlan) *serverSide {
 	if cs1 == nil || cs2 == nil {
 		t.Fatal("server handshake did not complete on message 2")
 	}
-	return &serverSide{send: cs1, recv: cs2, id: serverID}
+	return &serverSide{send: cs1, recv: cs2, id: serverID, pair: pair, hash: hs.ChannelBinding()}
 }
 
 func pipePair(t *testing.T) (net.Conn, net.Conn) {
@@ -527,7 +529,7 @@ func TestClientInitCarriesTheIdentity(t *testing.T) {
 func TestSelectPSKMissesAKeyHeldUnderAnotherCategory(t *testing.T) {
 	psk := bytes.Repeat([]byte{0x22}, pskLen)
 	psks := PSKSet{Pairing: psk}
-	got, cat, err := psks.selectPSK(PSKID(psk), categoryLongTerm)
+	got, cat, err := psks.selectPSK(PSKID(psk), categoryLongTerm, "", true)
 	if err != nil {
 		t.Fatalf("selectPSK: %v", err)
 	}
@@ -538,7 +540,7 @@ func TestSelectPSKMissesAKeyHeldUnderAnotherCategory(t *testing.T) {
 
 func TestSelectPSKMatchesTheSentinel(t *testing.T) {
 	psks := PSKSet{}
-	got, cat, err := psks.selectPSK(PSKID(SentinelPSK()), categorySentinel)
+	got, cat, err := psks.selectPSK(PSKID(SentinelPSK()), categorySentinel, "", true)
 	if err != nil {
 		t.Fatalf("selectPSK: %v", err)
 	}
@@ -560,7 +562,7 @@ func TestAHandshakeWithNoCategoryMatchesEveryCandidate(t *testing.T) {
 		{"a pairing psk", keys.PairingPSK, categoryPairing},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			psk, matched, err := set.selectPSK(PSKID(c.psk), "")
+			psk, matched, err := set.selectPSK(PSKID(c.psk), "", "", true)
 			if err != nil {
 				t.Fatalf("an absent psk_category was refused: %v; aiosendspin 9.1.1 sends none,"+
 					" so this is every real handshake", err)

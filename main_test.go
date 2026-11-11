@@ -82,6 +82,26 @@ func TestUninstallDeletesTheRuleTheDaemonOpens(t *testing.T) {
 	}
 }
 
+func TestTheScriptsNameTheSendspinFilesTheDaemonKeeps(t *testing.T) {
+	for _, c := range []struct {
+		script string
+		paths  []string
+	}{
+		{"deploy/install.py", []string{sendspinKeyPath}},
+		{"deploy/uninstall.py", []string{sendspinKeyPath, sendspinPairsPath}},
+	} {
+		script, err := os.ReadFile(c.script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range c.paths {
+			if !strings.Contains(string(script), `"`+path+`"`) {
+				t.Errorf("%s does not name %s, which the daemon keeps", c.script, path)
+			}
+		}
+	}
+}
+
 func TestTheScriptsUseTheKeyPathTheDaemonReads(t *testing.T) {
 	for _, name := range []string{"deploy/install.py", "deploy/uninstall.py"} {
 		script, err := os.ReadFile(name)
@@ -530,7 +550,7 @@ func TestTogglingSendspinDoesNotHandOutAFreshLogBudget(t *testing.T) {
 		name: "kitchen", mac: "00:00:00:00:00:01",
 		peer: &untrustedlog.Log{Subject: "sendspin"},
 	}
-	first := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, toggle.peer, 0, true, nil)
+	first := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, nil, toggle.peer, 0, true, nil)
 	for i := 0; i < untrustedlog.Burst; i++ {
 		first.Peer.Printf("sendspin: line %d", i)
 	}
@@ -539,7 +559,7 @@ func TestTogglingSendspinDoesNotHandOutAFreshLogBudget(t *testing.T) {
 		t.Fatalf("wrote %d lines, want the burst of %d", spent, untrustedlog.Burst)
 	}
 
-	next := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, toggle.peer, 0, true, nil)
+	next := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, nil, toggle.peer, 0, true, nil)
 	next.Peer.Printf("sendspin: after the switch came back")
 	if got := next.Peer.Written(); got != spent {
 		t.Errorf("the switch-on wrote %d lines against a budget that had already spent %d; "+
@@ -798,7 +818,7 @@ func TestAnAdvertIsNeverPublishedForASurfaceAlreadySwitchedOff(t *testing.T) {
 }
 
 func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
-	client := sendspinClient("kitchen", "00:00:00:00:00:01", sendspin.Keys{}, nil, nil, 0, true, nil)
+	client := sendspinClient("kitchen", "00:00:00:00:00:01", sendspin.Keys{}, nil, nil, nil, 0, true, nil)
 	if client.RequiredLeadMS != sendspinLead {
 		t.Fatalf("the client declares a %d ms lead where this dot needs %d, so a server may"+
 			" send a first chunk sooner than the mapping can be placed",
@@ -948,7 +968,7 @@ func TestADelayAServerSetsIsWhatHomeAssistantIsShown(t *testing.T) {
 
 func TestTheDelayTheClientStartsWithIsTheOneTheSwitchHolds(t *testing.T) {
 	toggle := &sendspinSwitch{peer: &untrustedlog.Log{Subject: "sendspin"}, delayMS: 700}
-	client := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, toggle.peer,
+	client := sendspinClient(toggle.name, toggle.mac, sendspin.Keys{}, nil, nil, toggle.peer,
 		toggle.Delay(), false, toggle.keepDelay)
 	if client.DelayMS != 700 {
 		t.Errorf("a client built while the switch held 700 ms starts at %d: the property"+

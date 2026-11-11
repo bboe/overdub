@@ -4,7 +4,8 @@ Run through internal/sendspin/interop_test.go, which passes the Dot's
 WebSocket URL and client_id. Exits non-zero with a reason on any mismatch.
 With --play-seconds, the client must have a player: the server streams that
 much of flac_vector.pattern in whatever format the client prefers, and the Go
-side checks what arrived.
+side checks what arrived. With --pairing-psk, the server then pairs with that
+Pairing PSK, reconnects as a fresh server holding only the record, and unpairs.
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ from typing import TYPE_CHECKING
 
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ClientTimeMessage
+from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
@@ -63,11 +66,69 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--client-id", required=True)
+    ap.add_argument("--pairing-psk", default="")
     ap.add_argument("--play-seconds", default=0, type=float)
     args = ap.parse_args()
     return asyncio.run(
-        run(client_id=args.client_id, play_seconds=args.play_seconds, url=args.url)
+        run(
+            client_id=args.client_id,
+            pairing_psk=bytes.fromhex(args.pairing_psk),
+            play_seconds=args.play_seconds,
+            url=args.url,
+        )
     )
+
+
+async def pair(
+    *,
+    client_id: str,
+    identity: Identity,
+    pairing_psk: bytes,
+    server: SendspinServer,
+    url: str,
+) -> list[str]:
+    loop = asyncio.get_running_loop()
+    failures: list[str] = []
+    await server.initiate_pairing(
+        client_id,
+        PairingAttempt(
+            PairMethod.PAIRING_PSK, client_id=client_id, pairing_psk=pairing_psk
+        ),
+    )
+    client = server.get_or_create_client(client_id)
+    print(f"paired              = {client.is_paired}")
+    if not client.is_paired:
+        return ["the server did not pair over the pairing psk"]
+    store = server.pairing_store
+    await server.close()
+
+    again = SendspinServer(loop, identity, "interop test server", pairing_store=store)
+    try:
+        again.register_client_url(client_id, url)
+        await again.connect_to_client_and_wait(url)
+        client = again.get_or_create_client(client_id)
+        deadline = loop.time() + SETTLE_TIMEOUT_S
+        while loop.time() < deadline:
+            if client.is_paired and "player@v1" in set(client.active_role_ids):
+                break
+            await asyncio.sleep(POLL_S)
+        print(f"reconnected paired  = {client.is_paired}")
+        print(f"reconnected roles   = {sorted(client.active_role_ids)}")
+        if not client.is_paired:
+            failures.append("a fresh server holding the record did not connect paired")
+        if "player@v1" not in set(client.active_role_ids):
+            failures.append("the paired reconnect never activated the player")
+        await again.unpair(client_id)
+        deadline = loop.time() + SETTLE_TIMEOUT_S
+        while loop.time() < deadline:
+            if not client.is_connected:
+                break
+            await asyncio.sleep(POLL_S)
+        if client.is_connected:
+            failures.append("the client stayed connected after server/unpair")
+    finally:
+        await again.close()
+    return failures
 
 
 async def play(*, client: SendspinClient, seconds: float) -> None:
@@ -84,19 +145,16 @@ async def play(*, client: SendspinClient, seconds: float) -> None:
 
 
 async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-statements]
-    *, client_id: str, play_seconds: float, url: str
+    *, client_id: str, pairing_psk: bytes, play_seconds: float, url: str
 ) -> int:
     loop = asyncio.get_running_loop()
     exchanges = count_time_exchanges()
     complaints = _Complaints()
     logging.getLogger("aiosendspin").addHandler(complaints)
     logging.getLogger("aiosendspin").setLevel(logging.WARNING)
-    server = SendspinServer(
-        loop,
-        Identity.generate(),
-        "interop test server",
-        pairing_store=InMemoryServerPairingStore(),
-    )
+    identity = Identity.generate()
+    store = InMemoryServerPairingStore()
+    server = SendspinServer(loop, identity, "interop test server", pairing_store=store)
     # Operator approval: what lets an unpaired Sentinel session reach playback.
     await server.trust_unpaired(client_id)
     server.register_client_url(client_id, url)
@@ -149,6 +207,14 @@ async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-st
         elif client.available:
             failures.append(
                 "the client reported available while it has no clock or audio"
+            )
+        if pairing_psk and not failures:
+            failures += await pair(
+                client_id=client_id,
+                identity=identity,
+                pairing_psk=pairing_psk,
+                server=server,
+                url=url,
             )
         failures.extend(
             f"server complained: {line}"

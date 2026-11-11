@@ -29,11 +29,18 @@ func (s *Session) WriteJSON(kind string, payload any) error {
 }
 
 func (s *Session) WriteTyped(kind byte, body []byte) error {
+	return s.writeTyped(kind, body, false)
+}
+
+func (s *Session) writeTyped(kind byte, body []byte, force bool) error {
 	if kind == msgFragment {
 		return fmt.Errorf("%w: %#x is the fragment type", errTransport, kind)
 	}
 	s.writing.Lock()
 	defer s.writing.Unlock()
+	if s.quiet && !force {
+		return nil
+	}
 	if len(body) <= maxFrameBody {
 		return s.seal(append([]byte{kind}, body...))
 	}

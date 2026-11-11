@@ -32,6 +32,7 @@ ADB_KEYS = BIN_DIR + "/adb_keys"
 APPLIED = BIN_DIR + "/.overdub-applied"
 BINARY = BIN_DIR + "/overdub"
 BOOT = "/sbin/.core/img/.core/service.d/overdub.sh"
+BUSYBOX = "/system/bin/busybox"
 CLEANUP_WAIT = 30
 DNS_LABEL = 63
 KEY = "/data/local/bin/.overdub-noise-key"
@@ -51,7 +52,10 @@ LS_LINES = (
 )
 MAP_DIR = "/data/local/map"
 MD5_SHAPE = re.compile(r"^[0-9a-f]{32}", re.MULTILINE)
+OD_LINE = re.compile(r"(?:\s*[0-9a-f]{2})+\s*")
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+SENDKEY = "/data/local/bin/.overdub-sendspin-key"
+SENDKEY_BYTES = 64
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(
     adb_key_landed=False,
@@ -67,6 +71,9 @@ STATE = argparse.Namespace(
     warned=False,
 )
 STOP_SIGNALS = ("SIGBREAK", "SIGHUP", "SIGINT", "SIGTERM")
+X25519_A24 = 121665
+X25519_BASE = 9
+X25519_PRIME = 2**255 - 19
 
 
 def adb(*args: str) -> tuple[int, str]:
@@ -568,6 +575,7 @@ def main() -> None:
     install_mapdump()
     install_boot_script(boot_script)
     restart(name)
+    print_pairing_token()
     print()
     if STATE.changed:
         print(
@@ -615,10 +623,47 @@ def overdub_pid() -> str | None:
     return ""
 
 
+def pairing_token(key: bytes) -> str:
+    body = base64.b32encode(x25519_public(key[:32]) + key[32:]).decode()
+    return "SP:0" + body.rstrip("=").replace("2", "9")
+
+
 def pending(*, detail: str, label: str) -> None:
     if sys.stdout.isatty():
         print(f"   {label:<{LABEL}} {detail} ...", end="", flush=True)
         STATE.pending = True
+
+
+def print_pairing_token() -> None:
+    code, answer = su(
+        f"[ -e {SENDKEY} ] || echo --no-key--;"
+        f" {BUSYBOX} od -v -An -tx1 {SENDKEY} && echo --read-ok--"
+    )
+    lines = answer.split("\n")
+    if "--no-key--" in lines:
+        warn(
+            "pairing",
+            "The daemon has not made its Sendspin key yet. Install again once it"
+            " runs to see the pairing token.",
+        )
+        return
+    if code != 0 or "--read-ok--" not in lines:
+        warn("pairing", "Could not read the Sendspin key off the device.")
+        return
+    key = bytes.fromhex(
+        "".join(line for line in lines if OD_LINE.fullmatch(line)).replace(" ", "")
+    )
+    if len(key) != SENDKEY_BYTES:
+        warn("pairing", f"The Sendspin key is {len(key)} bytes, want {SENDKEY_BYTES}.")
+        return
+    ok("pairing", "read the Sendspin key")
+    print()
+    print("   To pair Music Assistant with this device, paste this token into")
+    print("   its Sendspin player settings. Anyone holding it can pair a")
+    print("   server with this device:")
+    print()
+    print(f"       {pairing_token(key)}", flush=True)
+    print()
 
 
 def probe(expression: str) -> str | None:
@@ -792,6 +837,46 @@ def usage(message: str) -> NoReturn:
 def warn(label: str, *lines: str) -> None:
     STATE.warned = True
     show(*lines, label=label, sign=mark("warn"))
+
+
+def x25519_ladder_step(
+    x_2: int, z_2: int, x_3: int, z_3: int
+) -> tuple[int, int, int, int]:
+    prime = X25519_PRIME
+    add_2 = x_2 + z_2
+    add_2_squared = add_2 * add_2 % prime
+    subtract_2 = x_2 - z_2
+    subtract_2_squared = subtract_2 * subtract_2 % prime
+    difference = add_2_squared - subtract_2_squared
+    cross_left = (x_3 - z_3) * add_2 % prime
+    cross_right = (x_3 + z_3) * subtract_2 % prime
+    return (
+        add_2_squared * subtract_2_squared % prime,
+        difference * (add_2_squared + X25519_A24 * difference) % prime,
+        pow(cross_left + cross_right, 2, prime),
+        X25519_BASE * pow(cross_left - cross_right, 2, prime) % prime,
+    )
+
+
+def x25519_public(private: bytes) -> bytes:
+    clamped = bytearray(private)
+    clamped[0] &= 248
+    clamped[31] &= 127
+    clamped[31] |= 64
+    scalar = int.from_bytes(clamped, "little")
+    x_2, z_2, x_3, z_3 = 1, 0, X25519_BASE, 1
+    swap = 0
+    for bit_index in reversed(range(255)):
+        bit = (scalar >> bit_index) & 1
+        swap ^= bit
+        if swap:
+            x_2, x_3, z_2, z_3 = x_3, x_2, z_3, z_2
+        swap = bit
+        x_2, z_2, x_3, z_3 = x25519_ladder_step(x_2, z_2, x_3, z_3)
+    if swap:
+        x_2, z_2 = x_3, z_3
+    prime = X25519_PRIME
+    return (x_2 * pow(z_2, prime - 2, prime) % prime).to_bytes(32, "little")
 
 
 def yes_no(text: str) -> str | None:

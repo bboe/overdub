@@ -21,6 +21,13 @@ Installing overdub as kitchen on <serial>.
 ✅ mapdump.jar    md5 524a11ae43fffe6774f4ca2daf8249e2; Alexa commands on
 ✅ boot script    service.d/overdub.sh
 ✅ daemon         restarted as -name kitchen, pid 364 -> 2606
+✅ pairing        read the Sendspin key
+
+   To pair Music Assistant with this device, paste this token into
+   its Sendspin player settings. Anyone holding it can pair a
+   server with this device:
+
+       SP:0...
 
 Installed. Home Assistant must be able to reach this device on tcp/6053;
 README.md says how.
@@ -154,15 +161,17 @@ deploy/uninstall.py
   running, not a supervisor respawning a half-deleted install.
 - The daemon gets `SIGTERM`, so it releases the button and destroys its uinput
   clones.
-- It removes the boot script, the binary, the API key, the Sendspin identity,
-  `/data/local/map`, the log, and every `persist.overdub.*` property. A new
+- It removes the boot script, the binary, the API key, the Sendspin identity
+  and its pairing records, `/data/local/map`, the log, and every
+  `persist.overdub.*` property. A new
   install starts with Sendspin on and no output delay.
 - `/data/local/bin` goes too if it is then empty.
 - The tcp/6053 and tcp/8928 rules go once the daemon is confirmed gone, so no
   reboot is needed. An uninstall that reports trouble stops before this step.
 - Removing the jar revokes nothing; see [Alexa commands](#alexa-commands).
 - The Sendspin identity matters as much as the API key: the pairing token
-  derives from it, so a copy left behind stays valid.
+  derives from it, so a copy left behind stays valid. A server that paired
+  keeps its record; remove the player there too.
 - Amazon's stack is untouched. Delete the device in Home Assistant when done.
 - A later install generates a new API key. `/data/misc/adb/adb_keys` stays:
   adbd reads it only while `ro.adb.secure` is 1, which nothing sets after an
@@ -445,6 +454,23 @@ To register a Dot:
 > **Secure is authentication, not a sandbox.** `ro.secure=1` on this build, so
 > adbd runs as `shell` and root comes from `su`. A client with the key still
 > reaches root. Do not expose tcp/5555 beyond your own network.
+
+### Pairing with Music Assistant
+
+- Every install prints the pairing token once the daemon has made its
+  Sendspin key. A first install may print a warning instead; install again
+  once the daemon runs.
+- Paste the token into Music Assistant where it offers to pair the player.
+  The daemon logs `paired with`, and its next connection logs `complete on the
+  lt psk`.
+- **Treat the token as a password.** It never changes, and it pairs any server
+  that holds it. The installer keeps no copy. To rotate it, delete
+  `/data/local/bin/.overdub-sendspin-key` and restart the daemon. Every server
+  then sees a new player, and the old pairing records go unused.
+- Pairing does not shut out unpaired servers: the Dot keeps unpaired access on.
+- Unpairing in Music Assistant while the Dot is connected and paired removes
+  the record on the Dot as well. Otherwise the Dot keeps a record no server
+  uses, until 9 newer pairings evict it.
 
 ### Encryption
 

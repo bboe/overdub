@@ -30,10 +30,24 @@ LOG = "/data/local/tmp/overdub.log"
 MAP = "/data/local/map"
 SENDFLAG = "persist.overdub.sendspin"
 SENDKEY = "/data/local/bin/.overdub-sendspin-key"
+SENDPAIRS = "/data/local/bin/.overdub-sendspin-pairs"
 SENDSPIN_PORT = 8928
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(changed=False, pending=False, warned=False)
-SWEPT = [BOOT, BIN, BIN + ".new", KEY, SENDKEY, ADBKEY, APPLIED, STAGE, MAP, LOG]
+SWEPT = [
+    BOOT,
+    BIN,
+    BIN + ".new",
+    KEY,
+    SENDKEY,
+    SENDPAIRS,
+    ADBKEY,
+    APPLIED,
+    STAGE,
+    MAP,
+    LOG,
+]
+TEMPS = (SENDKEY + ".new-", SENDPAIRS + ".new-")
 
 
 def adb(*args: str) -> tuple[int, str]:
@@ -90,7 +104,8 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
 
     su(f"rm -f {BOOT}")
     su(
-        f"rm -f {BIN} {BIN}.new {KEY} {SENDKEY} {SENDKEY}.new-* {ADBKEY} {APPLIED}\n"
+        f"rm -f {BIN} {BIN}.new {KEY} {SENDKEY} {SENDKEY}.new-* {SENDPAIRS}"
+        f" {SENDPAIRS}.new-* {ADBKEY} {APPLIED}\n"
         f"rm -rf {STAGE} {MAP}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh"
     )
@@ -288,16 +303,14 @@ def pending(*, detail: str, label: str) -> None:
 
 def present() -> list[str] | None:
     answer = su(
-        f"for path in {' '.join(SWEPT)} {SENDKEY}.new-*; do\n"
+        f"for path in {' '.join(SWEPT)} {SENDKEY}.new-* {SENDPAIRS}.new-*; do\n"
         '  [ -e "$path" ] && echo "$path"\n'
         "done\n"
         "echo swept"
     )[1].split("\n")
     if "swept" not in answer:
         return None
-    return [
-        line for line in answer if line in SWEPT or line.startswith(SENDKEY + ".new-")
-    ]
+    return [line for line in answer if line in SWEPT or line.startswith(TEMPS)]
 
 
 def show(*lines: str, label: str, sign: str, stream: TextIO = sys.stdout) -> None:

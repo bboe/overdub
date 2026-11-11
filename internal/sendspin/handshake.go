@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/flynn/noise"
 
@@ -73,38 +75,117 @@ var (
 
 type PSKSet struct {
 	Pairing []byte
+	Records *Records
 }
 
-func (p PSKSet) selectPSK(id string, cat category) ([]byte, category, error) {
-	try := func(c category) ([]byte, bool) {
+func (p PSKSet) selectPSK(id string, cat category, serverID string, fallback bool) ([]byte, category, error) {
+	try := func(c category) ([]byte, error) {
 		switch c {
+		case categoryLongTerm:
+			rec, ok := p.Records.find(id)
+			if !ok {
+				return nil, nil
+			}
+			if rec.serverID() != serverID {
+				return nil, fmt.Errorf("%w: the long-term psk named belongs to another server",
+					errHandshake)
+			}
+			return rec.psk, nil
 		case categoryPairing:
 			if len(p.Pairing) == pskLen && PSKID(p.Pairing) == id {
-				return p.Pairing, true
+				return p.Pairing, nil
 			}
 		case categorySentinel:
 			if sentinel := SentinelPSK(); PSKID(sentinel) == id {
-				return sentinel, true
+				return sentinel, nil
 			}
 		}
-		return nil, false
+		return nil, nil
 	}
 
 	var order []category
 	switch cat {
 	case "":
-		order = []category{categoryPairing, categorySentinel}
+		order = []category{categoryLongTerm, categoryPairing, categorySentinel}
 	case categoryLongTerm, categoryPairing, categorySentinel:
 		order = []category{cat}
 	default:
 		return nil, "", fmt.Errorf("%w: unknown psk_category %q", errHandshake, untrustedlog.Cut(string(cat)))
 	}
 	for _, c := range order {
-		if psk, ok := try(c); ok {
+		psk, err := try(c)
+		if err != nil {
+			return nil, "", err
+		}
+		if psk != nil {
 			return psk, c, nil
 		}
 	}
+	if !fallback {
+		return nil, "", fmt.Errorf("%w: no psk matches the one the server named", errHandshake)
+	}
 	return SentinelPSK(), categorySentinel, nil
+}
+
+type keyed struct {
+	send     *noise.CipherState
+	recv     *noise.CipherState
+	matched  category
+	longTerm string
+	hash     []byte
+}
+
+func respond(keys Keys, peer, prologue, first []byte, psks PSKSet, serverID string,
+	fallback bool) ([]byte, keyed, error) {
+
+	hs, err := noise.NewHandshakeState(noise.Config{
+		CipherSuite:           noiseSuite,
+		Pattern:               noise.HandshakeKK,
+		Initiator:             false,
+		PresharedKeyPlacement: 2,
+		StaticKeypair: noise.DHKey{
+			Private: keys.Identity.Private,
+			Public:  keys.Identity.Public,
+		},
+		PeerStatic: peer,
+		Prologue:   prologue,
+	})
+	if err != nil {
+		return nil, keyed{}, fmt.Errorf("%w: %w", errHandshake, err)
+	}
+	intro, _, _, err := hs.ReadMessage(nil, first)
+	if err != nil {
+		return nil, keyed{}, fmt.Errorf("%w: noise message 1: %w", errHandshake, err)
+	}
+	var hi handshakeIntro
+	if err := json.Unmarshal(intro, &hi); err != nil {
+		return nil, keyed{}, fmt.Errorf("%w: noise message 1 payload: %w", errHandshake, err)
+	}
+	psk, matched, err := psks.selectPSK(hi.PSKID, hi.Category, serverID, fallback)
+	if err != nil {
+		return nil, keyed{}, err
+	}
+	if err := hs.SetPresharedKey(psk); err != nil {
+		return nil, keyed{}, fmt.Errorf("%w: %w", errHandshake, err)
+	}
+	second, cs1, cs2, err := hs.WriteMessage(nil, []byte(emptyPayload))
+	if err != nil {
+		return nil, keyed{}, fmt.Errorf("%w: noise message 2: %w", errHandshake, err)
+	}
+	if cs1 == nil || cs2 == nil {
+		return nil, keyed{}, fmt.Errorf("%w: handshake did not complete on message 2", errHandshake)
+	}
+	k := keyed{send: cs2, recv: cs1, matched: matched, hash: hs.ChannelBinding()}
+	if matched == categoryLongTerm {
+		k.longTerm = PSKID(psk)
+	}
+	return second, k, nil
+}
+
+func noiseEnvelope(data []byte) ([]byte, error) {
+	return marshalEnvelope(typeNoiseHandshake, noiseFrame{
+		Data: base64.RawURLEncoding.EncodeToString(data),
+	})
 }
 
 type Session struct {
@@ -114,6 +195,17 @@ type Session struct {
 
 	matched  category
 	serverID string
+	peer     []byte
+	hash     []byte
+	longTerm atomic.Value
+
+	quiet bool
+
+	pairing      sync.Mutex
+	pairIndex    int
+	pending      []byte
+	pendingTimer *time.Timer
+	attemptWait  time.Duration
 
 	writing sync.Mutex
 	report  chan struct{}
@@ -170,52 +262,16 @@ func Handshake(ws *Conn, keys Keys, psks PSKSet) (*Session, error) {
 	}
 	serverID := EncodeID(peer)
 
-	hs, err := noise.NewHandshakeState(noise.Config{
-		CipherSuite:           noiseSuite,
-		Pattern:               noise.HandshakeKK,
-		Initiator:             false,
-		PresharedKeyPlacement: 2,
-		StaticKeypair: noise.DHKey{
-			Private: keys.Identity.Private,
-			Public:  keys.Identity.Public,
-		},
-		PeerStatic: peer,
-		Prologue:   append(append([]byte{}, initBytes...), serverInitBytes...),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errHandshake, err)
-	}
-
 	_, first, err := readNoiseMessage(ws)
 	if err != nil {
 		return nil, err
 	}
-	intro, _, _, err := hs.ReadMessage(nil, first)
-	if err != nil {
-		return nil, fmt.Errorf("%w: noise message 1: %w", errHandshake, err)
-	}
-	var hi handshakeIntro
-	if err := json.Unmarshal(intro, &hi); err != nil {
-		return nil, fmt.Errorf("%w: noise message 1 payload: %w", errHandshake, err)
-	}
-	psk, matched, err := psks.selectPSK(hi.PSKID, hi.Category)
+	prologue := append(append([]byte{}, initBytes...), serverInitBytes...)
+	second, k, err := respond(keys, peer, prologue, first, psks, serverID, true)
 	if err != nil {
 		return nil, err
 	}
-	if err := hs.SetPresharedKey(psk); err != nil {
-		return nil, fmt.Errorf("%w: %w", errHandshake, err)
-	}
-
-	second, cs1, cs2, err := hs.WriteMessage(nil, []byte(emptyPayload))
-	if err != nil {
-		return nil, fmt.Errorf("%w: noise message 2: %w", errHandshake, err)
-	}
-	if cs1 == nil || cs2 == nil {
-		return nil, fmt.Errorf("%w: handshake did not complete on message 2", errHandshake)
-	}
-	frame, err := marshalEnvelope(typeNoiseHandshake, noiseFrame{
-		Data: base64.RawURLEncoding.EncodeToString(second),
-	})
+	frame, err := noiseEnvelope(second)
 	if err != nil {
 		return nil, err
 	}
@@ -224,15 +280,19 @@ func Handshake(ws *Conn, keys Keys, psks PSKSet) (*Session, error) {
 	}
 
 	ws.setReadLimit(maxMessage)
-	return &Session{
+	s := &Session{
 		ws:       ws,
-		send:     cs2,
-		recv:     cs1,
-		matched:  matched,
+		send:     k.send,
+		recv:     k.recv,
+		matched:  k.matched,
 		serverID: serverID,
+		peer:     peer,
+		hash:     k.hash,
 		clock:    newClock(),
 		report:   make(chan struct{}, 1),
-	}, nil
+	}
+	s.longTerm.Store(k.longTerm)
+	return s, nil
 }
 
 func marshalEnvelope(kind string, payload any) ([]byte, error) {

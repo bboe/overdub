@@ -35,8 +35,9 @@ const (
 
 	deviceModel = "Echo Dot (2nd Generation)"
 
-	noiseKeyPath    = "/data/local/bin/.overdub-noise-key"
-	sendspinKeyPath = "/data/local/bin/.overdub-sendspin-key"
+	noiseKeyPath      = "/data/local/bin/.overdub-noise-key"
+	sendspinKeyPath   = "/data/local/bin/.overdub-sendspin-key"
+	sendspinPairsPath = "/data/local/bin/.overdub-sendspin-pairs"
 
 	sendspinBuffer          = 500
 	sendspinBluetoothBuffer = 900
@@ -266,7 +267,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	api.Store(server)
 
 	base := []mdns.Advert{esphome.Advert(name, mac, apiPort)}
-	keys, haveKeys := sendspinKeys()
+	keys, records, haveKeys := sendspinKeys()
 	wantSendspin, known, err := device.Flag(sendspinFlag)
 	switch {
 	case err != nil:
@@ -284,7 +285,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	up := false
 	if haveKeys {
 		toggle := &sendspinSwitch{
-			name: name, mac: mac, keys: keys, player: player,
+			name: name, mac: mac, keys: keys, records: records, player: player,
 			responder: responder, base: base,
 			wake:      server.NoteSendspin,
 			peer:      &untrustedlog.Log{Subject: "sendspin"},
@@ -432,6 +433,7 @@ func (p chimePlayer) OpenStream(rate int, say func(string, ...any)) (sendspin.St
 type sendspinSwitch struct {
 	name, mac string
 	keys      sendspin.Keys
+	records   *sendspin.Records
 	player    sendspin.Player
 	responder advertiser
 	base      []mdns.Advert
@@ -735,7 +737,7 @@ func (s *sendspinSwitch) enable() bool {
 		delay, delayKnown = s.delayMS, false
 	}
 	s.tookDelayLocked(delay, delayKnown)
-	client := sendspinClient(s.name, s.mac, s.keys, s.player, s.peer, delay,
+	client := sendspinClient(s.name, s.mac, s.keys, s.records, s.player, s.peer, delay,
 		!delayKnown, s.keepDelay)
 	served := make(chan struct{})
 	s.on, s.client, s.ln, s.served, s.hold = true, client, ln, served, hold
@@ -853,19 +855,24 @@ func (s *sendspinSwitch) denyRule() error {
 	return device.DenyTCP(sendspin.Port)
 }
 
-func sendspinKeys() (sendspin.Keys, bool) {
+func sendspinKeys() (sendspin.Keys, *sendspin.Records, bool) {
 	keys, created, err := sendspin.LoadOrCreateKeys(sendspinKeyPath)
 	if err != nil {
 		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
-		return sendspin.Keys{}, false
+		return sendspin.Keys{}, nil, false
 	}
 	if created {
 		log.Printf("sendspin: this dot had no identity, so one was generated at %s",
 			sendspinKeyPath)
 	}
-	log.Printf("sendspin: client %s; docs/sendspin.md says how to read the pairing token",
-		keys.Identity.ClientID())
-	return keys, true
+	records, err := sendspin.LoadRecords(sendspinPairsPath)
+	if err != nil {
+		log.Printf("sendspin: %v; the dot will not join a music assistant group", err)
+		return sendspin.Keys{}, nil, false
+	}
+	log.Printf("sendspin: client %s, servers paired: %d; install.py prints the"+
+		" pairing token", keys.Identity.ClientID(), records.Len())
+	return keys, records, true
 }
 
 func keptDelay() (ms int, known bool) {
@@ -1048,7 +1055,8 @@ func setSpeakerVolume(percent int) {
 	}
 }
 
-func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player,
+func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Records,
+	player sendspin.Player,
 	peer *untrustedlog.Log, delay int, unknown bool,
 	save func(ms int) error) *sendspin.Client {
 	config := sendspin.Config{
@@ -1071,7 +1079,7 @@ func sendspinClient(name, mac string, keys sendspin.Keys, player sendspin.Player
 	return &sendspin.Client{
 		Config:               config,
 		Keys:                 keys,
-		PSKs:                 sendspin.PSKSet{Pairing: keys.PairingPSK},
+		PSKs:                 sendspin.PSKSet{Pairing: keys.PairingPSK, Records: records},
 		MinBufferMS:          sendspinBuffer,
 		BluetoothMinBufferMS: sendspinBluetoothBuffer,
 		RequiredLeadMS:       sendspinLead,

@@ -10,11 +10,13 @@ Dot joins a synchronised group.
 - The repository has no tags and no releases, and changes continuously.
   `version: 1` on the wire is the core version and does not move with the
   document, so an unpinned citation rots silently.
-- The wire authority is `aiosendspin` 10.0.0 (2026-10-05). Music Assistant
-  still pins 9.1.1, which refuses this wire's `client/hello`: this branch lands
-  only once Music Assistant ships the newer `aiosendspin`. Its PR #6716 bumps
-  the pin to 10.0.0 and is meant to reach stable as well.
+- The wire authority is `aiosendspin` 10.2.1 (2026-10-19). Music Assistant
+  2.10.7 (2026-10-17) is the first stable release on 10.x; 2.10.6 and earlier
+  pin 9.1.1, which refuses this wire's `client/hello`.
   "The reference server", at the end, lists what changed from 9.1.1.
+- Pairing and the re-handshake follow the spec at `9d2f15e` (2026-11-11), as
+  10.2.1 does. At `8fc2f8f` the Pairing PSK flow had no `client/pair-init`, and
+  a re-handshake re-sent both hellos.
 
 ## Connecting
 
@@ -111,27 +113,29 @@ Binary size, measured on a linux/arm build of the daemon:
 - The Sentinel's `psk_id` has neither `-` nor `_`, so it cannot tell base64url
   from standard base64. `SHA-256("5")` as a PSK gives a `psk_id` with both. The
   wrong alphabet would fail about 3 pairings in 4.
-- **No encoder or decoder ships.** Nothing can use a token until pairing exists.
-- A future decoder must be lenient about input (trim, upper-case, tolerate a
-  missing `SP:`) and strict about the rest (unknown version, non-base32 body,
-  short payload). Bytes past the 64 defined are ignored.
+- **The encoder is in `install.py`, and there is no decoder.** The daemon
+  never reads a token: the server does.
+- Python's standard library has no X25519, so `install.py` derives the public
+  key with the RFC 7748 ladder. It matches the RFC's two vectors, and 200
+  random keys decoded through `aiosendspin`'s `decode_psk_token` gave back the
+  `client_id` and PSK.
 
 #### Keeping it out of the log
 
 - The token is `client_key || pairing_psk`: printing it hands over the key
   file. `/data/local/tmp` is `drwxrwx--x` and `overdub.log` is `-rw-r--r--`,
   so every uid can read the log, and it travels in any `adb pull`.
-- The daemon logs the `client_id` only. To build the token, as root:
-
-```sh
-adb shell 'su -c "od -An -tx1 /data/local/bin/.overdub-sendspin-key"'
-```
-
-- The last 32 bytes are the pairing PSK. The first 32 are the private key, which
-  the token does not carry. Take the **public** key from the logged
-  `client_id`. The token is `SP:0 || base32(public_key || pairing_psk)`,
-  padding stripped, every 2 a 9.
-- There is no flag to print it: that is the same hazard with a switch.
+- The daemon logs the `client_id` only. `install.py` reads the key file with
+  `/system/bin/busybox od` through `su`, builds the token on the host, and
+  prints it to the terminal. It never reaches the Dot.
+- `su -c`'s `PATH` holds no `od`, `hexdump`, `xxd` or `base64`: the toolbox
+  has none, and Magisk's busybox in `/sbin/.core/busybox` is not on it. So a
+  bare `od` is not found, and the read comes back empty. Fire OS 5 ships
+  busybox 1.22.1 at `/system/bin/busybox`, whatever Magisk is installed.
+- busybox `od` prints `*` in place of a repeated 16-byte row, so the read
+  passes `-v`.
+- There is no flag to print it: a flag run by the supervisor would print into
+  the log.
 - **A token that reached a log is disclosed.** Rotate by deleting the key file
   and restarting. The Dot then appears to every server as a **new client**,
   because the `client_id` is the identity.
@@ -160,15 +164,70 @@ adb shell 'su -c "od -An -tx1 /data/local/bin/.overdub-sendspin-key"'
   client that lost its pairing record can still reach a server to re-pair. The
   Sentinel authenticates nobody.
 - A **misbinding** (a `psk_id` matching a long-term key issued to a different
-  `server_id`) must fail. **Not implemented**: no long-term key exists until
-  pairing does, so `PSKSet` holds the pairing PSK only. The pairing flow must
-  add it.
+  `server_id`) fails the handshake. It never falls back to the Sentinel.
 - `DecodeID` then `EncodeID` stores the `server_id` in one spelling.
   `base64.RawURLEncoding` ignores the final character's unused bits: 4
   spellings decode to one 32-byte key.
 - `lt` is still accepted on the wire. A server declaring it gets a miss and the
   Sentinel, not a refusal. Without `lt` in the accepted set the handshake times
   out in the unknown-category error.
+
+### Pairing records
+
+- `sendspinPairsPath` holds one 64-byte record per server: the server's public
+  key, then the long-term PSK. The file is `0600`, and a load refuses one that
+  group or other can read, as for the key file.
+- A save writes `<pairs>.new-<random>`, syncs it, and renames it into place.
+  `uninstall.py` removes the file and sweeps the temporaries.
+- **Capacity is `maxConns + 1`, 9 records.** The spec asks for at least 5, and
+  for an evictable record whenever a pairing completes. At most 8 connections
+  can hold a record open, so one is always free.
+- A new pairing drops the server's older record, then evicts the oldest record
+  that no open connection matched. A connection still in its handshake is not
+  yet counted, so a pairing at capacity in that window could evict its record.
+  Its next handshake then misses and falls back to the Sentinel.
+- `server/unpair` on a long-term connection removes that record, says goodbye
+  with `unpaired`, and closes. On any other connection it is ignored.
+
+### The re-handshake
+
+- A server re-keys a live connection in 2 places: onto the pairing PSK when the
+  operator pastes the token, and onto the new long-term PSK after
+  `server/pair-finalize`.
+- Both Noise messages travel as encrypted JSON under the **old** keys. The
+  prologue is the previous handshake hash, `ChannelBinding()` in `flynn/noise`.
+- **A miss is a failure here, not a fallback.** A server that names a PSK the
+  Dot lacks gets the connection closed.
+- **Nothing is sent between message 1 and the new `server/activate`.** Writes
+  in that window return without sending. Once the activation arrives the Dot
+  sends `client/state` again, because a delay or volume report may have been
+  dropped.
+- Message 2 and the swap of keys happen under the write lock, so no other
+  write can use a key between them.
+
+### The Pairing PSK flow
+
+- The Dot offers `pairing_psk` only, with no `locations`: the token is on no
+  label. 10.2.1 flags a `client/hello` without it as non-compliant, and a
+  server set to refuse legacy clients then refuses the Dot.
+- On a pairing activation the Dot sends `client/pair-init` and
+  `client/pair-finalize` together, with a fresh long-term PSK from the CSPRNG.
+- `pairing_index` counts every pairing activation since the last handshake,
+  including one refused with `method_not_supported`.
+- The record is written on `server/pair-finalize`, before the next message is
+  read, so the re-handshake that follows finds it.
+- Any `server/activate` ends the attempt, and a later `server/pair-finalize`
+  keeps nothing. So does a server `pair/abort`.
+- With no `server/pair-finalize` in 2 minutes, the Dot sends `pair/abort` with
+  `attempt_timeout` and keeps nothing.
+- **The timeout callback takes the pairing lock, then the write lock.** Every
+  path takes them in that order. The re-handshake drops the attempt before it
+  takes the write lock.
+- Not implemented: refusing a second server's attempt with
+  `concurrent_attempt` while one is in progress, and the code methods.
+- **Unpaired access stays on.** Pairing adds a credential, and the Sentinel
+  still admits any peer to playback. The spec makes the setting a local client
+  action, and the Dot has no control for it yet.
 
 ### Two fragmentation layers
 
@@ -561,9 +620,8 @@ buffer and keeps it open. Each reaches the player and the session.
   chunks after `stream/start` arrive in a burst.
 - So the speaker's 500 is a placeholder, and the wire can correct it without
   reconnecting.
-- **No pairing method is advertised**, against the spec's "at least Pairing
-  PSK". Claiming one the client cannot honour is worse. `offeredPairMethods`
-  feeds both `client/hello` and the admission rules.
+- **`pairing_psk` is the only method offered.** `offeredPairMethods` feeds
+  both `client/hello` and the admission rules.
 - Only roles in `supported_roles` can become active. `display@v1` is dropped.
 - A test pins the declared rates to `audio.Rates()` and the channels to
   `audio.ChimeChannels`. A mismatch fails as a refused stream or wrong pitch.
@@ -754,7 +812,7 @@ Each is refused, and each has a test that fails without it.
   reference: the prediction divides by the interval.
 - Each outcome logs its own line; from outside the causes look alike.
 - **A connection with no roles keeps asking.** The reference pauses only in its
-  pairing flow, which this client does not offer. The roleless allowance is 30
+  pairing-code flows, which this client does not offer. The roleless allowance is 30
   seconds, so at most 150 questions.
 - `Session.When` maps a chunk stamp to the Dot's monotonic clock. A chunk
   before convergence is dropped and said once per connection: at 40 chunks a
@@ -1039,10 +1097,10 @@ SENDSPIN_INTEROP=1 go test -run Interop ./internal/sendspin/
 - It fails on `non-compliant` or `Malformed` in the server's warnings, because
   one difference below is tolerated rather than reported.
 
-What changed between **aiosendspin 9.1.1**, which Music Assistant pins, and
-**10.0.0**, which this client follows:
+What changed between **aiosendspin 9.1.1**, which Music Assistant pinned
+until 2.10.7, and **10.x**, which this client follows:
 
-| what | 9.1.1 | 10.0.0 (spec) |
+| what | 9.1.1 | 10.x (spec) |
 |---|---|---|
 | `supported_commands` | `volume`, `mute` in `player@v1_support`; `set_static_delay` in `client/state` | all in `client/state` (#177) |
 | fixed output delay | `static_delay_ms` | `output_delay_ms` |
@@ -1052,15 +1110,15 @@ What changed between **aiosendspin 9.1.1**, which Music Assistant pins, and
 
 - **The two cannot share a client.** 9.1.1 refuses a `client/hello` with no
   `supported_commands` as malformed, and refuses `volume` in `client/state`.
-  10.0.0 accepts the old wire but flags it as non-compliant, and a hello
+  10.x accepts the old wire but flags it as non-compliant, and a hello
   carrying the list puts the whole connection on the pre-#177 wire: the 9-byte
   audio header among it. Both servers send `version: 1`, so the client cannot
   tell them apart. The Dot follows the newer.
-- The interop test pins 10.0.0 as a release. It followed the unreleased
-  `3f57794` until that became an ancestor of the release, 8 fix commits back.
+- The interop test pins 10.2.1, the release Music Assistant ships. 10.0.0 did
+  not flag a missing `supported_pair_methods`; 10.2.1 does.
+- `TestInteropPairsWithTheReferenceServer` pairs with the pairing PSK,
+  reconnects as a fresh server holding only the record, and unpairs.
 - **An absent `psk_category` is the old shape.** The `psk_id` is matched
   against every candidate, and a miss falls back to the Sentinel. An empty
   string reaching the `default` arm kills every real handshake as
   `unknown psk_category ""`. A present category binds as the spec requires.
-- **No pairing method is advertised.** The two shapes cannot share one key,
-  and the flow does not exist.
