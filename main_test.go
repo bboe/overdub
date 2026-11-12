@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -43,6 +45,23 @@ func TestCheckName(t *testing.T) {
 		if err := checkName(tt.name); (err == nil) != tt.ok {
 			t.Errorf("checkName(%q) = %v, want ok=%v", tt.name, err, tt.ok)
 		}
+	}
+}
+
+func TestTheReleaseKeyChecksWhatTheReleaseJobSigns(t *testing.T) {
+	key, err := releaseKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// openssl pkeyutl -sign -rawin, as ci.yml runs it, with the key's pair
+	sums := []byte("abc  overdub-v9.9.9.tar.gz\n")
+	sig, _ := hex.DecodeString("35210ed93a32ccbf8139636ca3d4f7b285e2e45708cee8a6bd3ae49401b38152" +
+		"b166583ca32e4b473c3942f0843d3afac357775c80f1d36850029799eb2bdf02")
+	if !ed25519.Verify(key, sums, sig) {
+		t.Error("the release key does not check a signature openssl made with its pair")
+	}
+	if ed25519.Verify(key, []byte("abc  overdub-v9.9.8.tar.gz\n"), sig) {
+		t.Error("the signature checks against other text")
 	}
 }
 

@@ -240,6 +240,24 @@
   So the release publishes `SHA256SUMS` and a provenance attestation naming the
   workflow run and commit, and `-version` names the tag. The source path stays
   the default, because none of that equals building it.
+- The release also publishes `SHA256SUMS.sig`, an ed25519 signature over
+  `SHA256SUMS`. The binary embeds the public key, `deploy/release-signing.pub`,
+  and installs an update only when the signature checks. The attestation would
+  prove the same, but checking it needs sigstore, a dependency far larger than
+  the 64 bytes this costs.
+- The private key is `RELEASE_SIGNING_KEY`, in PEM, a secret of the `release`
+  environment. The environment admits only `v*` tags. A repository secret
+  would reach every workflow run on a branch of this repository, and any
+  collaborator can push one whose `ci.yml` prints it.
+- The job signs with `openssl pkeyutl -rawin`, then verifies against the
+  committed public key, so a missing or wrong secret fails the release before
+  anything is published.
+- A new key pair means a new binary. Dots running the old one refuse every
+  release signed by the new key, so they need one `install.py`.
+- `SHA256SUMS` names the tarball, and the tarball's name carries the tag. So
+  the signature binds the hash to a version. A signed older release cannot
+  pass for a newer one only while the daemon checks both halves: that the name
+  it finds is the tag it fetched, and that the tag is newer than its own.
 - `THIRD-PARTY.txt` is in the tarball because the licences compiled into the
   binary ask for it there. Source distribution does not need it.
 - The tarball carries no rooting script: rooting is firebreak's. Nothing

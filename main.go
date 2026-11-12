@@ -3,6 +3,11 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/x509"
+	_ "embed"
+	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +16,25 @@ import (
 )
 
 var version string
+
+//go:embed deploy/release-signing.pub
+var releaseKeyPEM []byte
+
+func releaseKey() (ed25519.PublicKey, error) {
+	block, _ := pem.Decode(releaseKeyPEM)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("deploy/release-signing.pub holds no PUBLIC KEY block")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := parsed.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("deploy/release-signing.pub holds a %T, not an ed25519 key", parsed)
+	}
+	return key, nil
+}
 
 func versionLine() string {
 	if version == "" {

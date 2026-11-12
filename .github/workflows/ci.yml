@@ -189,6 +189,10 @@ jobs:
   release:
     needs: [build, dot-scripts, pre-commit]
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '/')
+    # The signing key is a secret of this environment, not of the repository:
+    # a branch pushed here runs CI with every repository secret, and the
+    # environment admits only v* tags.
+    environment: release
     runs-on: ubuntu-24.04
     permissions:
       contents: write      # create the release and upload its assets
@@ -249,6 +253,23 @@ jobs:
           sha256sum "$dir.tar.gz" > SHA256SUMS
           cat SHA256SUMS
 
+      # The daemon installs an update only when SHA256SUMS.sig checks against
+      # deploy/release-signing.pub, which the binary embeds. SHA256SUMS comes
+      # from the same release as the tarball, so on its own it proves only that
+      # a download is whole. Verifying here fails the release when the secret
+      # is missing or is not that key's pair, rather than publishing a release
+      # no Dot will install.
+      - name: Sign SHA256SUMS
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS -out SHA256SUMS.sig
+          openssl pkeyutl -verify -rawin -pubin -inkey deploy/release-signing.pub \
+            -in SHA256SUMS -sigfile SHA256SUMS.sig
+
       # A missing notice is invisible to everything else here: the tarball
       # unpacks, installs and runs without either file.
       - name: The notices travel with the binary
@@ -289,5 +310,5 @@ jobs:
           esac
           # shellcheck disable=SC2086  # deliberately unquoted: empty means absent
           gh release create "$GITHUB_REF_NAME" --draft $prerelease --verify-tag \
-            --generate-notes "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS
+            --generate-notes "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS SHA256SUMS.sig
           gh release edit "$GITHUB_REF_NAME" --draft=false
