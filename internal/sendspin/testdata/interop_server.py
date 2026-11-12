@@ -6,8 +6,8 @@ With --play-seconds, the client must have a player: the server streams that
 much of flac_vector.pattern in whatever format the client prefers, and the Go
 side checks what arrived. With --pairing-psk, the server then pairs with that
 Pairing PSK, reconnects as a fresh server holding only the record, and unpairs.
-With --unapproved-seconds, the server never approves unpaired playback, as Music
-Assistant does after an unpair, and the client must keep that one connection.
+With --unapproved-seconds, the server never pairs, as Music Assistant does after
+an unpair, and the client must keep that one connection.
 """
 
 from __future__ import annotations
@@ -175,10 +175,11 @@ async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-st
         client = server.get_or_create_client(client_id)
         deadline = loop.time() + SETTLE_TIMEOUT_S
         while loop.time() < deadline:
+            synced = bool(pairing_psk) or exchanges[0] >= WANTED_EXCHANGES
             if (
                 client.is_connected
                 and client.info_or_none is not None
-                and exchanges[0] >= WANTED_EXCHANGES
+                and synced
                 and (not play_seconds or client.available)
             ):
                 break
@@ -203,7 +204,7 @@ async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-st
         if "player@v1" not in set(client.negotiated_role_ids):
             roles = sorted(client.negotiated_role_ids)
             failures.append(f"player@v1 missing from negotiated roles {roles}")
-        if exchanges[0] < WANTED_EXCHANGES:
+        if not pairing_psk and exchanges[0] < WANTED_EXCHANGES:
             failures.append(
                 f"the client asked the time {exchanges[0]} times in"
                 f" {SETTLE_TIMEOUT_S}s, want {WANTED_EXCHANGES}"
@@ -213,7 +214,7 @@ async def run(  # ruff: ignore[complex-structure, too-many-branches, too-many-st
                 failures.append("a client with a player never reported available")
             else:
                 await play(client=client, seconds=play_seconds)
-        elif client.available:
+        elif client.available and not pairing_psk:
             failures.append(
                 "the client reported available while it has no clock or audio"
             )

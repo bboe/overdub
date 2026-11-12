@@ -817,6 +817,14 @@ func TestAnAdvertIsNeverPublishedForASurfaceAlreadySwitchedOff(t *testing.T) {
 	}
 }
 
+func TestTheClientAdmitsOnlyPairedServersToPlayback(t *testing.T) {
+	client := sendspinClient("kitchen", "00:00:00:00:00:01", sendspin.Keys{}, nil, nil, nil, nil, 0, true, nil)
+	if client.Config.UnpairedAccess {
+		t.Fatal("the client offers unpaired access, so any peer on the LAN can take the" +
+			" player over the published Sentinel PSK")
+	}
+}
+
 func TestTheClientCarriesTheLeadThisDotNeeds(t *testing.T) {
 	client := sendspinClient("kitchen", "00:00:00:00:00:01", sendspin.Keys{}, nil, nil, nil, nil, 0, true, nil)
 	if client.RequiredLeadMS != sendspinLead {

@@ -18,7 +18,7 @@ const interopEnv = "SENDSPIN_INTEROP"
 
 const interopWait = 90 * time.Second
 
-func runInterop(t *testing.T, player Player, outputRate func() int, pair bool,
+func runInterop(t *testing.T, player Player, outputRate func() int, pair, unpaired bool,
 	args ...string) string {
 	t.Helper()
 	if os.Getenv(interopEnv) == "" {
@@ -39,6 +39,7 @@ func runInterop(t *testing.T, player Player, outputRate func() int, pair bool,
 	cfg := testConfig()
 	cfg.Level, cfg.SetVolume, cfg.SetMute = volume.level, volume.set, volume.mute
 	cfg.OutputRate = outputRate
+	cfg.UnpairedAccess = unpaired
 	client := &Client{
 		Config:      cfg,
 		Keys:        keys,
@@ -75,7 +76,7 @@ func runInterop(t *testing.T, player Player, outputRate func() int, pair bool,
 }
 
 func TestInteropWithTheReferenceServer(t *testing.T) {
-	said := runInterop(t, nil, nil, false)
+	said := runInterop(t, nil, nil, false, true)
 	if !strings.Contains(said, "clock agreed with") {
 		t.Errorf("the reference server answered every question and no answer was a"+
 			" measurement, so the clock never converged. The daemon said:\n%s", said)
@@ -84,7 +85,7 @@ func TestInteropWithTheReferenceServer(t *testing.T) {
 
 func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 	player := &fakePlayer{}
-	said := runInterop(t, player, func() int { return StreamRate }, false, "--play-seconds=2")
+	said := runInterop(t, player, func() int { return StreamRate }, false, true, "--play-seconds=2")
 	if !strings.Contains(said, "started a flac 48000 Hz 2 ch 16 bit stream") {
 		t.Errorf("the reference server did not pick flac, the first format offered. The"+
 			" daemon said:\n%s", said)
@@ -117,7 +118,7 @@ func TestInteropStreamsFLACFromTheReferenceServer(t *testing.T) {
 
 func TestInteropStreamsAt44kToADotThatAsks(t *testing.T) {
 	player := &fakePlayer{}
-	said := runInterop(t, player, func() int { return BluetoothRate }, false, "--play-seconds=2")
+	said := runInterop(t, player, func() int { return BluetoothRate }, false, true, "--play-seconds=2")
 	if !strings.Contains(said, "started a flac 44100 Hz 2 ch 16 bit stream") {
 		t.Errorf("the reference server did not send 44.1 kHz to a dot that asked for it."+
 			" The daemon said:\n%s", said)
@@ -133,8 +134,8 @@ func TestInteropStreamsAt44kToADotThatAsks(t *testing.T) {
 	}
 }
 
-func TestInteropKeepsAServerThatHasNotApprovedIt(t *testing.T) {
-	said := runInterop(t, nil, nil, false, "--unapproved-seconds=45")
+func TestInteropKeepsAServerThatHasNotPaired(t *testing.T) {
+	said := runInterop(t, nil, nil, false, false, "--unapproved-seconds=45")
 	if n := strings.Count(said, "handshake with"); n != 1 {
 		t.Errorf("the server connected %d times in 45 seconds, want once: the client"+
 			" dropped it and it redialed. The daemon said:\n%s", n, said)
@@ -146,7 +147,12 @@ func TestInteropKeepsAServerThatHasNotApprovedIt(t *testing.T) {
 }
 
 func TestInteropPairsWithTheReferenceServer(t *testing.T) {
-	said := runInterop(t, nil, nil, true)
+	said := runInterop(t, nil, nil, true, false)
+	before, _, _ := strings.Cut(said, "re-keyed the connection onto the pr psk")
+	if !strings.Contains(before, "holds no role now") || strings.Contains(before, "activated player@v1") {
+		t.Errorf("before pairing, the server was not held with no role over the Sentinel."+
+			" The daemon said:\n%s", said)
+	}
 	for _, want := range []string{
 		"re-keyed the connection onto the pr psk",
 		"paired with",

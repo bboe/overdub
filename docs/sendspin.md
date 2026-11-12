@@ -227,9 +227,10 @@ Binary size, measured on a linux/arm build of the daemon:
   takes the write lock.
 - Not implemented: refusing a second server's attempt with
   `concurrent_attempt` while one is in progress, and the code methods.
-- **Unpaired access stays on.** Pairing adds a credential, and the Sentinel
-  still admits any peer to playback. The spec makes the setting a local client
-  action, and the Dot has no control for it yet.
+- **Unpaired access is off, with no control to turn it on.** The Sentinel
+  PSK is public, so with it on any peer on the LAN reaches playback and takes
+  the player from Music Assistant. The spec makes the setting a local client
+  action; nothing needs it yet.
 
 ### Two fragmentation layers
 
@@ -275,8 +276,9 @@ the PSK matched in the handshake:
 ### What the Dot declares
 
 `player@v1`, 4 formats (FLAC and PCM at 48 and 44.1 kHz), and `unpaired_access`
-enabled. The last lets Music Assistant play over a Sentinel-keyed connection
-once its operator approves the Dot.
+disabled. So Music Assistant plays only once it has paired, whatever its
+guest-access setting: `aiosendspin` 10.2.1, trusting the Dot, activated with
+no role over the Sentinel and stayed connected.
 
 - `buffer_capacity` is 2 seconds of 48 kHz PCM, 384,000 bytes. The server counts
   FLAC bytes against it too, so FLAC leads further: about 3 seconds at the
@@ -1057,7 +1059,7 @@ Each is refused, and each has a test that fails without it.
 - **A connection that activates with no role stays open.** The spec drops only
   a provisional connection that sends no `server/activate` in 30 seconds.
   Music Assistant 2.10.9 holds an unpaired Dot this way, with no role, until
-  the operator pairs it or allows guest access.
+  the operator pairs it.
 - Closing it makes a loop. The Dot used to close such a connection after 30
   seconds with no goodbye, and `aiosendspin` redials a connection that ends
   without a reason. After an unpair in Music Assistant 2.10.9 it reconnected
@@ -1102,14 +1104,14 @@ Each is refused, and each has a test that fails without it.
   the server's Noise static key, which the handshake proves the server holds,
   so a peer cannot claim Music Assistant's without its private key.
 - `sendspinLastPath` holds that server's 32-byte public key, written by
-  rename. Any peer can declare `playback`, so the file is written at most
+  rename. Any paired server can declare `playback`, so the file is written at most
   once a minute (`lastEvery`), and a change inside that minute is written
   when the minute is up. Unthrottled, 2 peers taking turns rewrote it 400
   times in 300 ms. Dropping the change instead would let a peer that wrote
   first stay the last-playback server after Music Assistant played. A file
   the Dot cannot read counts as no last-playback server.
-- 7 peers that activated with no role can keep an unpaired Music Assistant
-  waiting at its own empty activation, unless it was the last to play. Its
+- 7 peers that activated with no role can keep Music Assistant waiting at
+  its own empty activation, unless it was the last to play. Its
   `playback` activation displaces them. 8 that never activate still keep
   everyone out, for 60 seconds a time, as before.
 - A displaced session cannot take the player: an activation already in flight

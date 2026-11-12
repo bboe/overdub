@@ -467,13 +467,15 @@ To register a Dot:
   that holds it. The installer keeps no copy. To rotate it, delete
   `/data/local/bin/.overdub-sendspin-key` and restart the daemon. Every server
   then sees a new player, and the old pairing records go unused.
-- Pairing does not shut out unpaired servers: the Dot keeps unpaired access on.
+- **The Dot plays only for a paired server.** It offers no unpaired access,
+  so Music Assistant's guest access does nothing for it. An unpaired Music
+  Assistant stays connected with no role and plays nothing.
 - Unpairing in Music Assistant while the Dot is connected and paired removes
   the record on the Dot as well. Otherwise the Dot keeps a record no server
   uses, until 9 newer pairings evict it.
 - After an unpair, Music Assistant does not reconnect by itself. When the
   daemon next starts, Music Assistant connects again, unpaired, and plays
-  nothing until you pair the Dot again or allow guest access.
+  nothing until you pair the Dot again.
 
 ### Encryption
 

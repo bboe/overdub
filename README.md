@@ -20,11 +20,10 @@ keeps running.
   whole Amazon account, which may sit outside Amazon's terms. Read
   [Alexa commands](docs/usage.md#alexa-commands) before you build MapDump. Without the jar,
   the daemon does not offer them.
-- **Sendspin still admits unpaired servers.** Music Assistant can pair with the
-  token the installer prints, but the Dot keeps unpaired access on, and the
-  fallback key is a published constant. So anything that reaches the Dot on
-  `wlan0` can take the session. The session gives playback only; see
-  [SECURITY.md](SECURITY.md) for what it holds.
+- **Sendspin plays only for a paired server.** Pair Music Assistant with the
+  token the installer prints; until then it connects and plays nothing. Any
+  server that holds the token can pair, so treat it as a password; see
+  [SECURITY.md](SECURITY.md).
 - **Sendspin over Bluetooth needs a strong Wi-Fi link.** The Dot's Wi-Fi and
   Bluetooth share one radio, and a weak link starves the stream (see
   [docs/pitfalls.md](docs/pitfalls.md)). A stream settles in sync about 2

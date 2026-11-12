@@ -1070,7 +1070,6 @@ func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Reco
 		ProductName:    deviceModel,
 		Manufacturer:   "Amazon",
 		MACAddress:     strings.ToLower(mac),
-		UnpairedAccess: true,
 		BufferCapacity: sendspin.BufferCapacity,
 	}
 	if player != nil {
