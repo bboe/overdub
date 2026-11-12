@@ -35,6 +35,7 @@ BOOT = "/sbin/.core/img/.core/service.d/overdub.sh"
 BUSYBOX = "/system/bin/busybox"
 CLEANUP_WAIT = 30
 DNS_LABEL = 63
+FAILED = "/data/local/bin/.overdub-failed"
 KEY = "/data/local/bin/.overdub-noise-key"
 KEY_LINE = re.compile(r"ssh-|[A-Za-z0-9+/]{32,}")
 KEY_SHAPE = re.compile(r"[A-Za-z0-9+/]{43}=")
@@ -71,6 +72,7 @@ STATE = argparse.Namespace(
     warned=False,
 )
 STOP_SIGNALS = ("SIGBREAK", "SIGHUP", "SIGINT", "SIGTERM")
+TRIAL = "/data/local/bin/.overdub-trial"
 X25519_A24 = 121665
 X25519_BASE = 9
 X25519_PRIME = 2**255 - 19
@@ -403,6 +405,13 @@ def install_binary(boot_script: str) -> None:
     if not re.search(r"^drwx------", su(f"ls -ldn {BIN_DIR}")[1], re.MULTILINE):
         STATE.changed = True
     su_ok(f"mkdir -p {BIN_DIR}\nchmod 700 {BIN_DIR}")
+    su_ok(f"rm -f {TRIAL} {FAILED} {BINARY}.prev {MAP_DIR}/mapdump.jar.prev")
+    if probe(f"-e {TRIAL}") != "no":
+        fail(
+            "binary",
+            f"{TRIAL} is still there, so the boot script could replace the"
+            " binary this installs with the one an update replaced.",
+        )
     if STATE.binary_changed:
         adb_ok("push", str(ROOT / "build/overdub"), "/data/local/tmp/overdub")
         su_ok(

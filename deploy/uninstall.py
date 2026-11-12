@@ -23,6 +23,7 @@ API_PORT = 6053
 APPLIED = "/data/local/bin/.overdub-applied"
 BIN = "/data/local/bin/overdub"
 BOOT = "/sbin/.core/img/.core/service.d/overdub.sh"
+FAILED = "/data/local/bin/.overdub-failed"
 KEY = "/data/local/bin/.overdub-noise-key"
 LABEL = 14
 INDENT = " " * (LABEL + 4)
@@ -35,10 +36,15 @@ SENDPAIRS = "/data/local/bin/.overdub-sendspin-pairs"
 SENDSPIN_PORT = 8928
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(changed=False, pending=False, warned=False)
+TEMPS = (SENDKEY + ".new-", SENDPAIRS + ".new-", SENDLAST + ".new-")
+TRIAL = "/data/local/bin/.overdub-trial"
 SWEPT = [
     BOOT,
     BIN,
     BIN + ".new",
+    BIN + ".prev",
+    TRIAL,
+    FAILED,
     KEY,
     SENDKEY,
     SENDPAIRS,
@@ -49,7 +55,6 @@ SWEPT = [
     MAP,
     LOG,
 ]
-TEMPS = (SENDKEY + ".new-", SENDPAIRS + ".new-", SENDLAST + ".new-")
 
 
 def adb(*args: str) -> tuple[int, str]:
@@ -106,8 +111,9 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
 
     su(f"rm -f {BOOT}")
     su(
-        f"rm -f {BIN} {BIN}.new {KEY} {SENDKEY} {SENDKEY}.new-* {SENDPAIRS}"
-        f" {SENDPAIRS}.new-* {SENDLAST} {SENDLAST}.new-* {ADBKEY} {APPLIED}\n"
+        f"rm -f {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
+        f" {SENDKEY} {SENDKEY}.new-* {SENDPAIRS} {SENDPAIRS}.new-* {SENDLAST}"
+        f" {SENDLAST}.new-* {ADBKEY} {APPLIED}\n"
         f"rm -rf {STAGE} {MAP}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh"
     )

@@ -102,6 +102,29 @@ func TestTheScriptsNameTheSendspinFilesTheDaemonKeeps(t *testing.T) {
 	}
 }
 
+func TestTheScriptsNameTheRollbackFilesTheDaemonClears(t *testing.T) {
+	for _, c := range []struct {
+		script string
+		names  []string
+	}{
+		{"deploy/overdub.sh", []string{"=" + trialPath + "\n", "=" + prevPath + "\n", "=" + failedPath + "\n"}},
+		{"deploy/uninstall.py", []string{
+			`"` + trialPath + `"`, `"` + failedPath + `"`, `"` + binPath + `"`, `BIN + ".prev"`,
+		}},
+		{"deploy/install.py", []string{`"` + trialPath + `"`, `"` + failedPath + `"`}},
+	} {
+		script, err := os.ReadFile(c.script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range c.names {
+			if !strings.Contains(string(script), name) {
+				t.Errorf("%s does not say %q, and the daemon clears that file", c.script, name)
+			}
+		}
+	}
+}
+
 func TestTheScriptsUseTheKeyPathTheDaemonReads(t *testing.T) {
 	for _, name := range []string{"deploy/install.py", "deploy/uninstall.py"} {
 		script, err := os.ReadFile(name)

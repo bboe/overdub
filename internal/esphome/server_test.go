@@ -2627,3 +2627,28 @@ func TestADotWithoutSendspinKeysReportsTheTokenFailed(t *testing.T) {
 			fields[1].num, sent)
 	}
 }
+
+func TestServedClosesOnTheFirstStateSubscription(t *testing.T) {
+	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	c := &conn{out: make(chan frame, 64), sock: fakeAddr{}}
+	for _, msgType := range []int{msgHelloRequest, msgConnectRequest, msgListEntitiesReq} {
+		if err := s.handle(c, msgType, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-s.Served():
+		t.Fatal("Served closed before any client subscribed to states")
+	default:
+	}
+	for range 2 {
+		if err := s.handle(c, msgSubscribeStates, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-s.Served():
+	default:
+		t.Error("Served is still open after a client subscribed to states")
+	}
+}

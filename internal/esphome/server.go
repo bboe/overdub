@@ -246,8 +246,10 @@ type Server struct {
 	adbSettle     time.Duration
 	micSettle     time.Duration
 
-	mu    sync.Mutex
-	conns map[*conn]struct{}
+	mu        sync.Mutex
+	conns     map[*conn]struct{}
+	served    chan struct{}
+	wasServed bool
 
 	published map[uint32]reading
 
@@ -315,6 +317,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		onDelay:       SoundOnDelay,
 		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
+		served:        make(chan struct{}),
 		published:     map[uint32]reading{},
 		liveWake:      make(chan struct{}, 1),
 		sensorWake:    make(chan struct{}, 1),
@@ -374,6 +377,8 @@ func (s *Server) UseSendspinPairing(clientID, token string) {
 func (s *Server) UseSendspinDelay(maxMS int, ms func() int, set func(int)) {
 	s.delayMaxMS, s.delayMS, s.delaySet = maxMS, ms, set
 }
+
+func (s *Server) Served() <-chan struct{} { return s.served }
 
 func (s *Server) NoteSendspin() {
 	select {
@@ -604,6 +609,10 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 	case msgSubscribeStates:
 		first := !conn.states
 		conn.states = true
+		if !s.wasServed {
+			s.wasServed = true
+			close(s.served)
+		}
 		if err := s.sendSensorsAt(conn, s.snapshot()); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -39,6 +40,12 @@ const (
 	sendspinKeyPath   = "/data/local/bin/.overdub-sendspin-key"
 	sendspinPairsPath = "/data/local/bin/.overdub-sendspin-pairs"
 	sendspinLastPath  = "/data/local/bin/.overdub-sendspin-last"
+
+	binPath    = "/data/local/bin/overdub"
+	prevPath   = binPath + ".prev"
+	trialPath  = "/data/local/bin/.overdub-trial"
+	failedPath = "/data/local/bin/.overdub-failed"
+	trialWait  = 60 * time.Second
 
 	sendspinBuffer          = 500
 	sendspinBluetoothBuffer = 900
@@ -169,6 +176,46 @@ func serve(flags config) error {
 		func(code uint16, _ button.Mode, held time.Duration) { chains[code].Up(held) })
 }
 
+type trial struct {
+	marker, prev, jar, failed string
+}
+
+func (t trial) settle(version string, served <-chan struct{}, wait time.Duration) {
+	marked, err := os.ReadFile(t.marker)
+	if err != nil {
+		return
+	}
+	if string(marked) != version+"\n" {
+		log.Printf("update: the trial is for %.40q, not this binary's %s, so an install stopped "+
+			"partway; going back to the jar this binary came with", marked, version)
+		if err := os.Rename(t.jar+".prev", t.jar); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("update: %v", err)
+			return
+		}
+		t.remove(t.marker, t.prev)
+		return
+	}
+	<-served
+	time.Sleep(wait)
+	if now, err := os.ReadFile(t.marker); err != nil || !bytes.Equal(now, marked) {
+		return
+	}
+	if err := os.Remove(t.marker); err != nil {
+		log.Printf("update: %v; the boot script may still go back to the previous binary", err)
+		return
+	}
+	log.Printf("update: served Home Assistant for %v, so the boot script keeps this binary", wait)
+	t.remove(t.prev, t.jar+".prev", t.failed)
+}
+
+func (t trial) remove(paths ...string) {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("update: %v", err)
+		}
+	}
+}
+
 var buttons = map[uint16]struct {
 	objectID string
 	start    button.Mode
@@ -224,6 +271,8 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		log.Printf("%s appeared", wifiIface)
 	}
 	server := esphome.NewServer(name, deviceModel, version, mac, psk)
+	go trial{marker: trialPath, prev: prevPath, jar: alexa.JarPath, failed: failedPath}.
+		settle(version, server.Served(), trialWait)
 	for code, b := range buttons {
 		server.UseButton(b.objectID,
 			func() string { return i.Mode(code).String() },

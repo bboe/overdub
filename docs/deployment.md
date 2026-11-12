@@ -33,6 +33,55 @@
   A `ps` that printed the whole command line would match the name instead, and
   both scripts would report success having done nothing.
 
+## Going back after an update
+
+- An update leaves the binary it replaced at `bin/overdub.prev`, and
+  `mapdump.jar.prev` beside the jar when it changed the jar. It also writes the
+  trial marker, `bin/.overdub-trial`, holding the version on trial.
+- While the marker exists, the loop counts each start. Before the 4th start it
+  moves the previous binary and jar back, removes the marker and logs
+  `the update to <version> exited 3 times`. So a new binary that exits at once
+  is tried 3 times, about 15 seconds, and the Dot goes back to what worked.
+- The count starts again whenever the marker's text changes. A binary that
+  passed its trial and then installs the next update never leaves the loop an
+  iteration without a marker, so a count kept across that would give the next
+  update fewer tries. On the Dot, one such update was tried only twice.
+- A binary passes its trial 60 seconds after the first client subscribes to
+  its states, which is Home Assistant's last step in connecting. Then it
+  removes the marker, both `.prev` files and the failure record. Time since
+  start alone would pass a binary whose API is dead, or one that crashes only
+  when Home Assistant connects and Home Assistant came back after 60 seconds.
+  With Home Assistant away, the trial stays open: a further install waits, and
+  any 3 exits roll back, however far apart. Home Assistant has just pressed
+  **Install**, so it is away for the trial only when the new binary's API is
+  broken, which is the case the trial is for, or when it went down at that
+  moment.
+- It removes them only when the marker still holds the text it found at start,
+  so a marker for a newer update survives. A binary that hangs without exiting
+  and keeps its API up is not caught: nothing else measures health.
+- A binary that starts under a marker naming another version comes from an
+  install that stopped between its renames: the jar is renamed before the
+  binary. It puts back `mapdump.jar.prev`, if there is one, and removes the
+  marker and `overdub.prev`. Passing that trial instead would keep the old
+  binary with the new jar.
+- When the loop goes back, it writes the failed version to
+  `bin/.overdub-failed`. The restored binary then tells Home Assistant that
+  the release it offers already failed once; without the record it would
+  offer the same release as a clean update.
+- With the marker present and no `overdub.prev`, the loop logs that, keeps the
+  new binary and removes `mapdump.jar.prev`.
+- `install.py` removes the marker, the failure record and both `.prev` files.
+  Otherwise a binary it installed during a failing trial would be replaced by
+  the loop's next rollback, after `install.py` had printed its md5 as verified.
+- The loop sets `OVERDUB_ROLLBACK=1` for the daemon. The daemon reads it to know
+  that the loop it runs under can go back. A boot script installed without a
+  reboot does not give this: the running loop still holds the old script.
+- The loop holds a counter, not a time, because a slow first start after a boot
+  would look like a crash. A reboot during a trial starts the count again.
+- Tested on the Dot: a binary that printed and exited 1 ran 3 times, and the
+  4th start was the previous binary, by md5. A binary that ran removed the
+  marker 60 seconds after a client subscribed.
+
 ## What is pushed, and how it is verified
 
 | file | on the Dot | owner, mode | staged in | checked by |
@@ -128,7 +177,8 @@
 
 1. Delete the boot script, alone. It is the only thing that starts the daemon
    at boot, so a reboot part way through leaves nothing running.
-2. Delete the binary, the keys, the applied stamp, the staging directory and
+2. Delete the binary, the previous binary, the trial marker, the failure
+   record, the keys, the applied stamp, the staging directory and
    `/data/local/map`.
    The binary goes before the kill because the supervisor is a live shell
    loop: deleting the boot script does not stop it, and it respawns a killed
