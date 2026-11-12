@@ -209,6 +209,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | text | `alexa_command` | config | run as though spoken (10) |
 | switch | `sendspin` | config | on: Sendspin is up (11) |
 | number | `sendspin_output_delay` | config | 0 to 5,000 ms (12) |
+| update | `firmware` | config | the latest release (13) |
 
 1. See [The action button](#the-action-button).
 2. Volume and mute of the live route, and playback of an mp3 URL through
@@ -228,6 +229,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 12. How far ahead of a chunk's timestamp the Dot plays. A music server can set
     it too; the last write wins, and the number shows what is applied.
     Survives a reboot and works with the switch off.
+13. Listed only for a release build. See [Updating](#updating).
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.
@@ -486,6 +488,28 @@ To register a Dot:
 - After an unpair, Music Assistant does not reconnect by itself. When the
   daemon next starts, Music Assistant connects again, unpaired, and plays
   nothing until you pair the Dot again.
+
+### Updating
+
+- The `firmware` update entity shows the latest overdub release on GitHub.
+  **Install** downloads it, checks it, and replaces the binary and
+  `mapdump.jar`. The daemon then restarts into the new release, which takes
+  about 7 seconds.
+- The Dot looks for a release a minute after it starts, then every 6 hours.
+  Home Assistant's **Check for updates** looks again, at most once a minute.
+- An update installs only a release signed with the overdub release key. A
+  release that changes the boot script cannot install this way: the entity's
+  release notes then say to run `install.py` from that release.
+- A release is on trial until Home Assistant has been connected to it for a
+  minute. **Install** works again after that.
+- If the new release exits 3 times during its trial, the Dot goes back to the
+  release it replaced. The log says `the update to <version> exited 3 times`,
+  and the entity offers the release again, with a line at the top of its
+  release notes saying it failed.
+- The first release that has this entity needs `install.py` and then one
+  reboot. Until that reboot, **Install** is refused, and the release notes say
+  why.
+- A build from source has no version, so it lists no update entity.
 
 ### Encryption
 

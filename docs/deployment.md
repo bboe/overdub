@@ -82,6 +82,46 @@
   4th start was the previous binary, by md5. A binary that ran removed the
   marker 60 seconds after a client subscribed.
 
+## Updating over the API
+
+- `internal/update` does what `install.py` does for the binary and the jar,
+  from the Dot itself. docs/usage.md has what a user sees.
+- It reads `releases/latest` from GitHub's API, then downloads `SHA256SUMS`,
+  `SHA256SUMS.sig` and the tarball. Each read has a size limit, and the whole
+  request has a 5-minute deadline. Go's TLS reads Fire OS's CA store, which
+  trusts both roots GitHub uses (USERTrust ECC for the API, ISRG Root X1 for
+  the downloads): a 3.2 MB release tarball downloaded on the Dot.
+- The signature must check, the tarball's sha256 must match the line that
+  names `overdub-<tag>.tar.gz`, and the tarball must hold the binary, the jar
+  and the boot script under `overdub-<tag>/`.
+- The release's boot script, with this Dot's name put in as `install.py` does
+  it, must equal the installed one byte for byte. An update does not replace
+  the boot script. A broken one would stop the daemon at the next boot, where
+  no rollback reaches.
+- The daemon refuses an install unless the loop set `OVERDUB_ROLLBACK=1`, and
+  while the trial marker exists. A binary still on trial would otherwise
+  remove the new marker and `.prev` when its own trial passed, leaving a
+  failing update with nothing to go back to.
+- A power cut between the jar's rename and the binary's leaves the old binary
+  under the new version's marker, with the new jar. It finds the marker names
+  another version and goes back to its own jar, as "Going back after an
+  update" says.
+- Each new file is written beside its target, synced, read back and renamed
+  into place. The old binary and jar are hard-linked to their `.prev` names
+  first. The jar is replaced only when it changed, and is owned by 32051.
+- After the rename the daemon shuts down as it does on SIGTERM, and the loop
+  starts the new binary 5 seconds later.
+- `install.py`'s applied stamp then names a pid and a binary md5 that do not
+  match, so the next `install.py` restarts the daemon once.
+- `releasesURL` is a variable so that a test build can point it somewhere
+  else: `OVERDUB_VERSION='v0.2.9 -X main.releasesURL=http://127.0.0.1:8099/latest'`
+  stamps both, because `build.sh` passes the variable inside `-ldflags`.
+- Tested on the Dot that way, with a release served from its loopback and
+  signed with the release key, and driven by aioesphomeapi: `v0.2.9` updated to
+  `v0.3.0` in 7 seconds, with a changed jar owned by 32051, and the trial passed.
+  A signed `v0.4.0` whose binary exited at once ran 3 times, and the loop went
+  back to `v0.3.0` by md5.
+
 ## What is pushed, and how it is verified
 
 | file | on the Dot | owner, mode | staged in | checked by |

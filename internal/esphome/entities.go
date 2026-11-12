@@ -33,6 +33,12 @@ const (
 	bluetoothIcon = "mdi:bluetooth"
 )
 
+// UpdateCommand
+const (
+	updateCommandInstall = 1
+	updateCommandCheck   = 2
+)
+
 const (
 	numberModeBox = 1
 
@@ -294,6 +300,19 @@ func (s *Server) listEntities(conn *conn) error {
 		service.fixed32(2, s.keyCommand)
 		service.sub(3, arg.b)
 		if err := s.send(conn, msgListService, service.b); err != nil {
+			return err
+		}
+	}
+
+	if s.updateCheck != nil {
+		var update pb
+		update.str(1, "firmware")
+		update.fixed32(2, s.keyUpdate)
+		update.str(3, "Firmware")
+		update.boolean(6, false) // disabled_by_default
+		update.u32(7, entityCategoryConfig)
+		update.str(8, "firmware") // device_class
+		if err := s.send(conn, msgListUpdate, update.b); err != nil {
 			return err
 		}
 	}

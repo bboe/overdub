@@ -37,6 +37,25 @@ than the local subnet: measured, a client arriving over a VPN from another
 subnet reaches it. Narrowing that is the operator's to do in their own network,
 because ESPHome has no peer allowlist for the daemon to offer.
 
+## The update path
+
+The `firmware` update entity lets anyone holding the API key start an install,
+and an install replaces the binary that runs as root. So the API key does not
+decide what is installed: the release key does. The daemon installs only a
+tarball whose sha256 is in a `SHA256SUMS` that carries an ed25519 signature
+from the key the running binary embeds. The release job holds the private
+half as a secret of the `release` environment, which admits only `v*` tags. `SHA256SUMS` names the tarball by its tag, and only
+a newer version is installed, so a signed older release cannot be replayed as
+an update. The download is HTTPS to GitHub. Without it, whoever answers for GitHub
+still cannot install anything the release key did not sign. The release notes
+and the release link are not signed, though. So whoever answers for GitHub can
+show any notes, hold back every update, or offer any signed release newer than
+the running one, including one later withdrawn. What
+a peer holding the API key can do is install the latest signed release before
+the operator meant to, and ask GitHub for the latest release at most once a
+minute. A way to make the daemon install something the release key did not
+sign is a finding.
+
 ## The install path
 
 `deploy/install.py` reads every step back off the device rather than trusting an

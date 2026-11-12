@@ -86,6 +86,9 @@ const (
 	msgTextCommand       = 99
 	msgListEvent         = 107
 	msgEventState        = 108
+	msgListUpdate        = 116
+	msgUpdateState       = 117
+	msgUpdateCommand     = 118
 	msgCapabilitiesReq   = 149
 	msgCapabilitiesResp  = 150
 	msgSendspinTokenReq  = 159
@@ -162,6 +165,7 @@ type Server struct {
 	keyAlexa    uint32
 	keyText     uint32
 	keyCommand  uint32
+	keyUpdate   uint32
 
 	buttons []*physicalButton
 
@@ -231,6 +235,9 @@ type Server struct {
 	sendspinClientID string
 	sendspinToken    string
 
+	updateCheck   func()
+	updateInstall func()
+
 	play        func(url string) error
 	command     func(text string) error
 	micPress    func() error
@@ -289,6 +296,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyAlexa:     entityKey("alexa_registered"),
 		keyText:      entityKey("alexa_command"),
 		keyCommand:   entityKey("send_command"),
+		keyUpdate:    entityKey("firmware"),
 		buttons:      newButtons(),
 		uptime:       device.UptimeSeconds,
 		wifi:         device.WifiSignal,
@@ -376,6 +384,14 @@ func (s *Server) UseSendspinPairing(clientID, token string) {
 
 func (s *Server) UseSendspinDelay(maxMS int, ms func() int, set func(int)) {
 	s.delayMaxMS, s.delayMS, s.delaySet = maxMS, ms, set
+}
+
+func (s *Server) UseUpdate(check, install func()) {
+	s.updateCheck, s.updateInstall = check, install
+}
+
+func (s *Server) SetUpdate(state UpdateState) {
+	s.publish("update", []reading{{key: s.keyUpdate, update: state, ok: true, kind: kindUpdate}})
 }
 
 func (s *Server) Served() <-chan struct{} { return s.served }
@@ -746,6 +762,31 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			conn.noted = fmt.Sprintf("esphome api: %s switched sendspin %s",
 				conn.sock.RemoteAddr(), onOff(on))
 			s.sendspinSet(on)
+		}
+		return nil
+
+	case msgUpdateCommand:
+		var key uint32
+		var command uint64
+		if err := walk("UpdateCommandRequest", payload, func(f pbField) {
+			switch f.field {
+			case 1:
+				key = uint32(f.num)
+			case 2:
+				command = f.num
+			}
+		}); err != nil {
+			return err
+		}
+		if key != s.keyUpdate || s.updateCheck == nil {
+			return nil
+		}
+		switch command {
+		case updateCommandInstall:
+			conn.noted = fmt.Sprintf("esphome api: %s asked to install the update", conn.sock.RemoteAddr())
+			s.updateInstall()
+		case updateCommandCheck:
+			s.updateCheck()
 		}
 		return nil
 

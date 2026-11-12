@@ -28,7 +28,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src \
   -v "$HOME/go/pkg/mod":/go/pkg/mod -w /src golang:1.26 \
   go test -race ./internal/alexa/ ./internal/audio/ ./internal/esphome/ \
   ./internal/device/ ./internal/mdns/ ./internal/sendspin/ \
-  ./internal/untrustedlog/
+  ./internal/untrustedlog/ ./internal/update/
 
 git ls-files -z '*.sh' | xargs -0 shellcheck -S style   # as CI runs it
 pre-commit run --all-files    # CodeSorter and ruff, as CI runs them

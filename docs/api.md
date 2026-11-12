@@ -617,6 +617,51 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - docs/sendspin.md, "Set from Home Assistant", has the rest: the two
   writers, the flash window and the worker the number shares with the switch.
 
+## The update entity
+
+- `ListEntitiesUpdateResponse` (116), `UpdateStateResponse` (117) and
+  `UpdateCommandRequest` (118). Home Assistant's ESPHome integration shows
+  the entity as an update with install, progress and release notes. It reads
+  the notes from `release_summary` only when somebody opens them, so the full
+  release body goes there, cut at 8 KiB.
+- The device fetches the release itself, as ESPHome's `http_request` update
+  platform does. Home Assistant only sends `UPDATE` or `CHECK`. ESPHome's other
+  update path, where Home Assistant compiles YAML through the ESPHome dashboard
+  and pushes the firmware, has nothing to compile here.
+- Home Assistant compares the versions itself, with AwesomeVersion. So
+  `latest_version` equals `current_version` when nothing newer is offered.
+- No state is sent until a check succeeds. Home Assistant's update entity
+  ignores `missing_state`, so a state carrying only the running version would
+  read as up to date, and an empty `latest_version` as an update.
+- The one exception is a binary on its own trial. It was the latest release a
+  moment ago, so it sends `latest_version` equal to `current_version` at start.
+  Home Assistant keeps the last state it received across a reconnect, and
+  that state is the old binary's "installing, 100%"; without the exception it
+  stays until the first check, or for good if GitHub is unreachable.
+- A binary the boot loop went back to has the same problem and no marker. It
+  sends the failed release as `latest_version` at start, with the failure in
+  the notes: that release was the latest when it was installed. Until the
+  first check knows the release's assets, **Install** does nothing.
+- A release the boot loop went back from is named at the top of its release
+  notes, from the record the loop writes. The binary that failed held its
+  failure only in memory, so without the record the restored binary would
+  offer the same release as a clean update.
+- The updater is serial: one goroutine runs checks and installs, and a
+  command only drops a token in a 1-slot channel. A command arrives with the
+  server lock held, so it must never wait.
+- A `CHECK` within a minute of the last check is dropped. GitHub allows 60
+  unauthenticated requests an hour from one address, and every Dot on a
+  network shares that address.
+- An install that fails puts the reason at the top of the release notes and
+  clears the progress. aioesphomeapi has no other field for it, and the
+  install call in Home Assistant returns before the download starts.
+- The reason is cut at 300 bytes and made valid UTF-8. It can carry a status
+  line or a URL from an unsigned answer, and Home Assistant's protobuf rejects
+  a string that is not UTF-8.
+- Only a release whose tag is `vX.Y.Z` is offered, and only one newer than
+  the running version. A draft, a prerelease, a release without
+  `SHA256SUMS.sig` and an older release are not.
+
 ## Discovery
 
 Home Assistant finds the Dot over mDNS. The responder is `internal/mdns`, and

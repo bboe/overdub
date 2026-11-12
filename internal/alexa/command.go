@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	mapUID  = "32051"
+	MapUID  = 32051
 	mapDir  = "/data/local/map"
 	mapJar  = mapDir + "/mapdump.jar"
 	mapKey  = "com.amazon.dcp.sso.token.oauth.amazon.refresh_token"
@@ -133,7 +133,7 @@ func suPath() string {
 func extractToken() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, suPath(), mapUID, "-c",
+	cmd := exec.CommandContext(ctx, suPath(), strconv.Itoa(MapUID), "-c",
 		fmt.Sprintf("CLASSPATH=%s app_process %s %s %s", mapJar, mapDir, mapMain, mapKey))
 	var token, diag bytes.Buffer
 	cmd.Stdout = &token
@@ -182,30 +182,7 @@ func (a *Client) httpClient() *http.Client {
 }
 
 func newAlexaHTTPClient() *http.Client {
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			var servers []string
-			for _, prop := range []string{"net.dns1", "net.dns2"} {
-				if s := strings.TrimSpace(device.Getprop(prop)); s != "" {
-					servers = append(servers, net.JoinHostPort(s, "53"))
-				}
-			}
-			if len(servers) == 0 {
-				return nil, fmt.Errorf("no net.dns1/net.dns2 to resolve with")
-			}
-			var d net.Dialer
-			var err error
-			for _, s := range servers {
-				var conn net.Conn
-				if conn, err = d.DialContext(ctx, network, s); err == nil {
-					return conn, nil
-				}
-			}
-			return nil, err
-		},
-	}
-	dialer := &net.Dialer{Timeout: 15 * time.Second, Resolver: resolver}
+	dialer := device.Dialer(15 * time.Second)
 	return &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{

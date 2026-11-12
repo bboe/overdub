@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -23,6 +24,7 @@ import (
 	"github.com/bboe/overdub/internal/mdns"
 	"github.com/bboe/overdub/internal/sendspin"
 	"github.com/bboe/overdub/internal/untrustedlog"
+	"github.com/bboe/overdub/internal/update"
 )
 
 const (
@@ -46,6 +48,12 @@ const (
 	trialPath  = "/data/local/bin/.overdub-trial"
 	failedPath = "/data/local/bin/.overdub-failed"
 	trialWait  = 60 * time.Second
+	bootPath   = "/sbin/.core/img/.core/service.d/overdub.sh"
+
+	updateFirst = time.Minute
+	updateEvery = 6 * time.Hour
+	updateRetry = 30 * time.Minute
+	updateWait  = 5 * time.Minute
 
 	sendspinBuffer          = 500
 	sendspinBluetoothBuffer = 900
@@ -72,6 +80,8 @@ const (
 
 	multiGap = 350 * time.Millisecond
 )
+
+var releasesURL = "https://api.github.com/repos/bboe/overdub/releases/latest"
 
 var advertised atomic.Pointer[mdns.Responder]
 
@@ -314,6 +324,12 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 
 	go waitForAlexa(server)
 
+	useUpdate(server, name, func() {
+		stopping()
+		i.Close()
+		os.Exit(0)
+	})
+
 	api.Store(server)
 
 	base := []mdns.Advert{esphome.Advert(name, mac, apiPort)}
@@ -372,6 +388,38 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	log.Printf("esphome api stopped: %v", server.Listen(fmt.Sprintf(":%d", apiPort)))
 	stopping()
 	os.Exit(1)
+}
+
+func useUpdate(server *esphome.Server, name string, restart func()) {
+	if version == "" {
+		log.Printf("update: an unversioned build offers no updates")
+		return
+	}
+	key, err := releaseKey()
+	if err != nil {
+		log.Printf("update: %v; no updates are offered", err)
+		return
+	}
+	u := &update.Updater{
+		Current: version,
+		Name:    name,
+		Key:     key,
+		Paths: update.Paths{
+			Binary: binPath, Prev: prevPath, Trial: trialPath, Failed: failedPath, Jar: alexa.JarPath,
+			Boot:     bootPath,
+			JarOwner: alexa.MapUID,
+		},
+		API: releasesURL,
+		Client: &http.Client{
+			Timeout:   updateWait,
+			Transport: &http.Transport{DialContext: device.Dialer(15 * time.Second).DialContext},
+		},
+		Rollback: os.Getenv("OVERDUB_ROLLBACK") == "1",
+		Publish:  server.SetUpdate,
+		Restart:  restart,
+	}
+	u.Start(updateFirst, updateEvery, updateRetry)
+	server.UseUpdate(u.Check, u.Install)
 }
 
 func commandState() (jar, registered, known bool) {

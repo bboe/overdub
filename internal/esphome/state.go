@@ -16,7 +16,19 @@ const (
 	kindText
 	kindTextSensor
 	kindNumber
+	kindUpdate
 )
+
+type UpdateState struct {
+	Current     string
+	Latest      string
+	Title       string
+	Notes       string
+	URL         string
+	InProgress  bool
+	HasProgress bool
+	Progress    float32
+}
 
 type reading struct {
 	key   uint32
@@ -26,6 +38,8 @@ type reading struct {
 	state uint32
 	ok    bool
 	kind  int
+
+	update UpdateState
 }
 
 func (s *Server) readTicked() []reading {
@@ -185,6 +199,8 @@ func (s *Server) sendSensorsAt(conn *conn, readings []reading) error {
 			msgType, payload = msgTextSensorState, textState(r.key, r.text, !r.ok)
 		case kindNumber:
 			msgType, payload = msgNumberState, floatState(r.key, r.value, !r.ok)
+		case kindUpdate:
+			msgType, payload = msgUpdateState, updateState(r.key, r.update, !r.ok)
 		}
 		if err := s.send(conn, msgType, payload); err != nil {
 			return err
@@ -198,6 +214,21 @@ func textState(key uint32, text string, missing bool) []byte {
 	p.fixed32(1, key)
 	p.str(2, text)
 	p.boolean(3, missing)
+	return p.b
+}
+
+func updateState(key uint32, u UpdateState, missing bool) []byte {
+	var p pb
+	p.fixed32(1, key)
+	p.boolean(2, missing)
+	p.boolean(3, u.InProgress)
+	p.boolean(4, u.HasProgress)
+	p.float(5, u.Progress)
+	p.str(6, u.Current)
+	p.str(7, u.Latest)
+	p.str(8, u.Title)
+	p.str(9, u.Notes)
+	p.str(10, u.URL)
 	return p.b
 }
 

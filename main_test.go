@@ -121,7 +121,7 @@ func TestTheScriptsNameTheSendspinFilesTheDaemonKeeps(t *testing.T) {
 	}
 }
 
-func TestTheScriptsNameTheRollbackFilesTheDaemonClears(t *testing.T) {
+func TestTheScriptsNameThePathsAnUpdateUses(t *testing.T) {
 	for _, c := range []struct {
 		script string
 		names  []string
@@ -130,7 +130,7 @@ func TestTheScriptsNameTheRollbackFilesTheDaemonClears(t *testing.T) {
 		{"deploy/uninstall.py", []string{
 			`"` + trialPath + `"`, `"` + failedPath + `"`, `"` + binPath + `"`, `BIN + ".prev"`,
 		}},
-		{"deploy/install.py", []string{`"` + trialPath + `"`, `"` + failedPath + `"`}},
+		{"deploy/install.py", []string{`"` + bootPath + `"`, `"` + trialPath + `"`, `"` + failedPath + `"`}},
 	} {
 		script, err := os.ReadFile(c.script)
 		if err != nil {
@@ -138,7 +138,7 @@ func TestTheScriptsNameTheRollbackFilesTheDaemonClears(t *testing.T) {
 		}
 		for _, name := range c.names {
 			if !strings.Contains(string(script), name) {
-				t.Errorf("%s does not say %q, and the daemon clears that file", c.script, name)
+				t.Errorf("%s does not say %q, and an update uses that path", c.script, name)
 			}
 		}
 	}
