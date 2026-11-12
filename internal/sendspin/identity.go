@@ -3,11 +3,14 @@ package sendspin
 import (
 	"bytes"
 	"crypto/ecdh"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 )
 
 const keyFileLen = keyLen + pskLen
@@ -29,6 +32,12 @@ func allZero(b []byte) bool {
 type Keys struct {
 	Identity   Identity
 	PairingPSK []byte
+}
+
+func (k Keys) PairingToken() string {
+	body := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(
+		append(slices.Clone(k.Identity.Public), k.PairingPSK...))
+	return "SP:0" + strings.ReplaceAll(body, "2", "9")
 }
 
 func loadKeys(path string) (Keys, error) {

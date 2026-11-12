@@ -5,9 +5,18 @@
 `internal/esphome`. Home Assistant is the *client* and dials tcp/6053. We answer
 the handshake, list entities and push state.
 
-- The advertised API version is 1.12. Later versions gate entity kinds and
-  capability requests this daemon does not have. Home Assistant enforces no
-  floor.
+- The advertised API version is 1.15. From 1.15 Home Assistant sends a
+  `DeviceCapabilitiesRequest` on every connect and waits for the answer, so
+  the request must be answered even when there is nothing to report. Below
+  1.15 it builds the capabilities from `DeviceInfoResponse`, which has no
+  Sendspin field. Versions 1.13 and 1.14 gate climate flags and an optional
+  `object_id`, and nothing this daemon lists.
+- The capabilities carry the Sendspin `client_id`, with the pairing-token
+  flag, and the API answers `SendspinPairingTokenRequest` with the token.
+  That is how Music Assistant pairs the Dot through Home Assistant.
+  docs/sendspin.md has the token. A Dot with no Sendspin keys reports no
+  Sendspin capability, and answers a token request with `FAILED`, which
+  aioesphomeapi documents as "will not start until the device reboots".
 - Only a frame that decrypts buys the longer read deadline. A peer without the
   key holds a slot for 10 seconds at most.
 - Finishing the handshake does not prove the key. Message 1 carries nothing

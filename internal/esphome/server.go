@@ -86,6 +86,17 @@ const (
 	msgTextCommand       = 99
 	msgListEvent         = 107
 	msgEventState        = 108
+	msgCapabilitiesReq   = 149
+	msgCapabilitiesResp  = 150
+	msgSendspinTokenReq  = 159
+	msgSendspinTokenResp = 160
+)
+
+const (
+	sendspinPairingToken = 1 << 0
+
+	sendspinTokenOK     = 1
+	sendspinTokenFailed = 4
 )
 
 type physicalButton struct {
@@ -216,6 +227,9 @@ type Server struct {
 	alexa       func() (bool, bool)
 	btDevice    func() (string, bool)
 	memory      func() (float32, bool)
+
+	sendspinClientID string
+	sendspinToken    string
 
 	play        func(url string) error
 	command     func(text string) error
@@ -351,6 +365,10 @@ func (s *Server) UseButton(objectID string, mode func() string, setMode func(str
 
 func (s *Server) UseSendspin(on func() bool, set func(bool)) {
 	s.sendspinOn, s.sendspinSet = on, set
+}
+
+func (s *Server) UseSendspinPairing(clientID, token string) {
+	s.sendspinClientID, s.sendspinToken = clientID, token
 }
 
 func (s *Server) UseSendspinDelay(maxMS int, ms func() int, set func(int)) {
@@ -544,7 +562,7 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		conn.said = untrustedlog.Cut(client)
 		var msg pb
 		msg.u32(1, 1)  // api_version_major
-		msg.u32(2, 12) // api_version_minor
+		msg.u32(2, 15) // api_version_minor
 		msg.str(3, "overdub")
 		msg.str(4, s.name)
 		return s.send(conn, msgHelloResponse, msg.b)
@@ -559,6 +577,26 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 
 	case msgDeviceInfoRequest:
 		return s.send(conn, msgDeviceInfoResp, s.deviceInfo())
+
+	case msgCapabilitiesReq:
+		var msg pb
+		if s.sendspinToken != "" {
+			var sendspin pb
+			sendspin.u32(1, sendspinPairingToken) // feature_flags
+			sendspin.str(2, s.sendspinClientID)   // client_id
+			msg.sub(6, sendspin.b)                // sendspin
+		}
+		return s.send(conn, msgCapabilitiesResp, msg.b)
+
+	case msgSendspinTokenReq:
+		var msg pb
+		if s.sendspinToken == "" {
+			msg.u32(1, sendspinTokenFailed) // status
+		} else {
+			msg.u32(1, sendspinTokenOK) // status
+			msg.str(2, s.sendspinToken) // token
+		}
+		return s.send(conn, msgSendspinTokenResp, msg.b)
 
 	case msgListEntitiesReq:
 		return s.listEntities(conn)

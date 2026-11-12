@@ -457,6 +457,15 @@ To register a Dot:
 
 ### Pairing with Music Assistant
 
+- **Music Assistant 2.10.9 or later pairs the Dot by itself** through Home
+  Assistant 2026.11 or later, once both have the Dot. Home Assistant reads the
+  token over the API and hands it to Music Assistant, which pairs the Dot
+  whenever it is connected unpaired and Home Assistant has announced it.
+- This needs Music Assistant's **Home Assistant plugin** (Settings →
+  Plugins), connected as a Home Assistant administrator: Home Assistant serves
+  the token only to an admin. Without the plugin nothing is logged; the player
+  just waits in Music Assistant as needing setup. The daemon logs `paired with`. Paste the
+  token by hand only where that does not happen.
 - Every install prints the pairing token once the daemon has made its
   Sendspin key. A first install may print a warning instead; install again
   once the daemon runs.
@@ -464,7 +473,8 @@ To register a Dot:
   The daemon logs `paired with`, and its next connection logs `complete on the
   lt psk`.
 - **Treat the token as a password.** It never changes, and it pairs any server
-  that holds it. The installer keeps no copy. To rotate it, delete
+  that holds it. The installer keeps no copy, and Home Assistant stores none.
+  To rotate it, delete
   `/data/local/bin/.overdub-sendspin-key` and restart the daemon. Every server
   then sees a new player, and the old pairing records go unused.
 - **The Dot plays only for a paired server.** It offers no unpaired access,

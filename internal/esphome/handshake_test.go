@@ -261,8 +261,9 @@ func TestHandshakeWithTheRightKeyReachesTheAPI(t *testing.T) {
 			minor = f.num
 		}
 	})
-	if major != 1 || minor != 12 {
-		t.Errorf("API version %d.%d, want 1.12", major, minor)
+	if major != 1 || minor != 15 {
+		t.Errorf("API version %d.%d, want 1.15: below it Home Assistant never asks for the"+
+			" capabilities, so it never learns the Sendspin client id", major, minor)
 	}
 }
 

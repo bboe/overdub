@@ -113,8 +113,10 @@ Binary size, measured on a linux/arm build of the daemon:
 - The Sentinel's `psk_id` has neither `-` nor `_`, so it cannot tell base64url
   from standard base64. `SHA-256("5")` as a PSK gives a `psk_id` with both. The
   wrong alphabet would fail about 3 pairings in 4.
-- **The encoder is in `install.py`, and there is no decoder.** The daemon
-  never reads a token: the server does.
+- **There are 2 encoders and no decoder.** `install.py` builds the token to
+  print it. The daemon builds it to answer Home Assistant's
+  `SendspinPairingTokenRequest`. The daemon never reads a token: the server
+  does. The Go encoder is tested against the spec's reference vector.
 - Python's standard library has no X25519, so `install.py` derives the public
   key with the RFC 7748 ladder. It matches the RFC's two vectors, and 200
   random keys decoded through `aiosendspin`'s `decode_psk_token` gave back the
@@ -127,7 +129,8 @@ Binary size, measured on a linux/arm build of the daemon:
   so every uid can read the log, and it travels in any `adb pull`.
 - The daemon logs the `client_id` only. `install.py` reads the key file with
   `/system/bin/busybox od` through `su`, builds the token on the host, and
-  prints it to the terminal. It never reaches the Dot.
+  prints it to the terminal. The daemon sends the token only inside the
+  ESPHome API's encrypted session, and only when asked.
 - `su -c`'s `PATH` holds no `od`, `hexdump`, `xxd` or `base64`: the toolbox
   has none, and Magisk's busybox in `/sbin/.core/busybox` is not on it. So a
   bare `od` is not found, and the read comes back empty. Fire OS 5 ships

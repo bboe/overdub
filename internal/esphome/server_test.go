@@ -2567,3 +2567,63 @@ func TestAFailedPushSpendsThePeerBudget(t *testing.T) {
 		})
 	}
 }
+
+func answer(t *testing.T, s *Server, msgType int, want int) map[int]pbField {
+	t.Helper()
+	conn := &conn{sock: fakeAddr{}, out: make(chan frame, sendQueue)}
+	if err := s.handle(conn, msgType, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.out) != 1 {
+		t.Fatalf("message %d drew %d frames, want 1: Home Assistant waits for the answer",
+			msgType, len(conn.out))
+	}
+	f := <-conn.out
+	if f.msgType != want {
+		t.Fatalf("message %d was answered with %d, want %d", msgType, f.msgType, want)
+	}
+	fields := map[int]pbField{}
+	if err := pbWalk(f.payload, func(p pbField) { fields[p.field] = p }); err != nil {
+		t.Fatal(err)
+	}
+	return fields
+}
+
+func TestTheCapabilitiesCarryTheSendspinClientID(t *testing.T) {
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	s.UseSendspinPairing("client-id", "SP:0TOKEN")
+	sendspin := answer(t, s, msgCapabilitiesReq, msgCapabilitiesResp)[6]
+	fields := map[int]pbField{}
+	if err := pbWalk(sendspin.data, func(p pbField) { fields[p.field] = p }); err != nil {
+		t.Fatal(err)
+	}
+	if fields[1].num != sendspinPairingToken || string(fields[2].data) != "client-id" {
+		t.Errorf("sendspin capabilities are flags %d, client id %q; want %d and %q",
+			fields[1].num, fields[2].data, sendspinPairingToken, "client-id")
+	}
+}
+
+func TestADotWithoutSendspinKeysStillAnswersTheCapabilities(t *testing.T) {
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	if fields := answer(t, s, msgCapabilitiesReq, msgCapabilitiesResp); len(fields) != 0 {
+		t.Errorf("a dot with no sendspin keys reported capabilities %v", fields)
+	}
+}
+
+func TestTheTokenIsHandedOverOnRequest(t *testing.T) {
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	s.UseSendspinPairing("client-id", "SP:0TOKEN")
+	fields := answer(t, s, msgSendspinTokenReq, msgSendspinTokenResp)
+	if fields[1].num != sendspinTokenOK || string(fields[2].data) != "SP:0TOKEN" {
+		t.Errorf("token response is status %d, token %q", fields[1].num, fields[2].data)
+	}
+}
+
+func TestADotWithoutSendspinKeysReportsTheTokenFailed(t *testing.T) {
+	s := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
+	fields := answer(t, s, msgSendspinTokenReq, msgSendspinTokenResp)
+	if _, sent := fields[2]; fields[1].num != sendspinTokenFailed || sent {
+		t.Errorf("token response without keys is status %d with a token field: %v",
+			fields[1].num, sent)
+	}
+}

@@ -291,3 +291,15 @@ func TestTheTwoHalvesOfTheKeyFileDoNotShareOneArray(t *testing.T) {
 		t.Error("the pairing psk aliases the buffer it was read from")
 	}
 }
+
+func TestThePairingTokenMatchesTheSpecVector(t *testing.T) {
+	var keys Keys
+	for i := range 32 {
+		keys.Identity.Public = append(keys.Identity.Public, byte(i))
+		keys.PairingPSK = append(keys.PairingPSK, byte(0xe0+i))
+	}
+	const want = "SP:0AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYP6BYPC4PSOLZXH5DU6V97M5XXO74HR6LZ7J5PW674PT6X37T6757Y"
+	if got := keys.PairingToken(); got != want {
+		t.Errorf("token %s, want the spec's %s", got, want)
+	}
+}
