@@ -13,13 +13,13 @@ Each step prints one line, and ✅ means it was read back off the Dot:
 Installing overdub as kitchen on <serial>.
 
 ✅ build          prebuilt build/overdub, md5 63f1e442a0522439eea42570d30db241
-✅ root           su works
+✅ root           adb runs as root
 ✅ API key        kept the one already on the device
 ✅ adb key        /home/you/.android/adbkey.pub; Network ADB will offer Secure
 ✅ binary         md5 63f1e442a0522439eea42570d30db241
 ✅ key directory  /data/local/bin is drwx------
-✅ mapdump.jar    md5 524a11ae43fffe6774f4ca2daf8249e2; Alexa commands on
-✅ boot script    service.d/overdub.sh
+✅ boot script    /data/local/bin/overdub.sh
+✅ init           /system/etc/init/overdub.rc
 ✅ daemon         restarted as -name kitchen, pid 364 -> 2606
 ✅ pairing        read the Sendspin key
 
@@ -50,7 +50,7 @@ A released binary reports its version. A local build prints
 `overdub (unversioned build)`:
 
 ```sh
-adb shell 'su -c "/data/local/bin/overdub -version"'
+adb shell '/data/local/bin/overdub -version'
 ```
 
 The Dot's linker prints 4 `WARNING: linker:` lines first, merged into the same
@@ -95,8 +95,9 @@ R8_JAR=$SDK/build-tools/34.0.0/lib/d8.jar deploy/mapdump/build.sh
 deploy/install.py kitchen                          # binary, boot script, key
 ```
 
-- `install.py` installs `deploy/mapdump/mapdump.jar` if it is there, and says
-  which.
+- `install.py` no longer installs `mapdump.jar`: Fire OS 6 has no
+  `app_process` to run it. Alexa commands return once the credential is read
+  on Fire OS 6.
 - Running it again is safe. It pushes only what differs from the Dot, and
   restarts the daemon only when what runs may differ from what is installed.
   With nothing to change it ends `Already installed; nothing changed.`
@@ -111,9 +112,10 @@ ANDROID_SERIAL=<serial> deploy/install.py kitchen
 What goes where:
 
 - `overdub`: `/data/local/bin/`
-- `overdub.sh` (the boot script): Magisk `service.d`, inside `magisk.img`
+- `overdub.sh` (the boot script): `/data/local/bin/`
+- `overdub.rc`: `/system/etc/init/`, the init service that runs the boot
+  script at boot
 - `.overdub-noise-key`: `/data/local/bin/`, mode 600, generated if absent
-- `mapdump.jar`: `/data/local/map/`, if it was built
 - `adb_keys`: `/data/local/bin/`, from `~/.android/adbkey.pub` or `$ADBKEY`.
   It enables [`Secure`](#network-adb). Removed if there is no key to push.
 
@@ -125,22 +127,24 @@ The name:
   or ending with `-`. These are ESPHome's rules, and `install.py` enforces them.
 - Home Assistant identifies the device by its MAC, so a rename is accepted on
   the next connection. Entity ids keep the prefix they were created with.
-- A rename needs a reboot. The supervisor reads the boot script once at boot,
-  so it respawns the old name until then. `install.py` prints
-  `REBOOT REQUIRED` when it sees this.
+- A rename restarts the init service, so the new name runs at once.
+  `install.py` prints `REBOOT REQUIRED` only if init has not read
+  `overdub.rc` yet.
 - `<name>` below is the name **Home Assistant** knows the device by. If you
   rename the device there, the entity ids can follow, while the daemon log
   keeps the `-name` it was given.
 
-Reboot to start the daemon. It is supervised. If it dies, the grab is released
-and the action button goes back to Alexa.
+The first install ends asking for a reboot: init reads `overdub.rc` only at
+boot. After that, `install.py` starts or restarts the daemon itself. It is
+supervised. If it dies, the grab is released and the action button goes back
+to Alexa.
 
 ## Running it by hand
 
 The boot script runs the daemon. To run it by hand, as root, by full path:
 
 ```sh
-adb shell 'su -c "/data/local/bin/overdub -name kitchen"'
+adb shell '/data/local/bin/overdub -name kitchen'
 ```
 
 | Flag | |
@@ -311,7 +315,7 @@ data:
 the request:
 
 ```sh
-adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'
+adb shell 'logcat -d -v brief -s tts-Server tts-Playback'
 ```
 
 - `cannot estimate length of the next mp3 frame`: variable bitrate.
@@ -324,7 +328,7 @@ reaches the Dot. Ask the Dot:
 
 ```sh
 url=http://<host>:8123/
-adb shell "su -c 'curl -sS -m 5 -o /dev/null -w %{http_code} $url'"
+adb shell "curl -sS -m 5 -o /dev/null -w %{http_code} $url"
 ```
 
 `200` means the route is open. A curl error and `000` means it is not.
@@ -535,9 +539,9 @@ To register a Dot:
 ## Troubleshooting
 
 ```sh
-adb shell 'su -c "cat /data/local/tmp/overdub.log"'      # truncated per boot
-adb shell 'su -c "iptables -L INPUT -n -v | grep 6053"'  # packet counter
-adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
+adb shell 'cat /data/local/tmp/overdub.log'      # emptied when the service starts
+adb shell 'iptables -L INPUT -n -v | grep 6053'  # packet counter
+adb shell 'logcat -d -v brief -s tts-Server tts-Playback'   # playback
 ```
 
 - **Home Assistant times out adding the Dot**: check the tcp/6053 packet
@@ -553,7 +557,7 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
   key. Rerun `deploy/install.py <name>`.
 - **Nothing starts; the log says the key `decodes to N bytes`**: the key is
   corrupt. A reinstall keeps it, so delete it first:
-  `adb shell 'su -c "rm -f /data/local/bin/.overdub-noise-key"'`
+  `adb shell 'rm -f /data/local/bin/.overdub-noise-key'`
 - **Nothing starts; the log says `NAME is unset`**: the boot script was
   installed by hand. Rerun `deploy/install.py <name>`.
 - **Mute stopped working**: the clone's name. Android picks a keylayout by

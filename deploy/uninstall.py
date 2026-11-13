@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -22,8 +21,9 @@ ADBKEYS = "/data/misc/adb/adb_keys"
 API_PORT = 6053
 APPLIED = "/data/local/bin/.overdub-applied"
 BIN = "/data/local/bin/overdub"
-BOOT = "/sbin/.core/img/.core/service.d/overdub.sh"
+BOOT = "/data/local/bin/overdub.sh"
 FAILED = "/data/local/bin/.overdub-failed"
+INIT = "/system/etc/init/overdub.rc"
 KEY = "/data/local/bin/.overdub-noise-key"
 LABEL = 14
 INDENT = " " * (LABEL + 4)
@@ -39,7 +39,9 @@ STATE = argparse.Namespace(changed=False, pending=False, warned=False)
 TEMPS = (SENDKEY + ".new-", SENDPAIRS + ".new-", SENDLAST + ".new-")
 TRIAL = "/data/local/bin/.overdub-trial"
 SWEPT = [
+    INIT,
     BOOT,
+    BOOT + ".new",
     BIN,
     BIN + ".new",
     BIN + ".prev",
@@ -97,9 +99,13 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         )
     print(f"Removing overdub from {lines[0]}.")
     print()
-    if not re.search(r"uid=0\b", su("id")[1]):
-        fail("root", "su -c id did not report uid=0.")
-    ok("root", "su works")
+    if not re.search(r"uid=0\b", shell("id")[1]):
+        fail(
+            "root",
+            "adb shell id did not report uid=0. overdub needs the root adb that"
+            " firebreak's Fire OS 6 unlock leaves.",
+        )
+    ok("root", "adb runs as root")
 
     before = present()
     if before is None:
@@ -109,21 +115,22 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         fail("daemon", "adb went away before the kill.")
     STATE.changed = bool(before or pid)
 
-    su(f"rm -f {BOOT}")
-    su(
-        f"rm -f {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
+    shell(f"mount -o rw,remount /\nrm -f {INIT}\nmount -o ro,remount /")
+    shell(
+        f"rm -f {BOOT} {BOOT}.new {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
         f" {SENDKEY} {SENDKEY}.new-* {SENDPAIRS} {SENDPAIRS}.new-* {SENDLAST}"
         f" {SENDLAST}.new-* {ADBKEY} {APPLIED}\n"
         f"rm -rf {STAGE} {MAP}\n"
-        "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh"
+        "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh /data/local/tmp/overdub.rc"
     )
 
     if pid:
         pending(detail=f"stopping pid {pid}", label="daemon")
-        su(f"kill {pid}")
+        shell(f"kill {pid}")
         time.sleep(8)
+    shell("stop overdub")
 
-    su(f"rm -f {LOG}\nrmdir /data/local/bin 2>/dev/null\ntrue")
+    shell(f"rm -f {LOG}\nrmdir /data/local/bin 2>/dev/null\ntrue")
     if STATE.changed:
         pending(detail="waiting for the supervisor's next cycle", label="files")
         time.sleep(6)
@@ -140,8 +147,9 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         if path == LOG:
             show(
                 f"STILL SUPERVISED: {LOG} came back after it was removed, so the"
-                " service.d loop is still running. ps shows it as bare sh rather than"
-                " the script it runs, so a reboot is what ends it.",
+                " boot loop is still running. ps shows it as bare sh rather than"
+                " the script it runs. adb shell 'stop overdub' ends it, and so does"
+                " a reboot.",
                 label="supervisor",
                 sign=mark("fail"),
                 stream=sys.stderr,
@@ -153,6 +161,12 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
                 sign=mark("fail"),
                 stream=sys.stderr,
             )
+    if not re.search(r"^\S+ / \S+ ro[,\s]", shell("cat /proc/mounts")[1], re.MULTILINE):
+        warn(
+            "files",
+            "/ did not remount read-only after removing the init service. A reboot"
+            " mounts it read-only again.",
+        )
     if not left:
         ok(
             "files",
@@ -191,13 +205,15 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
     closed = []
     for port in (API_PORT, SENDSPIN_PORT):
         rule = f"-i wlan0 -p tcp --dport {port} -j ACCEPT"
-        deleted = su(
+        deleted = shell(
             f"while iptables -w -C INPUT {rule} 2>/dev/null; do\n"
             f"  iptables -w -D INPUT {rule} || break\n"
             "  echo deleted\n"
             "done"
         )[1].split("\n")
-        answer = su(f"iptables -L INPUT -n | grep {port}; echo checked")[1].split("\n")
+        answer = shell(f"iptables -L INPUT -n | grep {port}; echo checked")[1].split(
+            "\n"
+        )
         found = [line for line in answer if f"dpt:{port}" in line]
         if "checked" not in answer:
             found = ["could not read the chain back"]
@@ -217,7 +233,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
     elif not STATE.warned:
         ok("firewall", "no overdub rules open")
 
-    cleared = su(
+    cleared = shell(
         "for f in /data/property/persist.overdub.*; do\n"
         '  [ -e "$f" ] || continue\n'
         '  setprop "${f##*/}" ""\n'
@@ -226,7 +242,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         "done"
     )[1].split("\n")
     STATE.changed |= "cleared" in cleared
-    answer = su(f"getprop {SENDFLAG}; echo checked")[1].split("\n")
+    answer = shell(f"getprop {SENDFLAG}; echo checked")[1].split("\n")
     value = [line for line in answer if line not in {"checked", ""}]
     if "checked" not in answer:
         warn("settings", f"Could not read {SENDFLAG} back; it may still be set.")
@@ -291,7 +307,7 @@ def ok(label: str, *lines: str) -> None:
 
 
 def overdub_pid() -> str | None:
-    code, listing = su("ps")
+    code, listing = shell("ps")
     if code != 0:
         return None
     for line in listing.split("\n"):
@@ -310,7 +326,7 @@ def pending(*, detail: str, label: str) -> None:
 
 
 def present() -> list[str] | None:
-    answer = su(
+    answer = shell(
         f"for path in {' '.join(SWEPT)} {SENDKEY}.new-* {SENDPAIRS}.new-*"
         f" {SENDLAST}.new-*; do\n"
         '  [ -e "$path" ] && echo "$path"\n'
@@ -320,6 +336,10 @@ def present() -> list[str] | None:
     if "swept" not in answer:
         return None
     return [line for line in answer if line in SWEPT or line.startswith(TEMPS)]
+
+
+def shell(command: str) -> tuple[int, str]:
+    return adb("shell", command)
 
 
 def show(*lines: str, label: str, sign: str, stream: TextIO = sys.stdout) -> None:
@@ -338,10 +358,6 @@ def show(*lines: str, label: str, sign: str, stream: TextIO = sys.stdout) -> Non
                 flush=True,
             )
         first = INDENT
-
-
-def su(command: str) -> tuple[int, str]:
-    return adb("shell", "su -c " + shlex.quote(command))
 
 
 def warn(label: str, *lines: str) -> None:

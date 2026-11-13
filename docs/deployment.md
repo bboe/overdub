@@ -6,25 +6,58 @@
   boot script. A name kept there is one `git checkout` from empty, and the next
   install pushes that over a working Dot. The running supervisor still holds the
   old arguments, so nothing fails until the next reboot.
-- A rename takes effect only after a reboot. The boot script runs once, at boot,
-  and the shell loop that respawns the daemon holds its arguments. After a kill,
-  the loop restarts the daemon under the old name.
-- `install.py` reads the running daemon's `/proc/<pid>/cmdline` and prints
-  `REBOOT REQUIRED` when the name does not match what it pushed.
-- The boot script is thin on purpose. Android has no user-level supervisor, and
-  `init` would need an `.rc` entry in a ramdisk this Magisk cannot patch, so
-  `service.d` is the hook and a shell loop is the restart. It supplies the name;
+- init runs the boot script, through `deploy/overdub.rc` in
+  `/system/etc/init`. It is a `oneshot` service started on
+  `sys.boot_completed`, so init never restarts it, and the script's own loop
+  restarts the daemon.
+- The loop runs in the foreground, so the service is the loop: `stop overdub`
+  kills it, and `init.svc.overdub` reads `running` for as long as it runs. A
+  loop backgrounded from a oneshot service would outlive the service, and init
+  would report it stopped.
+- The service runs `/system/bin/sh` with `seclabel u:r:adbd:s0`. SELinux
+  enforces on Fire OS 6. init may not execute a file in `/data`
+  (`shell_data_file`), and may not start a service in `su`. `adbd` and `su`
+  are the only permissive domains, and init may start a service in `adbd`, so
+  the shell starts there and runs the binary from `/data`. Each denial is
+  logged as `permissive=1` and allowed.
+- `/system` is read-only and verity is off: firebreak's Fire OS 6 unlock turns
+  it off. `install.py` remounts `/` read-write to write the `.rc` file and
+  remounts it read-only after. Fire OS 6 mounts system as root, so the remount
+  is of `/`.
+- init reads its `.rc` files only at boot. So the first install ends asking for
+  a reboot. After that, `install.py` restarts the service: a SIGTERM to the
+  daemon, so its handler withdraws the mDNS records and keeps the Sendspin
+  delay, then `stop overdub`, a wait for `init.svc.overdub` to read
+  `stopped`, and `start overdub`. The new boot script is read when the service
+  starts, so a rename applies at once.
+- The wait matters. `stop` returns before init reaps the loop, and a `start`
+  that arrives first finds the service still running and does nothing; the
+  reap then leaves it stopped.
+- It restarts whenever the running daemon may not match what is installed: no
+  applied stamp for it, a changed boot script, or a running `-name` other than
+  the one pushed, read from `/proc/<pid>/cmdline`. So a rename run that died
+  part way is finished by the next run.
+- A changed `.rc` file is different: init keeps the definition it read at
+  boot, so `install.py` prints `REBOOT REQUIRED` when it replaces one with
+  other contents. Writing one where none was, after an uninstall, warns of
+  nothing: init holds the definition the removed file gave it at boot, and
+  nothing on the Dot records what that file said. If the reinstall changed
+  `overdub.rc`, reboot.
+- Every remount is read back from `/proc/mounts`, and a `/` left read-write is
+  reported. A reboot mounts it read-only again.
+- The boot script is thin on purpose. It supplies the name and the rollback;
   the daemon does everything else.
-- Both of firebreak's v1 targets, `amonet-biscuit-v1.1.0-bboe` (the default)
-  and `amonet-biscuit-v1.1.0`, install Magisk 17.3, which keeps `service.d` at
-  `/sbin/.core/img/.core/service.d`. From v18 the boot patch and that path
-  change. overdub needs only `su` and `service.d`, so 17.3 is enough.
-- An update would replace the boot image and remove root. The boot script stays
-  in `magisk.img` under `/data`, but nothing runs it: Magisk's init went with
-  the boot image. firebreak hides `com.amazon.device.software.ota` and points
-  the Amazon update hosts at `127.0.0.1`, so a rooted Dot can go on Wi-Fi.
-- The daemon waits up to 60 seconds for its input node, because `service.d` can
-  run before the input drivers are up.
+- It is replaced by rename, as the binary is. The service's shell reads it as it
+  runs, so a copy over it would leave the shell at its old offset in the new
+  text when the loop exits.
+- The service started 12.7 seconds into a boot, about when
+  `sys.boot_completed` came. The daemon waits up to 60 seconds for its input
+  node.
+- An update would replace `/system` and remove root and the `.rc` file.
+  firebreak's Fire OS 6 unlock disables `otad` and points Amazon's update hosts
+  at `127.0.0.1`, so a rooted Dot can go on Wi-Fi.
+- The log is emptied each time the service starts: at boot, and at each
+  restart `install.py` makes.
 - The loop truncates the log every 20 restarts. Otherwise a daemon that exits at
   once -- no key, say -- appends a failure every 5 seconds for the whole boot.
   It counts restarts itself because this toolbox has no `wc`.
@@ -127,27 +160,20 @@
 | file | on the Dot | owner, mode | staged in | checked by |
 |---|---|---|---|---|
 | `overdub` | `bin/overdub` | root, `0755` | `tmp` | md5, `-x` |
-| boot script | `service.d/overdub.sh` | root, `0755` | `tmp` | md5, `-x` |
+| boot script | `bin/overdub.sh` | root, `0755` | `tmp` | md5, `-x` |
+| init service | `/system/etc/init/overdub.rc` | root, `0644` | `tmp` | md5 |
 | API key | `bin/.overdub-noise-key` | root, `0600` | `0700` dir | text, mode |
 | adb public key | `bin/adb_keys` | root, `0644` | `0700` dir | text |
-| `mapdump.jar` | `/data/local/map/` | 32051, `0644` | `tmp` | md5, 32051 `-r` |
 
-`bin` is `/data/local/bin`, `0700`. `service.d` is
-`/sbin/.core/img/.core/service.d`. `tmp` is `/data/local/tmp`.
-`/data/local/map` is `0755`, owned by 32051.
+`bin` is `/data/local/bin`, `0700`. `tmp` is `/data/local/tmp`. Every
+command runs through root adb: firebreak's Fire OS 6 unlock leaves an adbd
+that runs as root, and no `su`.
 
-- `/data/local/bin` exists on no stock device, and every alternative is
-  unusable: there is no `/usr`, `/` is the boot ramdisk and is rebuilt every
-  boot, `/system` is read-only and Magisk leaves it alone, and
-  `/data/local/tmp` is `root:shell` scratch.
-- The jar is not in `bin`: MAP's uid loads it and cannot traverse `0700`.
-  `/data/local` is already `o+x`. Ownership matters rather than the path:
-  dalvik may write beside the jar.
-- A jar that uid 32051 cannot reach fails much later, with a message about a
-  class. So the check runs `[ -r ]` as that uid rather than parsing `ls`.
-  Toolbox `ls -ln` prints no link count, busybox's does, and Magisk puts its
-  busybox first on `PATH`. `[ -r ]` covers the file mode and the directory
-  traversal together.
+- `/data/local/bin` exists on no stock device. Only the `.rc` file goes in
+  `/system`: an update rewrites `/system`, and the binary is updated from the
+  Dot itself, so everything else lives in `/data`.
+- Fire OS 6 has `md5sum` and no `md5`, and no busybox; `od` and `ls` are
+  toybox's.
 - The API pre-shared key is generated on the installing machine and printed
   once. An install that finds a key keeps it, so a reinstall does not lock Home
   Assistant out. The check "is there a key already" is the only one whose wrong
@@ -196,13 +222,11 @@
   Network ADB options only when it connects, so a change to either key needs a
   restart to reach it.
 - A restart drops Home Assistant and Music Assistant and hands the button to
-  Alexa for about 5 seconds, and a new boot script alone gains nothing from
-  one: the supervisor holds the arguments it started with. So a rename is
-  reported as REBOOT REQUIRED without a kill.
+  Alexa for about 5 seconds. A changed boot script restarts the init service
+  rather than the daemon, because the loop holds the arguments it started
+  with: killing the daemon alone would respawn the old name.
 - A repair counts as a change, so that run does not end `Already installed`:
-  a mode on `/data/local/bin`, the API key or the boot script, or an owner or
-  mode under `/data/local/map`. Those are read from `ls -ln`, which prints a
-  link count under busybox and none under toolbox, so both shapes are parsed.
+  a mode on `/data/local/bin`, the API key or the boot script.
 - A run that changed nothing but warned, such as a daemon not running or a
   rename awaiting a reboot, ends `Nothing changed; see the warning above.`
   instead, so the last line does not read as success.
@@ -215,10 +239,11 @@
 
 `uninstall.py` works in this order:
 
-1. Delete the boot script, alone. It is the only thing that starts the daemon
-   at boot, so a reboot part way through leaves nothing running.
-2. Delete the binary, the previous binary, the trial marker, the failure
-   record, the keys, the applied stamp, the staging directory and
+1. Delete the `.rc` file, alone, remounting `/` to do it. It is the only thing
+   that starts the daemon at boot, so a reboot part way through leaves nothing
+   running.
+2. Delete the boot script, the binary, the previous binary, the trial marker,
+   the failure record, the keys, the applied stamp, the staging directory and
    `/data/local/map`.
    The binary goes before the kill because the supervisor is a live shell
    loop: deleting the boot script does not stop it, and it respawns a killed
@@ -226,8 +251,9 @@
    the binary ends it. The kernel keeps a running executable's inode until the
    last descriptor closes.
 3. Kill the daemon with SIGTERM, which reaches the handler that releases the
-   grab. SIGKILL would also work, since the kernel drops the grab with the
-   descriptor.
+   grab, withdraws the mDNS records and keeps the Sendspin delay. With the
+   binary gone the loop then ends, and `stop overdub` after the wait is only a
+   safeguard: `stop` kills with SIGKILL, so the handler would not run.
 4. Delete the log, wait 6 seconds, and sweep for leftovers. `ps` cannot find
    the loop: it shows as bare `sh`, and a `/proc/*/cmdline` scan matches its
    own subshells. The loop recreates the log every 5-second cycle, so a log
@@ -260,7 +286,7 @@
   uninstalled` and the notes are never printed. docs/usage.md's Uninstalling
   section says the same.
 - The filter is an allowlist, not "anything echoed", because `adb` merges
-  stderr into stdout and a linker warning from `su` would read as a leftover.
+  stderr into stdout and a linker warning would read as a leftover.
 - The Sendspin paths are Go constants too. `main_test.go` checks that
   `install.py` names `sendspinKeyPath`, and that `uninstall.py` names it,
   `sendspinPairsPath` and `sendspinLastPath`.

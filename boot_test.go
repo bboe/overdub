@@ -81,7 +81,6 @@ func (b *bootLoop) run(t *testing.T) (runs []string, log string) {
 		{"/data/local/tmp", b.dir + "/tmp"},
 		{"sleep 5", ":"},
 		{"\nNAME=\n", "\nNAME=kitchen\n"},
-		{"\n) &\n", "\n)\n"},
 	} {
 		if !strings.Contains(script, r.old) {
 			t.Fatalf("deploy/overdub.sh no longer says %q, which this test rewrites", r.old)

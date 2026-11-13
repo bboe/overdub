@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# Magisk late_start service: start overdub, and restart it if it dies. While an
-# update is on trial, a new binary that exits 3 times is replaced by the one it
-# updated.
+# Run by init through deploy/overdub.rc: start overdub, and restart it if it
+# dies. While an update is on trial, a new binary that exits 3 times is replaced
+# by the one it updated.
 
 BIN=/data/local/bin/overdub
 PREV=/data/local/bin/overdub.prev
@@ -24,45 +24,43 @@ if [ -z "$NAME" ]; then
   exit 0
 fi
 
-(
-  restarts=0
-  tries=0
-  tried=
-  while [ -x "$BIN" ]; do
-    if [ -f "$TRIAL" ]; then
-      trial=$(cat "$TRIAL")
-      if [ "$trial" != "$tried" ]; then
-        tried=$trial
-        tries=0
+restarts=0
+tries=0
+tried=
+while [ -x "$BIN" ]; do
+  if [ -f "$TRIAL" ]; then
+    trial=$(cat "$TRIAL")
+    if [ "$trial" != "$tried" ]; then
+      tried=$trial
+      tries=0
+    fi
+    tries=$((tries + 1))
+  else
+    tried=
+    tries=0
+  fi
+  if [ "$tries" -gt 3 ]; then
+    if [ -x "$PREV" ]; then
+      mv "$PREV" "$BIN"
+      if [ -f "$JAR.prev" ]; then
+        mv "$JAR.prev" "$JAR"
       fi
-      tries=$((tries + 1))
+      echo "$tried" > "$FAILED"
+      echo "overdub: the update to $tried exited 3 times; back to the binary it replaced" >> "$LOG"
     else
-      tried=
-      tries=0
+      rm -f "$JAR.prev"
+      echo "overdub: the update to $tried exited 3 times, and $PREV is missing; keeping it" >> "$LOG"
     fi
-    if [ "$tries" -gt 3 ]; then
-      if [ -x "$PREV" ]; then
-        mv "$PREV" "$BIN"
-        if [ -f "$JAR.prev" ]; then
-          mv "$JAR.prev" "$JAR"
-        fi
-        echo "$tried" > "$FAILED"
-        echo "overdub: the update to $tried exited 3 times; back to the binary it replaced" >> "$LOG"
-      else
-        rm -f "$JAR.prev"
-        echo "overdub: the update to $tried exited 3 times, and $PREV is missing; keeping it" >> "$LOG"
-      fi
-      rm -f "$TRIAL"
-      tried=
-      tries=0
-    fi
-    OVERDUB_ROLLBACK=1 "$BIN" -name "$NAME" >>"$LOG" 2>&1
-    restarts=$((restarts + 1))
-    if [ "$restarts" -ge 20 ]; then
-      : > "$LOG"
-      echo "overdub: 20 restarts; truncating the log and carrying on" >> "$LOG"
-      restarts=0
-    fi
-    sleep 5
-  done
-) &
+    rm -f "$TRIAL"
+    tried=
+    tries=0
+  fi
+  OVERDUB_ROLLBACK=1 "$BIN" -name "$NAME" >>"$LOG" 2>&1
+  restarts=$((restarts + 1))
+  if [ "$restarts" -ge 20 ]; then
+    : > "$LOG"
+    echo "overdub: 20 restarts; truncating the log and carrying on" >> "$LOG"
+    restarts=0
+  fi
+  sleep 5
+done

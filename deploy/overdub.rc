@@ -1,0 +1,10 @@
+service overdub /system/bin/sh /data/local/bin/overdub.sh
+    class late_start
+    user root
+    group root
+    seclabel u:r:adbd:s0
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start overdub

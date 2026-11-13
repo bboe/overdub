@@ -48,7 +48,7 @@ const (
 	trialPath  = "/data/local/bin/.overdub-trial"
 	failedPath = "/data/local/bin/.overdub-failed"
 	trialWait  = 60 * time.Second
-	bootPath   = "/sbin/.core/img/.core/service.d/overdub.sh"
+	bootPath   = "/data/local/bin/overdub.sh"
 
 	updateFirst = time.Minute
 	updateEvery = 6 * time.Hour
