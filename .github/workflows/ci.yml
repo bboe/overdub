@@ -241,7 +241,7 @@ jobs:
           mkdir -p "$dir/build" "$dir/deploy/mapdump"
           cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
           cp -r docs "$dir/docs"
-          cp deploy/install.py deploy/uninstall.py deploy/overdub.sh "$dir/deploy/"
+          cp deploy/install.py deploy/uninstall.py deploy/overdub.sh deploy/overdub.rc "$dir/deploy/"
           cp build/overdub "$dir/build/overdub"
           cp deploy/mapdump/mapdump.jar "$dir/deploy/mapdump/"
           # Same inputs, same tarball: the mtimes, ordering and owner a tar
@@ -289,6 +289,8 @@ jobs:
               '$1 == "-rwxr-xr-x" && $NF == p { ok = 1 } END { exit !ok }' <<<"$listing" ||
               { echo "not in the tarball, or not executable: deploy/$f"; exit 1; }
           done
+          grep -qE " overdub-$GITHUB_REF_NAME/deploy/overdub\.rc$" <<<"$listing" ||
+            { echo "not in the tarball: deploy/overdub.rc"; exit 1; }
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:

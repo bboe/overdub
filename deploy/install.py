@@ -16,7 +16,6 @@ import hashlib
 import os
 import pathlib
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -31,26 +30,16 @@ BIN_DIR = "/data/local/bin"
 ADB_KEYS = BIN_DIR + "/adb_keys"
 APPLIED = BIN_DIR + "/.overdub-applied"
 BINARY = BIN_DIR + "/overdub"
-BOOT = "/sbin/.core/img/.core/service.d/overdub.sh"
-BUSYBOX = "/system/bin/busybox"
+BOOT = "/data/local/bin/overdub.sh"
 CLEANUP_WAIT = 30
 DNS_LABEL = 63
 FAILED = "/data/local/bin/.overdub-failed"
+INIT = "/system/etc/init/overdub.rc"
 KEY = "/data/local/bin/.overdub-noise-key"
 KEY_LINE = re.compile(r"ssh-|[A-Za-z0-9+/]{32,}")
 KEY_SHAPE = re.compile(r"[A-Za-z0-9+/]{43}=")
 LABEL = 14
 INDENT = " " * (LABEL + 4)
-LS_LINES = (
-    re.compile(
-        r"^([-d][rwxst-]{9})\s+(\d+)\s+(\d+)\s+(?:\d+\s+)?\d{4}-\d\d-\d\d\s",
-        re.MULTILINE,
-    ),
-    re.compile(
-        r"^([-d][rwxst-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+\d+\s+[A-Z][a-z]{2}\s",
-        re.MULTILINE,
-    ),
-)
 MAP_DIR = "/data/local/map"
 MD5_SHAPE = re.compile(r"^[0-9a-f]{32}", re.MULTILINE)
 OD_LINE = re.compile(r"(?:\s*[0-9a-f]{2})+\s*")
@@ -64,6 +53,7 @@ STATE = argparse.Namespace(
     binary_changed=False,
     boot_changed=False,
     changed=False,
+    init_changed=False,
     key_landed=False,
     pending=False,
     staged=False,
@@ -113,7 +103,7 @@ def adb_ok(*args: str) -> str:
 
 
 def applied(pid: str) -> str:
-    listing = su(f"md5 {BINARY} {KEY} {ADB_KEYS} 2>/dev/null")[1]
+    listing = shell(f"md5sum {BINARY} {KEY} {ADB_KEYS} 2>/dev/null")[1]
     found = {
         path: digest
         for digest, path in re.findall(
@@ -133,7 +123,7 @@ def attempt(*, action: Callable[[], object], fix: str, label: str) -> None:
             label,
             f"The Dot did not answer within {CLEANUP_WAIT} seconds. Once it is"
             " back, remove what this install left:",
-            f"  adb shell 'su -c \"{fix}\"'",
+            f"  adb shell '{fix}'",
         )
 
 
@@ -198,10 +188,10 @@ def build() -> None:
 
 
 def check_key_mode() -> str | None:
-    if first_field(start="-", text=su(f"ls -l {KEY}")[1]) != "-rw-------":
+    if first_field(start="-", text=shell(f"ls -l {KEY}")[1]) != "-rw-------":
         STATE.changed = True
-    su(f"chmod 600 {KEY}")
-    mode = first_field(start="-", text=su(f"ls -l {KEY}")[1])
+    shell(f"chmod 600 {KEY}")
+    mode = first_field(start="-", text=shell(f"ls -l {KEY}")[1])
     if mode != "-rw-------":
         return f"The API key is {mode or 'nothing'}, want -rw-------."
     return None
@@ -219,7 +209,7 @@ def cleanup() -> None:
         attempt(action=discard_adb_key, fix=f"rm -f {ADB_KEYS}", label="adb key")
     if STATE.adb_staged:
         attempt(
-            action=lambda: su(f"rm -rf {ADB_STAGE}"),
+            action=lambda: shell(f"rm -rf {ADB_STAGE}"),
             fix=f"rm -rf {ADB_STAGE}",
             label="adb key",
         )
@@ -228,7 +218,7 @@ def cleanup() -> None:
 
 
 def device_key() -> str | None:
-    code, answer = su(f"cat {KEY}; echo --read-ok--")
+    code, answer = shell(f"cat {KEY}; echo --read-ok--")
     lines = answer.split("\n")
     if code != 0 or "--read-ok--" not in lines:
         return None
@@ -242,19 +232,19 @@ def device_key() -> str | None:
 
 def discard_adb_key() -> None:
     STATE.adb_key_landed = False
-    su(f"rm -f {ADB_KEYS}")
+    shell(f"rm -f {ADB_KEYS}")
     if probe(f"-f {ADB_KEYS}") != "no":
         warn(
             "adb key",
             f"An unverified adb public key may still be at {ADB_KEYS}, and"
             " Network ADB would offer Secure against it. Remove it:",
-            f"  adb shell 'su -c \"rm -f {ADB_KEYS}\"'",
+            f"  adb shell 'rm -f {ADB_KEYS}'",
         )
 
 
 def discard_new_key() -> None:
     STATE.key_landed = False
-    su(f"rm -f {KEY}")
+    shell(f"rm -f {KEY}")
     if probe(f"-f {KEY}") == "no":
         note("The unverified key was removed. Install again to generate one.")
         return
@@ -262,7 +252,7 @@ def discard_new_key() -> None:
         "API key",
         "COULD NOT REMOVE the key just written, and it was never printed."
         " Nothing can connect with it. Remove it by hand before installing again:",
-        f"  adb shell 'su -c \"rm -f {KEY}\"'",
+        f"  adb shell 'rm -f {KEY}'",
     )
 
 
@@ -282,7 +272,7 @@ def install_adb_key(*, lines: list[str] | None, path: pathlib.Path) -> None:
     if lines is None:
         if probe(f"-f {ADB_KEYS}") != "no":
             STATE.changed = True
-        su(f"rm -f {ADB_KEYS}")
+        shell(f"rm -f {ADB_KEYS}")
         if probe(f"-f {ADB_KEYS}") != "no":
             fail(
                 "adb key",
@@ -297,7 +287,7 @@ def install_adb_key(*, lines: list[str] | None, path: pathlib.Path) -> None:
             " reboots.",
         )
         return
-    code, answer = su(f"cat {ADB_KEYS}; echo; echo --read-ok--")
+    code, answer = shell(f"cat {ADB_KEYS}; echo; echo --read-ok--")
     on_device = [line.strip() for line in answer.split("\n")]
     keys = [line for line in on_device if KEY_LINE.match(line)]
     wanted = [line for line in lines if KEY_LINE.match(line)]
@@ -308,9 +298,11 @@ def install_adb_key(*, lines: list[str] | None, path: pathlib.Path) -> None:
     stage(directory=ADB_STAGE, flag="adb_staged", label="adb key")
     adb_ok("push", str(path), ADB_STAGE + "/k.pub")
     STATE.adb_key_landed = True
-    su_ok(f"cp {ADB_STAGE}/k.pub {ADB_KEYS}\nchmod 644 {ADB_KEYS}\nrm -rf {ADB_STAGE}")
+    shell_ok(
+        f"cp {ADB_STAGE}/k.pub {ADB_KEYS}\nchmod 644 {ADB_KEYS}\nrm -rf {ADB_STAGE}"
+    )
     STATE.adb_staged = False
-    code, answer = su(f"cat {ADB_KEYS}; echo; echo --read-ok--")
+    code, answer = shell(f"cat {ADB_KEYS}; echo; echo --read-ok--")
     on_device = answer.split("\n")
     if code != 0 or "--read-ok--" not in on_device:
         discard_adb_key()
@@ -325,13 +317,13 @@ def install_adb_key(*, lines: list[str] | None, path: pathlib.Path) -> None:
 
 
 def install_api_key() -> None:
-    present = su(f"if [ -f {KEY} ]; then echo yes; else echo no; fi")[1]
+    present = shell(f"if [ -f {KEY} ]; then echo yes; else echo no; fi")[1]
     present = yes_no(present)
     if present is None:
         fail(
             "API key",
             "Could not tell whether the device already has a key. Nothing was"
-            " changed. Check that adb and su still work, and try again.",
+            " changed. Check that adb still works, and try again.",
         )
     if present == "yes":
         existing = device_key()
@@ -339,7 +331,7 @@ def install_api_key() -> None:
             fail(
                 "API key",
                 "Could not read the key off the device. Nothing was changed. Check"
-                " that adb and su still work, and try again.",
+                " that adb still works, and try again.",
             )
         if not existing:
             fail(
@@ -348,7 +340,7 @@ def install_api_key() -> None:
                 " daemon will not start with it, and an install keeps an existing"
                 " key. Nothing was changed. Delete it and install again to get a"
                 " new one, then give that to Home Assistant:",
-                f"  adb shell 'su -c \"rm -f {KEY}\"'",
+                f"  adb shell 'rm -f {KEY}'",
             )
         problem = check_key_mode()
         if problem:
@@ -362,7 +354,7 @@ def install_api_key() -> None:
     stage(directory=STAGE, flag="staged", label="API key")
     adb_ok("push", keyfile, STAGE + "/k.txt")
     STATE.key_landed = True
-    su_ok(
+    shell_ok(
         f"umask 077\nmkdir -p {BIN_DIR}\ncp {STAGE}/k.txt {KEY}\nchmod 600 {KEY}\n"
         f"rm -rf {STAGE}"
     )
@@ -402,10 +394,10 @@ def install_binary(boot_script: str) -> None:
         remote_md5(BOOT) != md5(boot_script) or probe(f"-x {BOOT}") != "yes"
     )
     STATE.changed |= STATE.binary_changed or STATE.boot_changed
-    if not re.search(r"^drwx------", su(f"ls -ldn {BIN_DIR}")[1], re.MULTILINE):
+    if not re.search(r"^drwx------", shell(f"ls -ldn {BIN_DIR}")[1], re.MULTILINE):
         STATE.changed = True
-    su_ok(f"mkdir -p {BIN_DIR}\nchmod 700 {BIN_DIR}")
-    su_ok(f"rm -f {TRIAL} {FAILED} {BINARY}.prev {MAP_DIR}/mapdump.jar.prev")
+    shell_ok(f"mkdir -p {BIN_DIR}\nchmod 700 {BIN_DIR}")
+    shell_ok(f"rm -f {TRIAL} {FAILED} {BINARY}.prev {MAP_DIR}/mapdump.jar.prev")
     if probe(f"-e {TRIAL}") != "no":
         fail(
             "binary",
@@ -414,7 +406,7 @@ def install_binary(boot_script: str) -> None:
         )
     if STATE.binary_changed:
         adb_ok("push", str(ROOT / "build/overdub"), "/data/local/tmp/overdub")
-        su_ok(
+        shell_ok(
             f"cp /data/local/tmp/overdub {BINARY}.new\n"
             f"chmod 755 {BINARY}.new\n"
             f"mv -f {BINARY}.new {BINARY}\n"
@@ -422,9 +414,10 @@ def install_binary(boot_script: str) -> None:
         )
     if STATE.boot_changed:
         adb_ok("push", boot_script, "/data/local/tmp/s.sh")
-        su_ok(
-            f"cp /data/local/tmp/s.sh {BOOT}\n"
-            f"chmod 755 {BOOT}\n"
+        shell_ok(
+            f"cp /data/local/tmp/s.sh {BOOT}.new\n"
+            f"chmod 755 {BOOT}.new\n"
+            f"mv -f {BOOT}.new {BOOT}\n"
             "rm -f /data/local/tmp/s.sh"
         )
 
@@ -440,7 +433,7 @@ def install_binary(boot_script: str) -> None:
         fail("binary", "The binary landed, but is not executable.")
     ok("binary", f"{'md5' if STATE.binary_changed else 'unchanged, md5'} {built}")
 
-    mode = su(f"ls -ldn {BIN_DIR}")[1]
+    mode = shell(f"ls -ldn {BIN_DIR}")[1]
     found = re.search(r"^d[rwx-]{9}", mode, re.MULTILINE)
     mode = found.group() if found else ""
     if mode != "drwx------":
@@ -459,88 +452,53 @@ def install_boot_script(boot_script: str) -> None:
     if installed != built:
         fail(
             "boot script",
-            f"The boot script did not land in service.d (device has"
-            f" {installed or 'no hash'}, pushed {built}). This device's Magisk"
-            " 17.3 keeps service.d inside magisk.img, at /sbin/.core/img/.core;"
-            " later Magisk dropped the image for /data/adb/service.d. Check which"
-            " this one runs:",
-            "  adb shell su -c 'magisk -v'",
+            f"The boot script did not land (device has {installed or 'no hash'},"
+            f" pushed {built}).",
         )
     answer = probe(f"-x {BOOT}")
     if answer is None:
         fail("boot script", "The device did not say whether it is executable.")
     if answer != "yes":
         fail("boot script", "The boot script landed, but is not executable.")
-    where = f"{BOOT.rsplit('/', 2)[1]}/overdub.sh"
-    ok("boot script", where if STATE.boot_changed else f"{where} unchanged")
+    ok("boot script", BOOT if STATE.boot_changed else f"{BOOT} unchanged")
 
 
-def install_mapdump() -> None:
-    jar = ROOT / "deploy/mapdump/mapdump.jar"
-    if not jar.is_file():
-        on_device = probe(f"-f {MAP_DIR}/mapdump.jar")
-        if on_device == "yes":
-            warn(
-                "mapdump.jar",
-                "None was built here. The device already carries one, so the Alexa"
-                " command box stays available and the daemon still holds the"
-                " account credential. To take it away:",
-                f"  adb shell 'su -c \"rm -rf {MAP_DIR}\"'",
-            )
-        elif on_device == "no":
-            warn(
-                "mapdump.jar",
-                "None was built here, and the device carries none either, so the"
-                " Alexa command box is not offered. deploy/mapdump/build.sh builds"
-                " one; docs/usage.md says what it needs.",
-            )
-        else:
-            warn(
-                "mapdump.jar",
-                "None was built here, and the device did not say whether it carries"
-                " one, so nothing here can tell whether the command box is offered.",
-            )
-        return
-    built = md5(jar)
-    jar_changed = remote_md5(f"{MAP_DIR}/mapdump.jar") != built
-    STATE.changed |= jar_changed
-    if jar_changed:
-        adb_ok("push", str(jar), "/data/local/tmp/mapdump.jar")
-        su_ok(
-            f"mkdir -p {MAP_DIR}\n"
-            f"cp /data/local/tmp/mapdump.jar {MAP_DIR}/mapdump.jar\n"
-            "rm -f /data/local/tmp/mapdump.jar"
-        )
-    listing = su(f"ls -ldn {MAP_DIR} {MAP_DIR}/mapdump.jar")[1]
-    found = {entry for shape in LS_LINES for entry in shape.findall(listing)}
-    if found != {("drwxr-xr-x", "32051", "32051"), ("-rw-r--r--", "32051", "32051")}:
+def install_init() -> None:
+    rc = temp_file((ROOT / "deploy/overdub.rc").read_text().replace("\r\n", "\n"))
+    built = md5(rc)
+    previous = remote_md5(INIT)
+    STATE.init_changed = previous != built
+    if STATE.init_changed:
         STATE.changed = True
-    su_ok(
-        f"chown -R 32051.32051 {MAP_DIR}\n"
-        f"chmod 755 {MAP_DIR}\n"
-        f"chmod 644 {MAP_DIR}/mapdump.jar"
-    )
-    installed = remote_md5(f"{MAP_DIR}/mapdump.jar")
-    if installed != built:
-        fail("mapdump.jar", f"The device has {installed or 'no hash'}, built {built}.")
-    readable = yes_no(
-        adb(
-            "shell",
-            f"su 32051 -c '[ -r {MAP_DIR}/mapdump.jar ] && echo yes || echo no'",
-        )[1]
-    )
-    if readable != "yes":
-        fail(
-            "mapdump.jar",
-            f"uid 32051 cannot read {MAP_DIR}/mapdump.jar (the device said"
-            f" {readable or 'nothing'}). MAP's own uid is what loads it, so"
-            " app_process would answer ClassNotFoundException on an empty"
-            " DexPathList.",
+        adb_ok("push", rc, "/data/local/tmp/overdub.rc")
+        shell(
+            "mount -o rw,remount /\n"
+            f"cp /data/local/tmp/overdub.rc {INIT}\n"
+            f"chmod 644 {INIT}\n"
+            "mount -o ro,remount /\n"
+            "rm -f /data/local/tmp/overdub.rc"
         )
-    if jar_changed:
-        ok("mapdump.jar", f"md5 {built}; Alexa commands on")
-    else:
-        ok("mapdump.jar", f"unchanged, md5 {built}")
+    installed = remote_md5(INIT)
+    if installed != built:
+        fail(
+            "init",
+            f"{INIT} did not land (device has {installed or 'no hash'}, pushed"
+            f" {built}). The system partition must remount read-write, which"
+            " firebreak's Fire OS 6 unlock allows by turning verity off.",
+        )
+    if not re.search(r"^\S+ / \S+ ro[,\s]", shell("cat /proc/mounts")[1], re.MULTILINE):
+        warn(
+            "init",
+            "/ did not remount read-only after the write. A reboot mounts it"
+            " read-only again.",
+        )
+    ok("init", INIT if STATE.init_changed else f"{INIT} unchanged")
+    if STATE.init_changed and previous and service_state():
+        warn(
+            "init",
+            f"REBOOT REQUIRED: init read the previous {INIT} at boot and keeps that"
+            " definition until the next one.",
+        )
 
 
 def interrupted(signum: int, _frame: object) -> NoReturn:
@@ -575,14 +533,18 @@ def main() -> None:
     print()
     build()
     boot_script = temp_file(boot_script_for(name))
-    if not re.search(r"uid=0\b", su("id")[1]):
-        fail("root", "su -c id did not report uid=0.")
-    ok("root", "su works")
+    if not re.search(r"uid=0\b", shell("id")[1]):
+        fail(
+            "root",
+            "adb shell id did not report uid=0. overdub needs the root adb that"
+            " firebreak's Fire OS 6 unlock leaves.",
+        )
+    ok("root", "adb runs as root")
     install_api_key()
     install_adb_key(lines=adb_key, path=adb_key_path)
     install_binary(boot_script)
-    install_mapdump()
     install_boot_script(boot_script)
+    install_init()
     restart(name)
     print_pairing_token()
     print()
@@ -622,7 +584,7 @@ def ok(label: str, *lines: str) -> None:
 
 
 def overdub_pid() -> str | None:
-    code, listing = su("ps")
+    code, listing = shell("ps")
     if code != 0:
         return None
     for line in listing.split("\n"):
@@ -644,9 +606,9 @@ def pending(*, detail: str, label: str) -> None:
 
 
 def print_pairing_token() -> None:
-    code, answer = su(
+    code, answer = shell(
         f"[ -e {SENDKEY} ] || echo --no-key--;"
-        f" {BUSYBOX} od -v -An -tx1 {SENDKEY} && echo --read-ok--"
+        f" od -v -An -tx1 {SENDKEY} && echo --read-ok--"
     )
     lines = answer.split("\n")
     if "--no-key--" in lines:
@@ -676,40 +638,38 @@ def print_pairing_token() -> None:
 
 
 def probe(expression: str) -> str | None:
-    return yes_no(su(f"[ {expression} ] && echo yes || echo no")[1])
+    return yes_no(shell(f"[ {expression} ] && echo yes || echo no")[1])
 
 
 def remote_md5(path: str) -> str:
-    found = MD5_SHAPE.search(su(f"md5 {path}")[1])
+    found = MD5_SHAPE.search(shell(f"md5sum {path}")[1])
     return found.group() if found else ""
 
 
 def remove_stage() -> None:
-    su(f"rm -rf {STAGE}")
+    shell(f"rm -rf {STAGE}")
     if probe(f"-e {STAGE}") != "no":
         warn(
             "API key",
             f"Could not confirm the staged key is gone from {STAGE}."
             " Remove it once the Dot is back:",
-            f"  adb shell 'su -c \"rm -rf {STAGE}\"'",
+            f"  adb shell 'rm -rf {STAGE}'",
         )
 
 
 def report_name(*, done: str, name: str, pid: str) -> None:
-    code, running = su(f"cat /proc/{pid}/cmdline")
-    running = running.replace("\0", " ").strip() if code == 0 else ""
-    if not running:
+    running = running_name(pid)
+    if running is None:
         warn(
             "daemon",
             f"Running as pid {pid}, but /proc/{pid}/cmdline was unreadable, so the"
             " running -name is unverified. Reboot if you changed it.",
         )
-    elif not (running + " ").count(f"-name {name} "):
+    elif running != name:
         warn(
             "daemon",
-            f"REBOOT REQUIRED: pid {pid} runs as `{running}`, not with -name {name}."
-            " The supervisor is a shell loop holding the arguments it was started"
-            " with, so it respawns the old ones. Only a reboot applies the new name.",
+            f"REBOOT REQUIRED: pid {pid} runs with -name {running}, not {name}, and"
+            " restarting did not change that.",
         )
     else:
         ok("daemon", done)
@@ -719,37 +679,74 @@ def restart(name: str) -> None:
     old = overdub_pid()
     if old is None:
         fail("daemon", "adb went away before the restart check.")
-    if not old:
-        warn(
-            "daemon",
-            "Not running. Reboot to start it, or run it by hand to test first.",
-        )
+    state = service_state()
+    if not state:
+        if old and (STATE.binary_changed or STATE.boot_changed):
+            warn(
+                "daemon",
+                f"REBOOT REQUIRED: pid {old} runs what it started with. init has not"
+                f" read {INIT} yet, so nothing here can restart it.",
+            )
+        elif old:
+            report_name(done=f"running as -name {name}, pid {old}", name=name, pid=old)
+        else:
+            warn(
+                "daemon",
+                f"Not running. init reads {INIT} only at boot, so reboot to start it.",
+            )
         return
-    stamp = su(f"cat {APPLIED} 2>/dev/null")[1].split("\n")
-    if applied(old) in stamp:
+    stamp = shell(f"cat {APPLIED} 2>/dev/null")[1].split("\n")
+    if (
+        old
+        and applied(old) in stamp
+        and not STATE.boot_changed
+        and running_name(old) == name
+    ):
         report_name(done=f"running as -name {name}, pid {old}", name=name, pid=old)
         return
     STATE.changed = True
-    pending(detail=f"restarting pid {old}", label="daemon")
-    su(f"kill {old}")
-    time.sleep(8)
+    pending(
+        detail=f"restarting pid {old}" if old else "starting the boot loop",
+        label="daemon",
+    )
+    if old:
+        shell(f"kill {old}")
+        wait_for(lambda: overdub_pid() != old, seconds=10)
+    shell("stop overdub")
+    if not wait_for(lambda: service_state() == "stopped", seconds=10):
+        fail(
+            "daemon",
+            f"init still reports the service {service_state() or 'unknown'} 10"
+            " seconds after stop overdub. A start now would do nothing, so none"
+            " was sent. Run this again, or reboot.",
+        )
+    shell("start overdub")
+    wait_for(lambda: bool(overdub_pid()), seconds=15)
     new = overdub_pid()
     if new is None:
         fail("daemon", "adb went away during the restart check.")
     if not new:
         warn(
             "daemon",
-            "Did NOT come back. It was not started by the boot script, so nothing"
-            " respawned it. Reboot, or start it by hand.",
+            "Did NOT start. init started the boot loop, so the reason is in"
+            " /data/local/tmp/overdub.log.",
         )
         return
-    if new == old:
-        warn("daemon", f"Did not restart (still pid {new}).")
-        return
-    su_ok(f"umask 077; echo '{applied(new)}' > {APPLIED}")
-    report_name(
-        done=f"restarted as -name {name}, pid {old} -> {new}", name=name, pid=new
+    shell_ok(f"umask 077; echo '{applied(new)}' > {APPLIED}")
+    done = (
+        f"restarted as -name {name}, pid {old} -> {new}"
+        if old
+        else (f"started as -name {name}, pid {new}")
     )
+    report_name(done=done, name=name, pid=new)
+
+
+def running_name(pid: str) -> str | None:
+    code, running = shell(f"cat /proc/{pid}/cmdline")
+    words = running.split("\0") if code == 0 else []
+    if "-name" not in words or words.index("-name") + 1 >= len(words):
+        return None
+    return words[words.index("-name") + 1]
 
 
 def serial_number() -> str:
@@ -764,6 +761,21 @@ def serial_number() -> str:
             "Set ANDROID_SERIAL to pick one.",
         )
     return lines[0]
+
+
+def service_state() -> str:
+    return shell("getprop init.svc.overdub")[1].strip()
+
+
+def shell(command: str) -> tuple[int, str]:
+    return adb("shell", command)
+
+
+def shell_ok(command: str) -> str:
+    code, out = shell(command)
+    if code != 0:
+        fail("adb", "A command on the device failed:", *out.strip().split("\n"))
+    return out
 
 
 def show(*lines: str, label: str, sign: str, stream: TextIO = sys.stdout) -> None:
@@ -800,7 +812,7 @@ def stage(*, directory: str, flag: str, label: str) -> None:
             f"{directory} already exists, so either another install is running or"
             " one was interrupted. Nothing was changed. If nothing else is running,"
             " remove it and try again:",
-            f"  adb shell 'su -c \"rm -rf {directory}\"'",
+            f"  adb shell 'rm -rf {directory}'",
         )
     mode = first_field(start="d", text=adb("shell", f"ls -ld {directory}")[1])
     if mode != "drwx------":
@@ -819,17 +831,6 @@ def stop_interrupts() -> None:
         ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)  # ruff: ignore[boolean-positional-value-in-call]
 
 
-def su(command: str) -> tuple[int, str]:
-    return adb("shell", "su -c " + shlex.quote(command))
-
-
-def su_ok(command: str) -> str:
-    code, out = su(command)
-    if code != 0:
-        fail("adb", "A command on the device failed:", *out.strip().split("\n"))
-    return out
-
-
 def temp_file(text: str) -> str:
     handle, path = tempfile.mkstemp(prefix="overdub-")
     STATE.temp.append(path)
@@ -841,6 +842,15 @@ def temp_file(text: str) -> str:
 def usage(message: str) -> NoReturn:
     print(f"install.py: {message}", file=sys.stderr)
     sys.exit(2)
+
+
+def wait_for(ready: Callable[[], bool], *, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while not ready():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.5)
+    return True
 
 
 def warn(label: str, *lines: str) -> None:

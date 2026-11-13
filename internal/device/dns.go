@@ -13,13 +13,13 @@ func Dialer(timeout time.Duration) *net.Dialer {
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			var servers []string
-			for _, prop := range []string{"net.dns1", "net.dns2"} {
+			for _, prop := range []string{"dhcp.wlan0.dns1", "dhcp.wlan0.dns2", "net.dns1", "net.dns2"} {
 				if s := strings.TrimSpace(Getprop(prop)); s != "" {
 					servers = append(servers, net.JoinHostPort(s, "53"))
 				}
 			}
 			if len(servers) == 0 {
-				return nil, fmt.Errorf("no net.dns1/net.dns2 to resolve with")
+				return nil, fmt.Errorf("no dhcp.wlan0.dns1, dhcp.wlan0.dns2, net.dns1 or net.dns2 to resolve with")
 			}
 			var d net.Dialer
 			var err error

@@ -57,12 +57,10 @@ keep Alexa and add a Home Assistant button and some entities.
 ## Requirements
 
 - An Echo Dot (2nd Generation), model **RS03QR** (printed on the underside),
-  codename biscuit, FireOS 5.5.5.4, rooted, with Magisk. Everything here was
-  measured on that model.
-- **Magisk 17.3**, or another that keeps `service.d` at
-  `/sbin/.core/img/.core/service.d`. `install.py` writes the boot script only
-  there, and fails if it cannot. A Magisk that uses `/data/adb/service.d`
-  needs the path changed first.
+  codename biscuit, on Fire OS 6 8349 with firebreak's root adb. Everything
+  here was measured on that model.
+- overdub is moving from Fire OS 5 to Fire OS 6. This branch installs on Fire
+  OS 6 only; a release before the move runs on Fire OS 5 with Magisk 17.3.
 - `adb`, from Android
   [platform-tools](https://developer.android.com/tools/releases/platform-tools),
   and Python 3.9 or later on a macOS, Linux or Windows machine. A
@@ -77,12 +75,12 @@ keep Alexa and add a Home Assistant button and some entities.
 ## Rooting a Dot
 
 overdub needs [firebreak](https://github.com/bboe/firebreak)'s default
-target, `amonet-biscuit-v1.1.0-bboe`: rooted Fire OS 5.5.5.4 with Magisk 17.3.
+unlock, `fireos6`: Fire OS 6 8349 with an adbd that runs as root.
 [firebreak's README](https://github.com/bboe/firebreak#run-it) has the install
 commands for macOS, Linux and Windows. With the Dot on USB:
 
 ```sh
-uvx firebreak@latest       # rooted Fire OS 5.5.5.4
+uvx firebreak@latest unlock      # rooted Fire OS 6 8349
 deploy/install.py kitchen
 ```
 
@@ -96,8 +94,8 @@ firebreak replaces:
 - The rooted Dot finishes in setup mode, with an orange ring and no Wi-Fi.
   Home Assistant reaches it only over Wi-Fi, so add it in the Alexa app. That
   is safe once rooted: firebreak hides the updater and blocks the update hosts.
-- `amonet-biscuit-v1.1.0` can also host overdub. `amonet-biscuit-v2.0.0` and
-  `stock` leave Fire OS 6, which overdub does not run on.
+- The first install writes `/system/etc/init/overdub.rc`, which init reads
+  only at boot, so it ends asking for one reboot.
 - `deploy/dot_firmware.py` was the rooting script. It now prints the firebreak
   command for its arguments, and runs it.
 

@@ -32,21 +32,24 @@ covering whatever you are about to touch.
 - A reproducible binary cannot say what it was built from. `git checkout`
   carries modified files across a branch change, so the build is not the
   branch, and every check downstream passes on the wrong binary.
-- The boot script is the only reason anything runs. `install.py` copies it to
-  Magisk 17.3's `/sbin/.core/img/.core/service.d/`. Where that directory does
-  not exist, the `cp` fails, the `rm` beside it still runs, and the Dot does
-  not start the daemon after its next reboot, with no log. The script's md5 is
-  read back.
+- `overdub.rc` is the only reason anything runs. `install.py` writes it to
+  `/system/etc/init` with `/` remounted read-write. A remount that fails leaves
+  the `cp` failing, and the Dot does not start the daemon after its next
+  reboot, with no log. The file's md5 is read back, as is the boot script's.
+- init reads `.rc` files only at boot. A service defined in a file written
+  later does not exist yet: `start overdub` does nothing and says nothing, and
+  `init.svc.overdub` reads empty.
 - The restart check tells a failed `adb` from an empty `ps`. Otherwise a pulled
   cable reads as no pid, which is also what "nothing supervised the daemon"
   prints.
 - `deploy/overdub.sh` is pushed with LF line ends whatever the checkout has. A
   Windows checkout with `core.autocrlf` gives CRLF, and the Dot's shell would
   then run the daemon as `-name kitchen\r`, which fails its name check.
-- `install.py` and `uninstall.py` hand `adb shell` one string, `su -c` and a
-  `shlex.quote`d command. Windows rebuilds the argument from a command line,
-  and a single string survives that unchanged. The two scripts ran this way on
-  macOS, Linux and Windows.
+- `install.py` and `uninstall.py` hand `adb shell` one string. Windows rebuilds
+  the argument from a command line, and a single string survives that
+  unchanged. The two scripts ran this way on macOS, Linux and Windows, as
+  `su -c` and a quoted command on Fire OS 5; on Fire OS 6 adb is root and the
+  string is the command alone.
 
 ## The cache partition
 
@@ -87,8 +90,9 @@ covering whatever you are about to touch.
   stages secrets through a `0700` directory of its own, then removes it. The
   binary and the boot script are not secret and use the shared directory.
 - There is no `/etc/resolv.conf`, so every Go lookup fails against `::1` with
-  "connection refused". `internal/alexa` reads `net.dns1` and `net.dns2` and
-  builds its own resolver.
+  "connection refused". `internal/device` reads `dhcp.wlan0.dns1` and
+  `dhcp.wlan0.dns2`, then `net.dns1` and `net.dns2`, and builds its own
+  resolver. Fire OS 6 sets no `net.dns1`; Fire OS 5 set it.
 
 ## logcat followers
 
@@ -196,8 +200,8 @@ transfer added any other way breaks on Windows and says nothing.
 - Outbound, `adb shell` on Windows expands LF to CRLF.
 - `exec-in` is binary-safe, but it returns before the Dot has finished and
   reports no status at all: `exec-in 'exit 7'` answers 0.
-- `install.py` pushes the binary, the boot script, the keys and the MapDump
-  jar. It reads back only text: md5s, modes, keys and a word of its own.
+- `install.py` pushes the binary, the boot script, the `.rc` file and the
+  keys. It reads back only text: md5s, modes, keys and a word of its own.
 - firebreak's
   [docs/rooting.md](https://github.com/bboe/firebreak/blob/main/docs/rooting.md#what-adb-shell-carries)
   has the measurements, and the one write that puts a stream on `adb shell`'s
