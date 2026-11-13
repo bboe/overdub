@@ -1,7 +1,7 @@
 package audio
 
 /*
-#cgo LDFLAGS: -lOpenSLES
+#cgo LDFLAGS: -ldl
 #include "audio.h"
 */
 import "C"
@@ -28,6 +28,9 @@ type Chime struct {
 	done   chan struct{}
 	closed bool
 	cut    float64
+	opened bool
+	broken bool
+	retry  time.Time
 }
 
 func NewChime() (*Chime, error) {
@@ -36,13 +39,9 @@ func NewChime() (*Chime, error) {
 	}
 	if C.audio_open(ChimeRate, ChimeChannels) != 0 {
 		open.Store(false)
-		return nil, errors.New("audio_open: OpenSL ES would not start")
+		return nil, errors.New("audio_open: the mixer would not open")
 	}
-	if C.audio_start() != 0 {
-		C.audio_close()
-		open.Store(false)
-		return nil, errors.New("audio_start: the player would not start")
-	}
+	C.audio_close()
 	clips := map[int]*clip{}
 	for _, rate := range Rates() {
 		clips[rate] = &clip{pcm: decode(chimePCM(rate))}
@@ -116,12 +115,7 @@ func (c *Chime) retune() bool {
 		return true
 	}
 	c.mix.remove(c.clips[c.rate])
-	C.audio_close()
-	if C.audio_open(C.int(s.rate), ChimeChannels) != 0 || C.audio_start() != 0 {
-		log.Printf("audio: the player would not open again at %d Hz; the Dot is silent until"+
-			" the daemon restarts", s.rate)
-		return false
-	}
+	c.shut()
 	c.rate = s.rate
 	c.mix.add(s)
 	return true
@@ -160,6 +154,7 @@ func (c *Chime) write() {
 		}
 		if !c.mix.next(block) {
 			c.look()
+			c.rest()
 			select {
 			case <-c.stop:
 				return
@@ -168,9 +163,67 @@ func (c *Chime) write() {
 			}
 		}
 		encode(block, buf)
+		if !c.wake() {
+			if !c.skip() {
+				return
+			}
+			continue
+		}
 		if !c.push(buf) {
 			return
 		}
+	}
+}
+
+func (c *Chime) wake() bool {
+	if c.opened {
+		return true
+	}
+	if time.Now().Before(c.retry) {
+		return false
+	}
+	if C.audio_open(C.int(c.rate), ChimeChannels) != 0 || C.audio_start() != 0 {
+		if !c.broken {
+			log.Printf("audio: the player would not open at %d Hz; sounds are dropped until"+
+				" it does, trying again every %v", c.rate, openRetry)
+		}
+		c.broken = true
+		c.retry = time.Now().Add(openRetry)
+		return false
+	}
+	if c.broken {
+		log.Printf("audio: the player opened again at %d Hz", c.rate)
+		c.broken = false
+	}
+	c.opened = true
+	return true
+}
+
+func (c *Chime) skip() bool {
+	select {
+	case <-c.stop:
+		return false
+	case <-time.After(time.Duration(BlockFrames) * time.Second / time.Duration(c.rate)):
+		return true
+	}
+}
+
+func (c *Chime) rest() {
+	if !c.opened {
+		return
+	}
+	for deadline := time.Now().Add(drainWait); C.audio_pending() > 0 && time.Now().Before(deadline); {
+		if !c.waiting() {
+			break
+		}
+	}
+	c.shut()
+}
+
+func (c *Chime) shut() {
+	if c.opened {
+		C.audio_close()
+		c.opened = false
 	}
 }
 
@@ -209,7 +262,7 @@ func (c *Chime) ahead() (Point, error) {
 	if c.closed {
 		return Point{}, errors.New("audio: asked after close")
 	}
-	if !c.mix.sounding() {
+	if !c.mix.sounding() || !c.opened {
 		return Point{}, errors.New("audio: nothing of ours is playing, so the queue the" +
 			" output reports is somebody else's")
 	}

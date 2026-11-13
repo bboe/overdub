@@ -2,9 +2,10 @@
 
 ## The target
 
-- overdub runs on Fire OS 5 only. Fire OS 6 on the Dot has no `app_process`,
-  AudioFlinger or OpenSL ES, so firebreak's `amonet-biscuit-v2.0.0` and
-  `stock` targets cannot host it.
+- overdub is moving from Fire OS 5 to rooted Fire OS 6, one subsystem at a
+  time. Fire OS 6 has no `app_process`, AudioFlinger or OpenSL ES. Sound
+  already goes through Fire OS 6's mixer, so a build from `main` is silent on
+  Fire OS 5.
 - `GOARCH=arm` is required. FireOS 5 on biscuit runs a 32-bit ARM userspace on
   an arm64 kernel.
 - `struct input_event` is 16 bytes there and 24 bytes in a 64-bit userspace. A
@@ -15,12 +16,12 @@
 - Anything that compiles the tree needs the target set, `go vet` included.
   `build.sh` is a convenience, not the guard.
 
-## cgo and OpenSL ES
+## cgo and the mixer
 
-- OpenSL ES is the only way to make a sound that AudioFlinger mixes rather than
-  fights. `internal/audio` calls it through cgo for the chime and the Sendspin
-  stream.
-- So the target is `GOOS=android`, and the build needs an NDK. `libOpenSLES.so`
+- Amazon's mixer is the only way to make a sound that is mixed with Alexa's
+  rather than fighting it. `internal/audio` reaches it through cgo for the
+  chime and the Sendspin stream, loading `libmixerAPI.so` with `dlopen`.
+- So the target is `GOOS=android`, and the build needs an NDK. `libmixerAPI.so`
   is stock on the device.
 - `chime_android.go` builds only for `android` with cgo. Elsewhere
   `chime_other.go` stands in, so `go vet` and the tests run for linux/arm.
@@ -96,8 +97,9 @@
 - It also embeds compiler-rt's ARM division builtins. compiler-rt is named but
   its licence is not reproduced: the LLVM exception waives sections 4(a), 4(b)
   and 4(d) for code embedded by compiling it.
-- Bionic's libc is not in the binary. `libc.so`, `libdl.so`, `liblog.so` and
-  `libOpenSLES.so` are `NEEDED` entries the device resolves.
+- Bionic's libc is not in the binary. `libc.so`, `libdl.so` and `liblog.so`
+  are `NEEDED` entries the device resolves. `libmixerAPI.so` is loaded at run
+  time and is the device's own.
 
 ## Sound
 

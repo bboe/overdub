@@ -512,7 +512,7 @@ buffer and keeps it open. Each reaches the player and the session.
 ### Following the output
 
 - Each output runs at one rate: 48 kHz on the speaker, 44.1 kHz on a Bluetooth
-  speaker (docs/audio.md). AudioFlinger resamples a stream at the other rate,
+  speaker (docs/audio.md). The output resamples a stream at the other rate,
   so a 44.1 kHz track to a Bluetooth speaker was resampled twice: by the
   server to 48 kHz, then back.
 - So the Dot asks the server for its output's rate: every `client/state`
@@ -530,7 +530,7 @@ buffer and keeps it open. Each reaches the player and the session.
   request mid-play changes only the second stage, until the next play: a
   44.1 kHz track moved from the speaker to a Bluetooth speaker goes to 48 kHz
   and back. Asking for nothing costs the same: the second conversion is then
-  AudioFlinger's.
+  the Dot's.
 - Music Assistant's signal path shows the rate picked at the start of the play,
   so it changes only after a pause and play. The Dot's log line
   `started a flac 44100 Hz` shows what arrives.
