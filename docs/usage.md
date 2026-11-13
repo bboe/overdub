@@ -561,7 +561,7 @@ adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'   # playback
 - **Every keycode looks wrong**: the build. `GOARCH=arm` is required.
 - **The button does not chime**: the mode first; only `intercept` chimes. Then
   the daemon log: `presses will be silent` means the audio player did not
-  start. It needs only the device's own `libOpenSLES.so`.
+  start. It needs only the device's own `libmixerAPI.so`, from Fire OS 6.
 - **The button does nothing**: the `Action button mode` select, then the daemon
   log, which names the address that changed it.
 - **The button rings Alexa instead of chiming**: the mode is `pass through` or

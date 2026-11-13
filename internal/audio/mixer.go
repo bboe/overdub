@@ -14,6 +14,8 @@ var errStopping = errors.New("audio: the player is closing")
 
 const (
 	writeWait  = 2 * time.Millisecond
+	drainWait  = 250 * time.Millisecond
+	openRetry  = time.Second
 	stuckWaits = 500
 )
 

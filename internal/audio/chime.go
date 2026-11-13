@@ -1,5 +1,5 @@
-// Package audio renders the chime, sounds it through OpenSL ES, places a
-// server's stream on the frame the player says it belongs on, and ducks it.
+// Package audio renders the chime, sounds it through Fire OS 6's mixer, places
+// a server's stream on the frame the player says it belongs on, and ducks it.
 package audio
 
 import "math"

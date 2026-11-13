@@ -95,8 +95,9 @@ BSD-2-Clause, which is Bionic's standard file header
 The chime is cgo, so the binary is linked by the NDK's clang rather than by Go
 alone, and that link statically embeds Bionic's startup objects: _start,
 _start_main, atexit and __libc_init are in the binary. Bionic's libc itself is
-not -- libc.so, libdl.so, liblog.so and libOpenSLES.so are NEEDED entries
-resolved on the device, and the device's own copies need nothing from us.
+not -- libc.so, libdl.so and liblog.so are NEEDED entries resolved on the
+device, and libmixerAPI.so is loaded at run time. The device's own copies need
+nothing from us.
 
 Copyright (C) 2008 The Android Open Source Project
 All rights reserved.

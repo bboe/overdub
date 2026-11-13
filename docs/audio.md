@@ -30,100 +30,113 @@ device until a reboot.
   buffer. Every sound pops, and every playback measurement is off by about
   5.4%. Only a reboot clears it.
 
-## AudioFlinger is the way in
+## The mixer is the way in
 
-- Alexa does not own the speaker. She opens an AudioTrack, and AudioFlinger
-  mixes her with everyone else.
-- `libOpenSLES.so` and `libwilhelm.so` are stock, so cgo in the daemon creates a
-  track like any app. It plays cleanly while device 23 stays `RUNNING` and
-  Alexa's stream is undisturbed.
-- There is one player per process: the engine, player, queue and pool are C
-  globals. A second `Chime` would overwrite the first's handles.
+Fire OS 6 has no AudioFlinger and no OpenSL ES. Amazon's own mixer,
+`/system/bin/mixer` (uid `audio`), holds the speaker's PCM, device 23, and mixes
+every client into it. Alexa is one of those clients.
+
+- Clients reach it through `libmixerAPI.so`, a C API over a C++ class,
+  `mixer::DataTrans`. Every client on the Dot links it: Alexa, `BTSinkPlayer`
+  and the WebRTC stack. The daemon loads it with `dlopen`, so the binary links
+  nothing that Fire OS 5 lacks or Fire OS 6 lacks.
+- `MixerOpenPlay(rate, channels, bits, name)` returns the `DataTrans` itself. Its
+  rate must be 4 to 96 kHz and its sample size 16 or 32 bits.
+- The open writes a record to `/data/mixer_streams/`, mode `0660`, and the mixer
+  finds the stream through it. The mixer is uid `audio` in group `aipc`
+  (2901), so a record owned by `root:root` cannot be read. The mixer logs
+  `AddStream:Failed to open /data/mixer_streams//mstream...`, takes nothing, and
+  the client's queue fills and stops. So `audio_open` opens with an effective
+  group of 2901. The change is per thread under Bionic, and the cgo call holds
+  its thread.
+- **The name is the stream type, and an unknown one is silent.** A stream named
+  `overdub-tone` was read at the full rate and never heard, with only
+  `Invalid meta type [overdub-tone]` in the mixer's log. `Music` and `Earcon`
+  are heard. The player opens as `Music`, so the speaker mute and Alexa's
+  ducking treat it as music.
+- A killed client leaves its record behind, named `mstream<pid>_<n>`. Alexa's
+  records share that prefix: delete one by its full name, never by a pattern.
+  A deleted record of hers comes back only with a reboot.
+
+### The queue
+
+- Each stream has 16 blocks of 50 ms, whatever the rate or the fourth argument
+  of `MixerOpenPlayAdv`. A block may be committed short, and the mixer then
+  plays only what was committed: 5 ms blocks drained at 200 a second.
+- So `audio_write` commits 960 bytes, 5 ms of 48 kHz stereo, and the queue holds
+  80 ms, as OpenSL's did on Fire OS 5.
+- **The mixer starts reading only once all 16 blocks are full.** Capped at 8 or
+  12, a stream never started. So the writer never caps the queue below 16.
+- `MixerGetBufPlay` waits up to 1.5 seconds for a block, and the writer must not
+  block. `DataTrans::GetWriteBuff` takes the wait as an argument; called with
+  0, a full queue answers at once with no buffer and status 11 (`EAGAIN`).
+  `CommitWriteBuff` and `GetNumBlkReady` complete the writer. They are
+  exported C++ methods, called by their mangled names with the handle as
+  `this`.
+- `MixerGetNumBytes` and `MixerGetBufSize` are stubs that answer 0, so the
+  pending count is the ready blocks times what each held, as before.
+- An underrun is not a stall. Starved for half a second, the queue drained to
+  0, refilled, and played on.
+- **A stream must be written within a few seconds of opening.** Written 2
+  seconds after the open it played; after 6 or 12 seconds, the mixer never read
+  it, and the writer gave up after its 1-second wait. So the player is opened
+  when a sound starts and closed once its queue drains, not held for the life
+  of the daemon. Each press of a chime then shows in the mixer's log as one
+  `AddNewInput` and one `removeInputStream`, about 0.4 seconds apart.
+- `rest` waits up to `drainWait` (250 ms) for the queue to empty before closing,
+  so a sound's last 80 ms is not cut off.
+- A stream to the mixer at 44.1 kHz played cleanly on the 48 kHz speaker: the
+  mixer converts the rate.
+
+### The writer
+
+- There is one player per process: the handle and the pool's sizes are C
+  globals. A second `Chime` would overwrite the first's handle.
 - `Close` returns early the second time. That makes `closed` mean "the player is
   going", and stops a second `close(c.stop)` panicking the daemon.
-- `SLAndroidConfigurationItf` is optional; it only sets the stream type.
-
-### The rate
-
-- Each output runs at one rate. `/system/etc/audio_policy.conf` gives the A2DP
-  output `sampling_rates 44100` and nothing else. The primary output (speaker
-  and jack) lists `48000|44100`, but it opens at 48 kHz at boot, and every dump
-  read 48,000.
-- AudioFlinger converts a track at another rate. A 48 kHz stream to a Bluetooth
-  speaker was resampled on the Dot, and a 44.1 kHz track twice: by the server,
-  then by AudioFlinger.
-- So the player opens at the stream's rate, and `internal/sendspin` asks the
-  server for the output's rate (docs/sendspin.md). Over a JBL Go 3 the daemon's
-  track then read 44,100 Hz on the 44.1 kHz output, where it had read 48,000.
-  Back on the speaker it read 48,000 and `F`, a fast track, which AudioFlinger
-  grants only to a track at its output's rate.
-- Not 44.1 kHz everywhere: the speaker would then resample every stream, and a
-  48 kHz source twice.
-- A stream at another rate joins the mixer only after the writer closes the
-  player and opens it again at that rate. No block of it plays at the old rate,
-  and its 100 ms settle starts on the new player.
-- Over Bluetooth, 2 streams that reopened the player were placed 220 and 255 ms
-  after they opened.
-- A chime sounding when the rate changes is cut off. At the new rate it would
-  play off pitch.
-- A player that will not open again stops the writer, as a failed write does.
-
-### The writer and the queue
-
 - Sounds are added to a mixer, not played. A second press rewinds the chime
   instead of stacking a copy.
-- There is no stop-and-clear. `SL_PLAYSTATE_STOPPED` is a one-way door: nothing
-  restarts the player, every later `audio_write` still reports success, and the
-  Dot is silent for the rest of the boot.
-- OpenSL's queue holds the **pointer** it was given until the buffer plays. The
-  C pool copies each block, so the caller's bytes stay ordinary Go memory.
-- A block is 10 ms (480 frames, 1,920 bytes of stereo), with 8 buffers: the
-  queue holds 80 ms. That is also the scheduling quantum: a stream can start no
-  more finely than one buffer. At 44.1 kHz the same block is 10.9 ms, and the
-  queue 87 ms.
+- The player opens at the stream's rate, and `internal/sendspin` asks the server
+  for the output's rate (docs/sendspin.md). A stream at another rate joins only
+  after the writer closes the player and opens it at that rate, so no block of
+  it plays at the old rate. A chime sounding when the rate changes is cut off;
+  at the new rate it would play off pitch.
 - A full queue is ordinary. The writer retries every 2 ms and gives up after
   1 second, about 12 times the queue's depth. Only a queue that has stopped
-  draining reaches that: a wedged track, an AudioFlinger restart, or the driver
-  state above. Nothing else signals that failure.
-- The writer loops over short writes, because the Go block size and the C chunk
-  size are both 1,920 bytes with nothing tying them together.
-- Any failed write stops the writer, and it logs once:
-  `the writer stopped: ...; the Dot is silent until the daemon restarts`.
-- Seen once, 4 minutes after a Bluetooth speaker dropped mid-stream. The next
-  stream opened the idle speaker output, which took 1.2 seconds to start its
-  amp. 0.7 seconds after that, AudioFlinger logged
-  `BUFFER TIMEOUT: remove(4096) from active list`, and 67 ms later the writer
-  gave up. Alexa kept playing, and a daemon restart cleared it. The cause is
-  not known: the same drop, idle gaps and restarts did not repeat it.
-- `Close` does not wait for a sound to end. The writer exits at its next refused
-  write, and the player is destroyed with up to 80 ms queued. The wait only
-  stops anything writing into a destroyed player.
-- The writer stops when nothing plays, and the device reaches standby on its
+  draining reaches that.
+- The writer loops over short writes, because the Go block (10 ms) and the C
+  chunk (5 ms) are sized separately.
+- Any failed write stops the writer, and it logs once: `the writer stopped:
+  ...; the Dot is silent until the daemon restarts`.
+- A player that will not open does not stop it. The player now opens for every
+  sound, so a mixer restarting while the Dot is idle would otherwise silence
+  every later sound while each reported success. The writer drops blocks at the
+  sample rate, tries the open again every `openRetry` (1 second), and logs once
+  each way: `the player would not open at ... Hz; sounds are dropped until it
+  does`, then `the player opened again`.
+- The writer stops when nothing plays, and the output reaches standby on its
   own. Writing silence would hold the amp awake for the life of the daemon.
 - `chime_android.go` and `audio_android.c` need `GOOS=android` and an NDK, so
   no test covers them. The mixer and `Stream` are plain Go and fully tested.
 
-### What the queue does, measured
+### What the queue does, measured on Fire OS 6
 
-- The queue refuses at exactly `CHUNK * NUM_BUFFERS` bytes, so `GetState`'s
-  count means what the arithmetic assumes.
-- Buffers come back at the sample rate. That is the only rate feedback a writer
-  gets.
-- An underrun is not a stall. After 4 seconds idle the queue drained, refilled,
-  and freed a slot with no reset and no second start. `audio_start` on a playing
-  player answers 0 and changes nothing.
-- ALSA cannot see our samples: `/proc/asound/card0/pcm23p/sub0/status`
-  describes the HAL's stream. After 4 idle seconds it still read `RUNNING`, with
-  `delay` at 2,752 frames.
-- Ordinary playback leaves about 1 pair of `underflow` lines in `dmesg` per
-  sound, at the moment it ends.
-- A 30-second sweep (120 Hz to 6 kHz, 3,000 blocks) played with **no
-  `underflow` line**. The writer made 12,897 attempts, so about three quarters
-  were refused.
-- So a healthy writer is refused often. Starving looks the opposite: every write
-  accepted at once, and underflow pairs through the run.
+- A 1-second tone at 50 ms blocks took 16 blocks at once and then 1 every
+  50 ms, with about 4 refusals per accepted block.
+- At 5 ms blocks the writer was refused about 2 times in 3, as a healthy
+  writer was under OpenSL.
+- A Sendspin stream from Music Assistant, 44 seconds, read the player 133 ms
+  ahead of the speaker and dropped nothing late; Fire OS 5 read 131 to 144 ms.
+- That depth is our queue plus the PCM's `delay`. It does not count anything the
+  mixer holds between taking a block and writing it to the PCM, so a similar
+  figure does not show the Dot in sync. Sync against another player has not
+  been measured by ear on Fire OS 6.
+- The rest of this page's timing was measured on Fire OS 5 and has not been
+  repeated through the mixer.
 
 ## Latency is process startup, not hardware
+
+Measured on Fire OS 5, against OpenSL ES.
 
 Press to sound, timed to the codec substream going `RUNNING`, 5 trials each:
 
@@ -395,8 +408,8 @@ one at a time, as there is one player.
   the audio on resume. The cost: a server that stops sending keeps the amp
   awake.
 - `stream/clear` empties the jitter buffer only. Up to 80 ms already in the
-  queue plays out; clearing it would need
-  `SLAndroidSimpleBufferQueueItf::Clear`, which flushes the `AudioTrack`.
+  queue plays out; clearing it would need the mixer's `MixerFlush`, which is
+  not wired.
 
 ## Ducking while Alexa holds focus
 
@@ -468,7 +481,7 @@ I/MediaFocusControl(  601): AudioFocus  removeFocusStackEntry(): removing entry 
 
 ## The chime
 
-- A press plays the daemon's own sound through OpenSL ES, as a track beside
+- A press plays the daemon's own sound through the mixer, as a stream beside
   Alexa's.
 - The chime is a mixer source so a stream plays through a press. A second press
   inside the first chime hears up to 80 ms of it before the restart.
@@ -487,8 +500,8 @@ I/MediaFocusControl(  601): AudioFocus  removeFocusStackEntry(): removing entry 
 - The target is `GOOS=android`. Go's linux runtime hangs before `main` against
   Bionic, with no output. Bionic folds pthread into libc while cgo still links
   `-lpthread`, so `build.sh` makes empty `libpthread.a` and `librt.a` stubs.
-- Holding the media stack costs about 9 MB of RSS. The package is behind a
-  build tag, so `GOOS=linux` still builds, with a stub player.
+- The package is behind a build tag, so `GOOS=linux` still builds, with a stub
+  player.
 - The tones are the original recording's, measured by DFT: 880.0 Hz and
   1320.0 Hz, within 2 cents of A5 and E6, with no partial above the fundamental
   that matters.
