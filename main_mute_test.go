@@ -98,8 +98,8 @@ func TestADotThatCameUpMutedHoldsTheVolumeKeys(t *testing.T) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.sets) != 0 {
-		t.Errorf("coming up muted set the mute %d times, want none: it is already set,"+
-			" and Mute count is a reference count", len(m.sets))
+		t.Errorf("coming up muted set the mute %d times, want none: it is already set",
+			len(m.sets))
 	}
 }
 
@@ -126,9 +126,8 @@ func TestMutingTwiceDoesNotSetItTwice(t *testing.T) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.sets) != 1 {
-		t.Errorf("two mutes called setStreamMute %d times, want 1: Mute count is a"+
-			" reference count, so the second leaves an unmute one short and the dot"+
-			" muted with its keys free", len(m.sets))
+		t.Errorf("two mutes set the mute %d times, want 1: a mute already set is not"+
+			" set again", len(m.sets))
 	}
 }
 
@@ -195,9 +194,8 @@ func TestAnUnmuteTheDeviceIgnoredKeepsTheKeysHeld(t *testing.T) {
 
 	if heldGuard() == nil {
 		t.Error("an unmute the device reported as taken but did not apply left the keys" +
-			" free while still muted: Mute count is a reference count, so one unmute" +
-			" can succeed and leave the stream muted, and the next press then resets" +
-			" the level with nothing holding the keys")
+			" free while still muted, and the next press then moves the level in silence" +
+			" with nothing holding the keys")
 	}
 	if opens != 1 || guards[0].shut() {
 		t.Errorf("%d guards were opened and the first is closed=%v; the keys must never"+
@@ -271,8 +269,8 @@ func TestAMuteBeforeTheLevelIsWiredHoldsNothing(t *testing.T) {
 	defer m.mu.Unlock()
 	if len(m.sets) != 0 {
 		t.Errorf("the mute was set %d times with no level to read back, want none:"+
-			" Mute count is a reference count, and one that cannot be read back is"+
-			" one that cannot be undone", len(m.sets))
+			" a mute that cannot be read back is one the keys cannot be seen to lift",
+			len(m.sets))
 	}
 }
 

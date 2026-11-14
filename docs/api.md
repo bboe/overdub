@@ -94,7 +94,8 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | adb mode | `/proc/net/tcp`, `iptables -C` | 2 forks if open | minute |
 | temperature | a thermal zone's `temp` | 118 µs | heavy |
 | memory | `/proc/meminfo` | 111 µs | heavy |
-| volumes, route | `dumpsys audio` | 11.7 ms | heavy |
+| volume, mute | held from `lipc-wait-event` | -- | heavy |
+| route | `dumpsys audio`, absent on Fire OS 6 | 11.7 ms | heavy |
 | jack | `/sys/class/switch/h2w/state` | -- | heavy |
 | microphone mute | binder `GET_MIC_MUTE` | 12 ms | heavy |
 | speaker playing | ALSA, then a `dumpsys` | 2.0 / 18.7 ms | live |
@@ -106,7 +107,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - The uptime changes on every read. The signal costs 16 times `/proc/meminfo`
   and moves slowly. The registration changes only at setup or deregistration.
 - The heavy tick costs about 24 ms of a core every 2.5 seconds, 1%. Almost all
-  of it is the 2 forks for the volume and the microphone.
+  of it is the 2 forks for the route and the microphone.
 - `dumpsys account` and `dumpsys audio` were timed in the same loop, because
   the absolute figure moves with device load: 300 calls took 4.66 and 5.23
   seconds.
@@ -130,10 +131,10 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   panics on it.
 - `dumpsys` talks to binder, which can wedge, so the read carries a deadline.
   `exec.CommandContext` kills the child, but `Output` then waits for EOF, which
-  a grandchild can hold open. `cmd.WaitDelay` bounds that wait. So a read is
-  1 second plus 500 ms, exported as `VolumeReadBudget`.
+  a grandchild can hold open. `cmd.WaitDelay` bounds that wait. So a route read
+  is 1 second plus 500 ms, exported as `RouteReadBudget`.
 - The poll is serial, so a heavy tick spends its forks in sequence. 2 came to
-  2.4 seconds against 2.5. `main_test.go` holds the sum of the volume, mic and
+  2.4 seconds against 2.5. `main_test.go` holds the sum of the route, mic and
   speaker budgets, not each apart.
 - The budget and the command are variables so a test can shrink the wait and
   substitute a command that never answers.
@@ -153,7 +154,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   waits out the rest and then serves it, or the value stays wrong until the
   minute tick.
 - The polls are the only device readers. A wedged poll leaves every subscriber
-  on stale values, so the volume read carries a deadline and procfs reads do
+  on stale values, so the route read carries a deadline and procfs reads do
   not.
 - A failed reading is sent with `missing_state` set. Leaving it out is right
   only before the first reading: after that Home Assistant keeps drawing the
@@ -370,70 +371,48 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 
 ## The volume
 
-- From `dumpsys audio`: `Max:` under `- STREAM_MUSIC:`, and that stream's
-  `Current:` line, where each output device appears as `<hex mask> (<name>):
-  <level>`. Only the ratio means anything.
-- Android keeps a level per route, so there are 3 readings: speaker, jack and
-  Bluetooth. A speaker-only reading froze while headphones were plugged in.
-- The jack reads `4 (headset)`, else `8 (headphone)`. Nothing here has produced
-  `headphone`. `line` and `aux_line` have never moved.
-- Any route can be absent while others are present. The search ends at a
-  `Current:` line naming **any** readable route, and the mute published is the
-  one that block declared.
-- **A paired Bluetooth speaker is read the same way.** The line carries
-  `80 (bt_a2dp)`, `100 (bt_a2dp_hp)` and `200 (bt_a2dp_spk)`. The device class
-  does not pick the live one: a JBL Go 3 declares `DevClass` 2360340, portable
-  audio, and its level landed on the plain `bt_a2dp`. So `bt_a2dp` is read
-  first and the other 2 are fallbacks.
-- The Bluetooth level is reported with nothing connected, as the jack's is:
-  `bt_a2dp` read 25 of 30 with no speaker. A mute zeroes all 3 percentages.
-- **This level is not the speaker's own volume.** AVRCP absolute volume is never
-  negotiated: `mFeatures: 1` (no `0x02` bit), `mRemoteVolume: -1`, an empty
-  `mVolumeMapping`, against 2 speakers. One of them does absolute volume with a
-  phone, and `bt_stack.conf` carries only tracing. It is absent from this
-  bluedroid build, so the Dot attenuates before encoding and the 2 volumes sit
-  in series.
-- **The live route costs no fork.** `dumpsys audio` ends with `Audio routes:`,
-  and on this build `mBluetoothName` is `Device Connected` or `Device NOT
-  Connected`. AOSP puts the device alias there, so anything else is no reading.
-  `output_device` is a second scan of the same dump.
-- `activeRoute` and `activeVolume` treat an unreadable route differently. The
-  sensor publishes nothing. The volume falls back to the jack and the speaker,
-  because the mute guard reads it through `SpeakerLevel` before holding the
-  keys: one unfamiliar `mBluetoothName` must not release them on a Dot that came
-  up muted. `readVolumeStep` is the one place the level is read.
-- The route counts only what carries audio out. `HidService`, GATT clients and
-  the sink direction are real connections and not routes.
-- `settings get system volume_music_speaker` gives the same number but starts a
-  VM, and reads max and level in 2 commands nothing makes agree. `dumpsys
-  audio` takes about 13 ms against 546 ms for one `settings get`.
+- audiod keeps a level per output, 0 to 100, and `MainVolume` is the live
+  output's. Unplugging the jack sent `AuxPluggedState 0`, then
+  `OutputDeviceChanged "SPEAKER##"`, then `MainVolume` went from the jack's 77
+  to the speaker's 40 with no key pressed. Alexa's own level is
+  `com.amazon.puffin AvsVolume`, and `MainVolume` follows it.
+- Only the live output's level can be read, so there is one volume sensor. A
+  sensor for the jack or Bluetooth could only repeat a remembered value.
+- `internal/device` follows `lipc-wait-event -m com.doppler.audiod
+  MainVolumeChanged,MuteChanged` in a child process, as `internal/alexa`
+  follows logcat. `MainVolumeChanged <level> 3` carries the level;
+  `MuteChanged <0|1> <level>` carries the mute and the level.
+- The daemon keeps the last level and mute, so a reading costs no fork. One
+  `lipc-get-prop` takes about 86 ms, 54 ms of it CPU: 2 every 2.5 seconds would
+  cost about 4% of a core.
+- When the child starts, `lipc-get-prop` reads `MainVolume` and `Mute`, and
+  again every minute. The read does not wait for the subscription, so a change
+  between the two is caught by the next minute's read. Each field of a read is
+  dropped if an event wrote that field meanwhile: the event is newer. A key
+  press during the first read changes only the level, and the mute still comes
+  from the read.
+- The read is joined before the reading is forgotten, so a child that ended
+  leaves no read behind to bring the reading back.
+- The failure logged for a child that ended carries its exit status: 3 is no
+  such publisher, audiod not up yet.
+- A child that ends forgets the reading, so the volume goes missing rather than
+  stale. It is restarted every 10 seconds, and the failure is logged once.
+- A line that does not parse changes nothing. A level outside 0 to 100 is
+  clamped.
 
 ### What the reading carries
 
 - The step, the percentage, and the maximum. Home Assistant is told the
-  percentage. A volume *change* counts from the step. Deriving the step from
-  the percentage adds a rounding.
-- The maximum travels only with steps. A dump that declares a scale and names no
-  usable route reports nothing.
-- **The mute does not reach the step.** A muted stream reports 0% (what can be
-  heard) and the step its `Current:` line names (where a change starts).
-- The maximum comes from `- STREAM_MUSIC:` only: `STREAM_ALARM` carries the same
-  30. A stream's block ends at the left margin or at the next `- STREAM_`.
-- No usable maximum means no reading: a guessed denominator is wrong, not
-  absent. A level outside the scale is clamped.
-- The whole parenthesised name must match. The closing bracket keeps
-  `speaker_safe` out; the opening one keeps `usb_headset` out. The level is
-  after the last colon, because the first field carries the `Current:` label.
-- A muted stream reads 0%. `Mute count:` in the same block counts outstanding
-  mute requests (`VolumeStreamState`). Its position in the block does not
-  matter. 2 counts resolve first-wins, as 2 maximums do. A count that will not
-  parse is not a mute.
-- Only `setStreamMute` makes the count non-zero, and the daemon's own mute is
-  that call. "Alexa, mute" sets the level to 0 and leaves the count at 0.
-  `input keyevent 164` does nothing. Stepping below 0 clamps.
-- Volume is read every 2.5 seconds rather than every 60 because somebody changes
-  it and then looks: about 0.5% of a core, 24 times sooner. Only a changed value
-  goes out, so `PollLive` needs no `MinSensorTick`.
+  percentage. A volume *change* counts from the step.
+- The keys move the level 10/3 at a time: 40, 43, 47, 50, 53. So the scale is
+  30 steps, and a level is step `round(level * 30 / 100)`. Every step survives
+  the trip to a level and back.
+- A level between steps, from the Alexa app, is reported as it is. A change
+  counts from the nearest step.
+- **The mute does not reach the step.** A muted Dot reports 0% (what can be
+  heard) and the step it holds (where a change starts).
+- There is no reading until both the level and the mute are known. A mute
+  nobody has read is not "off".
 
 ## Setting the volume
 
@@ -445,45 +424,22 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   then varint is a varint and is refused.
 - `has_volume` separates "0" from "no volume": proto3 leaves a zero scalar off
   the wire.
-- A level is set outright: `service call audio 4 i32 3 i32 <step> i32 0 s16
-  overdub` is `IAudioService.setStreamVolume`. `/system/bin/service` is native,
-  not a VM start: about **20 ms** per call, read back current with no settle.
-- `flags` 0 makes it silent (the key handler passes `FLAG_PLAY_SOUND`).
-  `setStreamVolume` resolves the output device itself.
-- Pressing the volume keys instead sounds Android's tick per step, and presses
-  outrun the 400 ms settle: a set to 46% landed on step 7 of a target 14.
-- **The transaction numbers are this build's, not AOSP's.** `setStreamMute` is
-  8, where AOSP 5.1 has `isStreamMute`. 4 is confirmed on all 3 Dots at FireOS
-  5.5.5.4. There is no fallback; there is a read back.
-- The numbers come from the device: `android.media.IAudioService$Stub`'s
-  `TRANSACTION_*` fields through `app_process`, offset from the first. 4 is
-  `setStreamVolume`, 8 `setStreamMute`, 2 `adjustStreamVolume`, and **3
-  `adjustMasterVolume`** -- calling 3 for a stream is the master mute
-  docs/pitfalls.md records. docs/hardware.md says why probing by calling is
-  dangerous.
-- Safe media volume does not apply: with `SAFE_MEDIA_VOLUME_ACTIVE`,
-  `mSafeMediaVolumeIndex=270` (step 27 of 30) and `headset` active, a set to
-  30 landed. Whether gain is capped downstream is not known.
-
-### Which route a set counts from
-
-- A relative step counts from the live route: a paired speaker when Bluetooth is
-  routed, the jack when occupied, else the speaker (`parseBluetoothRoute` and
-  `JackOccupied`). If the live route has no readable level, **or the route
-  cannot be read**, nothing is set.
-- `activeRoute` prefers Bluetooth to the jack, as `AudioPolicyManager` does.
-  With `jack=1`, `mMainType=0x1` and `Device Connected` at once, a
-  `setStreamVolume` of 18 landed on `bt_a2dp` while `headset` and `speaker`
-  held.
-- Both at once means the speaker connected second: **plugging a cable
-  disconnects the speaker**, 3 out of 3. `A2dpStateMachine` went Connected to
-  Disconnected within 500 ms of the jack switch, and removing the cable does
-  not bring it back.
-- **A lost link looks different from a dropped one.** A commanded disconnect
-  goes `Connected`, `Pending` (`what=2`), `Disconnected`. A lost one goes
-  straight to `Disconnected` on a bare `what=101`. A speaker carried out of
-  range paged back 33 seconds later. An `output_device` returning to `speaker`
-  unprompted is usually this.
+- A level is set on Alexa: `lipc-set-prop -i -q com.amazon.puffin AvsVolume
+  <level>`. audiod follows, and Alexa tells the cloud. The set returns when the
+  follower has seen the level, at most 1 second later. From Home Assistant's
+  command to the read back took about 150 ms.
+- **Each set plays Alexa's volume earcon and lights the ring**, as a key press
+  does, over music too. The alternatives, measured:
+  - `MainVolume` alone is silent and leaves Alexa's level stale. The keys then
+    step from audiod's level, but "Alexa, volume up" steps from the cloud's:
+    54 went to 40.
+  - `MainVolume` and then `AvsVolume` at the same value still plays it.
+  - `DuckEarconStreamVol 0` does not silence it.
+  - Muting audiod around the set is silent with a 0.4 second wait, and cuts
+    whatever is playing for that long.
+- `lipc-set-prop` exits with the LIPC error code: 8 for no such property, 3 for
+  no such publisher. A level above 100 lands as 100. `Mute` reads any non-zero
+  value as 1.
 
 ### The worker
 
@@ -494,32 +450,34 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   on a pending set adds to it; a set on a pending step replaces it. Half then
   one more is 51.7%; one more then half is half.
 - **The slider shows the step, and the mute is a flag beside it.** The volume
-  sensors report a muted stream as 0%. The media player cannot: a slider at 0
+  sensor reports a muted Dot as 0%. The media player cannot: a slider at 0
   while the level is 12 of 30 makes every set snap back. So its volume is
   `step / max`.
 - `VOLUME_MUTE` is in the feature flags when a mute can be set. `MUTE` and
   `UNMUTE` are commands 3 and 4, on the volume's worker, so a mute and an
   unmute arriving together leave the Dot unmuted.
+- The mute is audiod's `Mute`, set with `lipc-set-prop -i -q com.doppler.audiod
+  Mute 1`. It silences Music and Earcon streams alike.
 - **Holding the mute means holding the volume keys.** A key press does not lift
-  `setStreamMute`: muted at step 5, one press left the mute set and the level at
-  **1**, because the muted index reads 0. So `/dev/input/event2` is grabbed
-  while muted. The first press lifts the mute and moves nothing; 29 presses
-  were swallowed with the level unmoved.
-- Letting presses through does not lift the mute: 45 samples of
-  `getStreamVolume(3)` read 0 while the route's index walked from 13 to **1**.
+  audiod's mute. Muted at 33, presses moved the level to 53 and back to 40, the
+  ring showed each step, no tick played, and `Mute` stayed 1. So
+  `/dev/input/event2` is grabbed while muted. The first press lifts the mute and
+  moves nothing.
 - **Only the keys lift a mute.** A level set from Home Assistant or a server
-  lands and leaves the mute on, because the dump keeps the held step.
+  lands and leaves the mute on.
 - A daemon that cannot take the grab mutes anyway and logs it. The cost: Alexa's
   advanced factory reset cannot complete while muted.
+- At start the daemon waits up to 30 seconds for the first reading, then holds
+  the keys if the Dot is muted.
 - **A node lost while muted is re-taken `volumeGuardTries` (3) times**, then
   logged. The count resets on the next clean unmute. Unbounded, a node failing
   every read spins open, ioctl and close: 51,748 in 300 ms. The keys stay held
   between an unmute and the read back that confirms it.
-- The mute is its own flag, from `Mute count:`. A level stepped down to 0% is
-  not muted, and calling it muted shows a mute the control cannot lift.
+- The mute is its own flag. A level stepped down to 0% is not muted, and calling
+  it muted shows a mute the control cannot lift.
 - **The media player carries no missing flag.** `MediaPlayerStateResponse` has
   no "unknown", so an unreadable level publishes nothing and Home Assistant
-  keeps the last value. The volume sensors do go missing; look there when they
+  keeps the last value. The volume sensor does go missing; look there when it
   and the slider disagree.
 
 ## Playing a clip

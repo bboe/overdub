@@ -252,7 +252,19 @@ transfer added any other way breaks on Windows and says nothing.
   into a breaking change. Slugifying is also lossy: "Alexa's Dot" and "Alexas
   Dot" both become `alexas-dot`.
 
+## Two volumes on Fire OS 6
+
+- audiod's `MainVolume` and Alexa's `AvsVolume` read the same until something
+  writes `MainVolume` directly. That write is silent and lands, and Alexa keeps
+  her old level: the Dot played at 54 while she held 47.
+- The keys step from audiod's level, so they hide it. A voice command does not:
+  "Alexa, volume up" then took the Dot from 54 down to 40.
+- So every set goes through `AvsVolume`, and audiod follows. docs/api.md has
+  what that costs.
+
 ## The master mute
+
+Fire OS 5 only: Fire OS 6 has no AudioService.
 
 - `volume_master_mute` in `AudioService` silences every stream and route, and
   `dumpsys audio` still reads as working: `Mute count: 0`, levels and routes
@@ -268,6 +280,8 @@ transfer added any other way breaks on Windows and says nothing.
   `adjustStreamVolume` at 2. docs/api.md has the mapping.
 
 ## A stream mute another app holds
+
+Fire OS 5 only: Fire OS 6 has no AudioService.
 
 - `setStreamMute` is counted per client. A mute another app holds keeps the
   music silent after Home Assistant unmutes: the daemon's unmute takes away

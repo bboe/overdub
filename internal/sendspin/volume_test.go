@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/bboe/overdub/internal/device"
 )
 
 type fakeVolume struct {
@@ -185,13 +183,6 @@ func TestAVolumeCommandIsRefusedByAPlayerThatNeverOfferedOne(t *testing.T) {
 	waitFor(t, "the delay that followed to be taken", func() bool {
 		return c.heldDelay() == 1500*time.Millisecond
 	})
-}
-
-func TestTheVolumePollLeavesRoomForTheReadItMakes(t *testing.T) {
-	if volumeEvery <= device.VolumeReadBudget() {
-		t.Errorf("the volume is polled every %v and one read may take %v, so a slow read"+
-			" overlaps the next", volumeEvery, device.VolumeReadBudget())
-	}
 }
 
 func muteCommand(on *bool) serverCommand {

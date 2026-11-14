@@ -419,8 +419,8 @@ one at a time, as there is one player.
 - The player holds no focus, so it hears nothing. Holding focus would take a
   resident Java process, about 25 MB on a Dot with about 110 MB free, and
   `app_process` crashes on teardown (above).
-- The Sendspin volume is `STREAM_MUSIC`, which her speech plays on too, so the
-  duck cannot be a stream volume. It is a gain on the stream's own samples,
+- The Sendspin volume is Alexa's own level, which her speech plays at too, so
+  the duck cannot be a stream volume. It is a gain on the stream's own samples,
   applied after placement, so timing and sync are untouched.
 - `system_server` logs every focus change, and `alexa.FocusWatcher` follows
   `logcat -s MediaFocusControl`:

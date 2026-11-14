@@ -299,10 +299,7 @@ func TestThePollForgetsTheReadingWhenTheLastSubscriberGoes(t *testing.T) {
 	s.jack = func() (bool, bool) { return true, true }
 	s.micMute = func() (bool, bool) { return false, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{
-			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-			Jack: 70, JackStep: 21, JackOK: true,
-		}
+		return device.MusicVolume{Max: 30, Percent: 40, Step: 12, OK: true}
 	}
 
 	near, far := net.Pipe()
@@ -379,11 +376,10 @@ func steadySoundClock(s *Server, every time.Duration) {
 func TestARouteChangeWakesTheNameRead(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	stubSensors(s)
-	wired := s.volumes()
-	wired.BluetoothRoute = false
-	bluetooth := wired
-	bluetooth.BluetoothRoute = true
-	s.volumes = func() device.MusicVolume { return wired }
+	wired := func() (bool, bool) { return false, true }
+	bluetooth := func() (bool, bool) { return true, true }
+	unknown := func() (bool, bool) { return false, false }
+	s.btRoute = wired
 
 	s.readLive()
 	if len(s.sensorWake) != 0 {
@@ -403,17 +399,15 @@ func TestARouteChangeWakesTheNameRead(t *testing.T) {
 			"Bluetooth device, and woke the name read")
 	}
 
-	unknown := wired
-	unknown.BluetoothRouteOK = false
-	s.volumes = func() device.MusicVolume { return unknown }
+	s.btRoute = unknown
 	s.readLive()
-	s.volumes = func() device.MusicVolume { return wired }
+	s.btRoute = wired
 	s.readLive()
 	if len(s.sensorWake) != 0 {
 		t.Error("a route that could not be read, between two that agree, woke the name read")
 	}
 
-	s.volumes = func() device.MusicVolume { return bluetooth }
+	s.btRoute = bluetooth
 	s.readLive()
 	if len(s.sensorWake) != 1 {
 		t.Fatal("the route became bluetooth and the name read was left to the minute tick")
@@ -424,22 +418,22 @@ func TestARouteChangeWakesTheNameRead(t *testing.T) {
 		t.Fatal("a speaker still connected woke the name read on every heavy tick")
 	}
 
-	s.volumes = func() device.MusicVolume { return wired }
+	s.btRoute = wired
 	s.readLive()
 	if len(s.sensorWake) != 1 {
 		t.Fatal("the speaker went away and the name it left behind was not read again")
 	}
 	<-s.sensorWake
 
-	s.volumes = func() device.MusicVolume { return unknown }
+	s.btRoute = unknown
 	s.readLive()
-	s.volumes = func() device.MusicVolume { return bluetooth }
+	s.btRoute = bluetooth
 	s.readLive()
 	if len(s.sensorWake) != 1 {
 		t.Fatal("a route that could not be read hid the speaker that connected across it")
 	}
 
-	s.volumes = func() device.MusicVolume { return wired }
+	s.btRoute = wired
 	done := make(chan struct{})
 	go func() {
 		s.readLive()
@@ -458,13 +452,8 @@ func TestTheRouteIsForgottenWhenTheLastSubscriberGoes(t *testing.T) {
 
 	s := testServer(t, testPSK(t))
 	stubSensors(s)
-	wired := s.volumes()
 	var onBluetooth atomic.Bool
-	s.volumes = func() device.MusicVolume {
-		v := wired
-		v.BluetoothRoute = onBluetooth.Load()
-		return v
-	}
+	s.btRoute = func() (bool, bool) { return onBluetooth.Load(), true }
 	sub := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
 	join := func() {
 		s.mu.Lock()

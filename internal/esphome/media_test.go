@@ -12,27 +12,20 @@ import (
 )
 
 type fakeVolume struct {
-	mu        sync.Mutex
-	v         device.MusicVolume
-	occupied  bool
-	jackKnown bool
-	sets      int
-	err       error
+	mu   sync.Mutex
+	v    device.MusicVolume
+	sets int
+	err  error
 }
 
 func wireFakeVolume(s *Server, step, max int) *fakeVolume {
-	f := &fakeVolume{jackKnown: true}
-	f.v = device.MusicVolume{Max: max, SpeakerStep: step, SpeakerOK: true}
-	f.v.Speaker = stepPercentFor(step, max)
+	f := &fakeVolume{}
+	f.v = device.MusicVolume{Max: max, Step: step, OK: true}
+	f.v.Percent = stepPercentFor(step, max)
 	s.volumes = func() device.MusicVolume {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return f.v
-	}
-	s.jack = func() (bool, bool) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.occupied, f.jackKnown
 	}
 	s.volumeSet = func(step int) error {
 		f.mu.Lock()
@@ -41,13 +34,8 @@ func wireFakeVolume(s *Server, step, max int) *fakeVolume {
 		if f.err != nil {
 			return f.err
 		}
-		if f.occupied {
-			f.v.JackStep = step
-			f.v.Jack = stepPercentFor(step, f.v.Max)
-		} else {
-			f.v.SpeakerStep = step
-			f.v.Speaker = stepPercentFor(step, f.v.Max)
-		}
+		f.v.Step = step
+		f.v.Percent = stepPercentFor(step, f.v.Max)
 		return nil
 	}
 	return f
@@ -55,10 +43,10 @@ func wireFakeVolume(s *Server, step, max int) *fakeVolume {
 
 func stepPercentFor(step, max int) float32 { return float32(step) * 100 / float32(max) }
 
-func (f *fakeVolume) state() (speaker, jack, sets int) {
+func (f *fakeVolume) state() (step, sets int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.v.SpeakerStep, f.v.JackStep, f.sets
+	return f.v.Step, f.sets
 }
 
 func waitVolumeIdle(t *testing.T, s *Server) {
@@ -86,7 +74,7 @@ func TestAVolumeSetStepsToTheLevelAskedFor(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	speaker, _, sets := f.state()
+	speaker, sets := f.state()
 	if speaker != 15 || sets != 1 {
 		t.Errorf("half of thirty left the speaker at %d after %d sets, want 15 from one",
 			speaker, sets)
@@ -103,7 +91,7 @@ func TestAVolumeAlreadyWhereItWasAskedSetsNothing(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if _, _, sets := f.state(); sets != 0 {
+	if _, sets := f.state(); sets != 0 {
 		t.Errorf("a volume already at the level asked for was set %d times", sets)
 	}
 }
@@ -117,14 +105,14 @@ func TestVolumeUpAndDownMoveOneStep(t *testing.T) {
 
 	askVolume(s, volumeWant{steps: 1})
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 7 || sets != 1 {
+	if speaker, sets := f.state(); speaker != 7 || sets != 1 {
 		t.Errorf("one step up left the speaker at %d after %d sets, want 7 after 1",
 			speaker, sets)
 	}
 
 	askVolume(s, volumeWant{steps: -1})
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 6 || sets != 2 {
+	if speaker, sets := f.state(); speaker != 6 || sets != 2 {
 		t.Errorf("one step down left the speaker at %d after %d sets, want 6 after 2",
 			speaker, sets)
 	}
@@ -152,7 +140,7 @@ func TestTheVolumeIsClampedToTheScale(t *testing.T) {
 			askVolume(s, tt.want)
 			waitVolumeIdle(t, s)
 
-			if speaker, _, _ := f.state(); speaker != tt.end {
+			if speaker, _ := f.state(); speaker != tt.end {
 				t.Errorf("the speaker landed at %d, want %d", speaker, tt.end)
 			}
 		})
@@ -165,38 +153,14 @@ func TestAnUnreadableVolumeIsNotStepped(t *testing.T) {
 
 	s := testServer(t, testPSK(t))
 	f := wireFakeVolume(s, 6, 30)
-	f.v.SpeakerOK = false
+	f.v.OK = false
 
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if _, _, sets := f.state(); sets != 0 {
+	if _, sets := f.state(); sets != 0 {
 		t.Errorf("a level that could not be read was set %d times: a level computed "+
 			"from an unknown one lands somewhere nobody asked for", sets)
-	}
-}
-
-func TestTheVolumeFollowsTheRouteThatIsLive(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	s := testServer(t, testPSK(t))
-	f := wireFakeVolume(s, 6, 30)
-	f.occupied = true
-	f.v.JackStep, f.v.JackOK = 9, true
-	f.v.Jack = stepPercentFor(9, 30)
-
-	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
-	waitVolumeIdle(t, s)
-
-	speaker, jack, sets := f.state()
-	if jack != 15 || sets != 1 {
-		t.Errorf("with a plug in the socket the jack went to %d after %d sets, "+
-			"want 15 from one set: the speaker's own step is not the one that moves",
-			jack, sets)
-	}
-	if speaker != 6 {
-		t.Errorf("the speaker's step moved to %d while the jack was the live route", speaker)
 	}
 }
 
@@ -214,7 +178,7 @@ func TestStepsAskedForTogetherAreBothTaken(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, _ := f.state(); speaker != 8 {
+	if speaker, _ := f.state(); speaker != 8 {
 		t.Errorf("two steps up left the speaker at %d, want 8: a second step arriving "+
 			"before the first is served is not a replacement", speaker)
 	}
@@ -231,7 +195,7 @@ func TestASetThatFailedIsNotReportedAsAVolume(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if speaker, _, _ := f.state(); speaker != 6 {
+	if speaker, _ := f.state(); speaker != 6 {
 		t.Errorf("a failed set moved the speaker to %d", speaker)
 	}
 }
@@ -248,7 +212,7 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 		t.Fatalf("a media command for another key was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if _, _, sets := f.state(); sets != 0 {
+	if _, sets := f.state(); sets != 0 {
 		t.Errorf("a command naming the speaker sensor set the volume %d times", sets)
 	}
 
@@ -256,7 +220,7 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 		t.Fatalf("a media command for the speaker was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+	if speaker, sets := f.state(); speaker != 15 || sets != 1 {
 		t.Errorf("the speaker is at %d after %d sets, want 15 after 1", speaker, sets)
 	}
 }
@@ -279,7 +243,7 @@ func TestAVolumeCommandEndingInAVarintIsNotReadAsTheFloatBeforeIt(t *testing.T) 
 		t.Fatalf("a media command carrying field 5 twice was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 6 || sets != 0 {
+	if speaker, sets := f.state(); speaker != 6 || sets != 0 {
 		t.Errorf("a frame whose last field 5 is a varint left the speaker at %d after %d"+
 			" sets, want 6 after none: proto3 is last-occurrence-wins, so the float"+
 			" before it is the occurrence discarded", speaker, sets)
@@ -295,7 +259,7 @@ func TestAVolumeCommandEndingInAVarintIsNotReadAsTheFloatBeforeIt(t *testing.T) 
 		t.Fatalf("a media command carrying field 5 twice was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+	if speaker, sets := f.state(); speaker != 15 || sets != 1 {
 		t.Errorf("a frame whose last field 5 is a float left the speaker at %d after %d"+
 			" sets, want 15 after 1", speaker, sets)
 	}
@@ -324,93 +288,28 @@ func TestTheVolumeWakesThePollThatReadsIt(t *testing.T) {
 	}
 }
 
-func withBluetooth(v device.MusicVolume, step int, percent float32) device.MusicVolume {
-	v.BluetoothStep, v.Bluetooth, v.BluetoothOK = step, percent, true
-	v.BluetoothRoute, v.BluetoothRouteOK = true, true
-	return v
-}
-
 func TestActiveRouteNamesWhatIsPlaying(t *testing.T) {
-	full := device.MusicVolume{
-		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-		Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true,
-	}
 	for _, tt := range []struct {
 		name      string
-		v         device.MusicVolume
+		btOn      bool
+		btKnown   bool
 		occupied  bool
 		jackKnown bool
 		route     string
 		ok        bool
 	}{
-		{"nothing in the socket", full, false, true, routeSpeaker, true},
-		{"something in the socket", full, true, true, routeJack, true},
-		{"a speaker paired over bluetooth", withBluetooth(full, 24, 80), false, true, routeBluetooth, true},
-		{"bluetooth with a cable in as well",
-			withBluetooth(full, 24, 80), true, true, routeBluetooth, true},
-		{"a socket we cannot read", full, false, false, "", false},
-		{"a routes block we could not read is no route at all",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-				Jack: 70, JackStep: 21, JackOK: true},
-			false, true, "", false},
-		{"a socket we cannot read, with bluetooth connected",
-			withBluetooth(full, 24, 80), false, false, routeBluetooth, true},
-		{"a bluetooth route with no level of its own is still the route",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-				BluetoothRoute: true, BluetoothRouteOK: true},
-			false, true, routeBluetooth, true},
+		{"nothing in the socket", false, true, false, true, routeSpeaker, true},
+		{"something in the socket", false, true, true, true, routeJack, true},
+		{"a speaker paired over bluetooth", true, true, false, true, routeBluetooth, true},
+		{"bluetooth with a cable in as well", true, true, true, true, routeBluetooth, true},
+		{"a socket we cannot read", false, true, false, false, "", false},
+		{"a bluetooth route we could not read is no route at all", false, false, false, true, "", false},
+		{"a socket we cannot read, with bluetooth connected", true, true, false, false, routeBluetooth, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			route, ok := activeRoute(tt.v, tt.occupied, tt.jackKnown)
+			route, ok := activeRoute(tt.btOn, tt.btKnown, tt.occupied, tt.jackKnown)
 			if route != tt.route || ok != tt.ok {
 				t.Errorf("route = %q, %v; want %q, %v", route, ok, tt.route, tt.ok)
-			}
-		})
-	}
-}
-
-func TestActiveVolumeIsTheRouteInUse(t *testing.T) {
-	full := device.MusicVolume{
-		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-		Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true,
-	}
-	for _, tt := range []struct {
-		name      string
-		v         device.MusicVolume
-		occupied  bool
-		jackKnown bool
-		step      int
-		percent   float32
-		ok        bool
-	}{
-		{"nothing in the socket", full, false, true, 12, 40, true},
-		{"something in the socket", full, true, true, 21, 70, true},
-		{"a socket we cannot read is not a route we can count from", full, true, false, 0, 0, false},
-		{"a socket we cannot read, with nothing plugged in either", full, false, false, 0, 0, false},
-		{"the live route has no level",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-				BluetoothRouteOK: true},
-			true, true, 0, 0, false},
-		{"a speaker paired over bluetooth takes the route",
-			withBluetooth(full, 24, 80), false, true, 24, 80, true},
-		{"bluetooth takes it from the socket as well",
-			withBluetooth(full, 24, 80), true, true, 24, 80, true},
-		{"a bluetooth route we cannot read a level for",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-				Jack: 70, JackStep: 21, JackOK: true,
-				BluetoothRoute: true, BluetoothRouteOK: true},
-			false, true, 0, 0, false},
-		{"a level with no route to play it falls back to the socket",
-			device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-				Jack: 70, JackStep: 21, JackOK: true,
-				Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true},
-			true, true, 21, 70, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			step, percent, ok := activeVolume(tt.v, tt.occupied, tt.jackKnown)
-			if step != tt.step || percent != tt.percent || ok != tt.ok {
-				t.Errorf("active = %d, %v, %v; want %d, %v, %v",
-					step, percent, ok, tt.step, tt.percent, tt.ok)
 			}
 		})
 	}
@@ -471,7 +370,7 @@ func TestAMutedStreamPublishesTheLevelItWillReturnTo(t *testing.T) {
 	stubSensors(s)
 	s.jack = func() (bool, bool) { return false, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{Max: 30, Muted: true, SpeakerStep: 12, SpeakerOK: true, Speaker: 0}
+		return device.MusicVolume{Max: 30, Muted: true, Step: 12, OK: true, Percent: 0}
 	}
 
 	var media reading
@@ -505,7 +404,7 @@ func TestAStepOnTopOfAPendingSetIsAddedToIt(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, _ := f.state(); speaker != 16 {
+	if speaker, _ := f.state(); speaker != 16 {
 		t.Errorf("a step arriving on a pending set left the speaker at %d, want 16: the"+
 			" step belongs on top of the level asked for, not instead of it", speaker)
 	}
@@ -516,7 +415,7 @@ func TestALevelTurnedAllTheWayDownIsNotAMute(t *testing.T) {
 	stubSensors(s)
 	s.jack = func() (bool, bool) { return false, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{Max: 30, SpeakerStep: 0, SpeakerOK: true, Speaker: 0}
+		return device.MusicVolume{Max: 30, Step: 0, OK: true, Percent: 0}
 	}
 
 	for _, r := range s.readLive() {
@@ -546,50 +445,10 @@ func TestASetOnTopOfAPendingStepReplacesIt(t *testing.T) {
 	s.mu.Unlock()
 	waitVolumeIdle(t, s)
 
-	if speaker, _, _ := f.state(); speaker != 15 {
+	if speaker, _ := f.state(); speaker != 15 {
 		t.Errorf("a set arriving on a pending step left the speaker at %d, want 15: a set"+
 			" names where to be, so it answers the step rather than landing above it",
 			speaker)
-	}
-}
-
-func TestAnUnreadableRouteIsNotStepped(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	s := testServer(t, testPSK(t))
-	f := wireFakeVolume(s, 6, 30)
-	f.occupied, f.jackKnown = true, false
-	f.v.JackStep, f.v.JackOK = 21, true
-	f.v.Jack = stepPercentFor(21, 30)
-
-	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
-	waitVolumeIdle(t, s)
-
-	if _, jack, sets := f.state(); sets != 0 {
-		t.Errorf("a socket we could not read was set %d times, leaving the jack at %d:"+
-			" a level set from an unknown route lands somewhere nobody asked for",
-			sets, jack)
-	}
-}
-
-func TestEveryControlOfferedHasSomethingBehindIt(t *testing.T) {
-	s := testServer(t, testPSK(t))
-	if got := s.mediaFeatures(); got != 0 {
-		t.Errorf("a server with neither a setter nor a player offered feature_flags %d, want none: "+
-			"a control that cannot act is worse than a card without one", got)
-	}
-
-	s.UseVolumeSetter(func(int) error { return nil })
-	if got := s.mediaFeatures(); got != featVolumeSet|featVolumeStep {
-		t.Errorf("with a setter and no player feature_flags is %d, want the volume alone (%d)",
-			got, featVolumeSet|featVolumeStep)
-	}
-
-	s.UsePlay(func(string) error { return nil })
-	want := uint32(featVolumeSet | featVolumeStep | featPlayMedia | featMediaAnnounce)
-	if got := s.mediaFeatures(); got != want {
-		t.Errorf("feature_flags is %d, want %d", got, want)
 	}
 }
 
@@ -637,7 +496,7 @@ func TestAVolumeThatIsNotAFloatIsNotASet(t *testing.T) {
 				t.Fatalf("the command was an error: %v", err)
 			}
 			waitVolumeIdle(t, s)
-			if speaker, _, sets := f.state(); speaker != 6 || sets != 0 {
+			if speaker, sets := f.state(); speaker != 6 || sets != 0 {
 				t.Errorf("the speaker moved to %d after %d sets", speaker, sets)
 			}
 		})
@@ -1010,7 +869,7 @@ func TestAVolumeCommandCarryingNoVolumeAtAllIsZero(t *testing.T) {
 		t.Fatalf("a media command carrying no volume was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
-	if speaker, _, sets := f.state(); speaker != 0 || sets == 0 {
+	if speaker, sets := f.state(); speaker != 0 || sets == 0 {
 		t.Errorf("a command asking for volume 0 left the speaker at %d after %d sets,"+
 			" want 0: proto3 leaves a zero-valued scalar off the wire, and has_volume"+
 			" is the presence flag that says one was meant", speaker, sets)
@@ -1033,7 +892,7 @@ func TestASetTheDeviceDidNotTakeIsReportedRatherThanRepeated(t *testing.T) {
 	askVolume(s, volumeWant{fraction: 0.5, absolute: true})
 	waitVolumeIdle(t, s)
 
-	if speaker, _, sets := f.state(); speaker != 6 || sets != 1 {
+	if speaker, sets := f.state(); speaker != 6 || sets != 1 {
 		t.Errorf("a set the device ignored left the speaker at %d after %d sets, want 6"+
 			" after 1: a transaction number this build does not share must report"+
 			" rather than be tried again", speaker, sets)
@@ -1059,7 +918,7 @@ func TestTheVolumeCrossesToSendspinAsAPercentage(t *testing.T) {
 	s.SetSpeakerVolume(50)
 	waitVolumeIdle(t, s)
 
-	if speaker, _, sets := f.state(); speaker != 15 || sets != 1 {
+	if speaker, sets := f.state(); speaker != 15 || sets != 1 {
 		t.Errorf("a volume a server set left the speaker at %d after %d sets, want 15"+
 			" after 1", speaker, sets)
 	}
@@ -1076,7 +935,7 @@ func TestAServerCannotSetALevelThereIsNothingToSetWith(t *testing.T) {
 	}
 	s.SetSpeakerVolume(50)
 	waitVolumeIdle(t, s)
-	if speaker, _, _ := f.state(); speaker != 6 {
+	if speaker, _ := f.state(); speaker != 6 {
 		t.Errorf("the speaker moved to %d with nothing wired to move it", speaker)
 	}
 }
@@ -1226,7 +1085,7 @@ func TestTheMuteCrossesOnTheSameReadAsTheLevel(t *testing.T) {
 			" than two of them", reads)
 	}
 
-	f.v.SpeakerOK, f.v.JackOK = false, false
+	f.v.OK = false
 	if _, _, ok := s.SpeakerLevel(); ok {
 		t.Error("a dump with no readable route still answered, so sendspin reports a guess")
 	}
@@ -1247,9 +1106,9 @@ func TestAVolumeSetWhileMutedLandsAndStaysMuted(t *testing.T) {
 		t.Error("a level set from home assistant lifted the mute; only the keys on the" +
 			" dot do that, and a slider that unmutes makes the mute unholdable")
 	}
-	if f.v.SpeakerStep != 15 {
+	if f.v.Step != 15 {
 		t.Errorf("the level landed on %d, want 15: the dump keeps the step a mute is"+
-			" holding, so a set while muted counts from the right number", f.v.SpeakerStep)
+			" holding, so a set while muted counts from the right number", f.v.Step)
 	}
 }
 
@@ -1267,10 +1126,10 @@ func TestAVolumeStepWhileMutedCountsFromTheLevelTheMuteHolds(t *testing.T) {
 	if !f.v.Muted {
 		t.Error("a step from home assistant lifted the mute")
 	}
-	if f.v.SpeakerStep != 7 {
+	if f.v.Step != 7 {
 		t.Errorf("a step while muted left the level at %d, want 7: the mute zeroes the"+
 			" percentage and not the step, so a step counts from 6 rather than 0",
-			f.v.SpeakerStep)
+			f.v.Step)
 	}
 }
 
@@ -1299,28 +1158,20 @@ func TestTheRouteIsPublishedAsTheStringHomeAssistantShows(t *testing.T) {
 		t.Fatalf("the routes are %q, %q and %q; docs/usage.md promises speaker, jack and bluetooth",
 			routeSpeaker, routeJack, routeBluetooth)
 	}
-	base := device.MusicVolume{
-		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-		Jack: 70, JackStep: 21, JackOK: true,
-		Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true,
-	}
-	paired := base
-	paired.BluetoothRoute = true
-
 	for _, tt := range []struct {
 		name     string
-		v        device.MusicVolume
+		btOn     bool
 		occupied bool
 		want     string
 	}{
-		{"speaker", base, false, "speaker"},
-		{"jack", base, true, "jack"},
-		{"bluetooth", paired, false, "bluetooth"},
+		{"speaker", false, false, "speaker"},
+		{"jack", false, true, "jack"},
+		{"bluetooth", true, false, "bluetooth"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := testServer(t, testPSK(t))
 			stubSensors(s)
-			s.volumes = func() device.MusicVolume { return tt.v }
+			s.btRoute = func() (bool, bool) { return tt.btOn, true }
 			s.jack = func() (bool, bool) { return tt.occupied, true }
 
 			var got string
@@ -1355,22 +1206,12 @@ func TestTheRouteIsPublishedAsTheStringHomeAssistantShows(t *testing.T) {
 }
 
 func TestARouteWeCannotReadStillLeavesTheVolumeWorking(t *testing.T) {
-	unreadable := device.MusicVolume{
-		Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-		Jack: 70, JackStep: 21, JackOK: true, Muted: true,
-	}
-	if _, known := activeRoute(unreadable, false, true); known {
-		t.Error("a route that could not be read was named anyway")
-	}
-	step, percent, ok := activeVolume(unreadable, false, true)
-	if !ok || step != 12 || percent != 40 {
-		t.Errorf("active = %d, %v, %v; want the speaker at 12, 40: a route nobody could read"+
-			" must not take the volume keys away", step, percent, ok)
-	}
-
 	s := testServer(t, testPSK(t))
 	stubSensors(s)
-	s.volumes = func() device.MusicVolume { return unreadable }
+	s.volumes = func() device.MusicVolume {
+		return device.MusicVolume{Max: 30, Step: 12, OK: true, Muted: true}
+	}
+	s.btRoute = func() (bool, bool) { return false, false }
 	s.jack = func() (bool, bool) { return false, true }
 	if _, muted, ok := s.SpeakerLevel(); !ok || !muted {
 		t.Errorf("SpeakerLevel answered %v, %v; the mute guard reads this, and a dot that came"+

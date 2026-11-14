@@ -988,8 +988,8 @@ Each is refused, and each has a test that fails without it.
 - **The Dot's buttons reach the server.** A poll (`volumeEvery`, 2.5 seconds)
   reports a level that differs from the last one reported. Comparing against
   what was reported catches a change between the first state and the first
-  tick. It is its own `dumpsys audio`; the ESPHome one stops when Home
-  Assistant unsubscribes.
+  tick. It reads the level `internal/device` keeps, so it costs no fork, and
+  it runs whether or not Home Assistant is subscribed.
 - **The reported level is the device's**, not an echo. The scale is 30 steps:
   65 becomes step 20 and is reported as 67 within 2.5 seconds.
 

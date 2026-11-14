@@ -150,122 +150,16 @@ func parseWifiLevel(table, iface string) (float32, bool) {
 	return 0, false
 }
 
-var volumeDump = newDumpsys("audio", 1000*time.Millisecond, 500*time.Millisecond)
+var routeDump = newDumpsys("audio", 1000*time.Millisecond, 500*time.Millisecond)
 
-func VolumeReadBudget() time.Duration { return volumeDump.budget() }
+func RouteReadBudget() time.Duration { return routeDump.budget() }
 
-type MusicVolume struct {
-	Max              int
-	Muted            bool
-	Speaker          float32
-	SpeakerStep      int
-	SpeakerOK        bool
-	Jack             float32
-	JackStep         int
-	JackOK           bool
-	Bluetooth        float32
-	BluetoothStep    int
-	BluetoothOK      bool
-	BluetoothRoute   bool
-	BluetoothRouteOK bool
-}
-
-func (v MusicVolume) sawRoute() bool { return v.SpeakerOK || v.JackOK || v.BluetoothOK }
-
-func MusicVolumes() MusicVolume {
-	out, err := volumeDump.read()
+func BluetoothRouted() (connected, known bool) {
+	out, err := routeDump.read()
 	if err != nil {
-		return MusicVolume{}
+		return false, false
 	}
-	dump := string(out)
-	found := parseMusicVolumes(dump)
-	found.BluetoothRoute, found.BluetoothRouteOK = parseBluetoothRoute(dump)
-	return found
-}
-
-func parseMusicVolumes(dump string) MusicVolume {
-	inMusic := false
-	max := 0
-	muted, sawMute := false, false
-	var found MusicVolume
-	done := func() MusicVolume {
-		if !found.sawRoute() {
-			return MusicVolume{}
-		}
-		found.Muted = muted
-		if muted {
-			if found.SpeakerOK {
-				found.Speaker = 0
-			}
-			if found.JackOK {
-				found.Jack = 0
-			}
-			if found.BluetoothOK {
-				found.Bluetooth = 0
-			}
-		}
-		return found
-	}
-	for _, line := range strings.Split(dump, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- STREAM_") {
-			if inMusic && found.sawRoute() {
-				return done()
-			}
-			inMusic = trimmed == "- STREAM_MUSIC:"
-			max = 0
-			muted, sawMute = false, false
-			continue
-		}
-		if trimmed != "" && line == strings.TrimLeft(line, " \t") {
-			if inMusic && found.sawRoute() {
-				return done()
-			}
-			inMusic = false
-			continue
-		}
-		if !inMusic {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "Mute count:") {
-			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "Mute count:"))); err == nil && !sawMute {
-				muted, sawMute = n > 0, true
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "Max:") {
-			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "Max:"))); err == nil && n > 0 && max == 0 {
-				max = n
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "Current:") {
-			if max <= 0 {
-				return MusicVolume{}
-			}
-			found.Max = max
-			found.SpeakerStep, found.SpeakerOK = deviceStep(trimmed, max, "speaker")
-			found.Speaker = stepPercent(found.SpeakerStep, max)
-			found.JackStep, found.JackOK = deviceStep(trimmed, max, "headset")
-			if !found.JackOK {
-				found.JackStep, found.JackOK = deviceStep(trimmed, max, "headphone")
-			}
-			found.Jack = stepPercent(found.JackStep, max)
-			found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp")
-			if !found.BluetoothOK {
-				found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp_hp")
-			}
-			if !found.BluetoothOK {
-				found.BluetoothStep, found.BluetoothOK = deviceStep(trimmed, max, "bt_a2dp_spk")
-			}
-			found.Bluetooth = stepPercent(found.BluetoothStep, max)
-			continue
-		}
-	}
-	if !inMusic {
-		return MusicVolume{}
-	}
-	return done()
+	return parseBluetoothRoute(string(out))
 }
 
 func parseBluetoothRoute(dump string) (connected, known bool) {
@@ -297,22 +191,6 @@ func parseBluetoothRoute(dump string) (connected, known bool) {
 	return false, false
 }
 
-func deviceStep(current string, max int, name string) (int, bool) {
-	level, ok := deviceLevel(current, name)
-	if !ok {
-		return 0, false
-	}
-	if level < 0 {
-		level = 0
-	}
-	if level > max {
-		level = max
-	}
-	return level, true
-}
-
-func stepPercent(step, max int) float32 { return float32(step) * 100 / float32(max) }
-
 var jackSwitchPath = "/sys/class/switch/h2w/state"
 
 func JackOccupied() (bool, bool) {
@@ -327,22 +205,6 @@ func JackOccupied() (bool, bool) {
 		return true, true
 	}
 	return false, false
-}
-
-func deviceLevel(current, name string) (int, bool) {
-	for _, field := range strings.Split(current, ",") {
-		field = strings.TrimSpace(field)
-		mark := strings.LastIndex(field, ":")
-		if mark < 0 || !strings.HasSuffix(strings.TrimSpace(field[:mark]), "("+name+")") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimSpace(field[mark+1:]))
-		if err != nil {
-			return 0, false
-		}
-		return n, true
-	}
-	return 0, false
 }
 
 func UptimeSeconds() (float32, bool) {
