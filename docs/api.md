@@ -314,8 +314,6 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - Fire OS 5 read `dumpsys account`. Fire OS 6 has no account service, and
   the registered Dot's `pm path amazon.speech.sim` was never an answer either:
   the package is in `/system/priv-app` on a Dot never set up.
-- It does **not** gate the clip route. On Fire OS 5 a clip played to
-  `Playback ended: ... SUCCESS` on a Dot with no account.
 - It is read only while somebody is subscribed, as the fork it replaced was.
   `PollSensors` itself is not gated and must not be: it re-asserts the adb
   firewall rule and reads the adb mode.
@@ -471,45 +469,33 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 
 ## Playing a clip
 
-- The `media_url` goes to `internal/alexa` untouched: nothing here decodes an
-  mp3. `CheckURL` requires `http://` and refuses a comma, double quote or
-  backslash, because the extras are a comma-separated array in hand-built JSON.
-  Each call gets its own directive id.
-- The state follows the speaker, not the request. `PlaybackWatcher` tails
-  `logcat -s tts-Server tts-Playback` for `Playback started:` and `Playback
-  ended:` in the `SpeechSynthesizer` namespace. A request arms it; the matching
-  end disarms it. Alexa speaks for her own reasons, so it is not always armed.
-- Reporting "playing" on request would leave a clip she never plays showing as
-  playing indefinitely.
-- The watcher gives up at a deadline, `playbackWait` (30 seconds), because a
-  stack that is not running says nothing. A 404 and a variable-bitrate mp3 both
-  end `FAILED`. The deadline is extended once `am` returns, not re-armed, so a
-  failure inside that time is already reported.
-- `Playback started:` moves the deadline out to 15 minutes. The 30 seconds are
-  for starting, not playing.
-- **The watcher cannot tell her playback from ours.** The lines are `Playback
-  started: uid(32037)_id(0)_namespace(SpeechSynthesizer)` and the matching
-  `ended`. Our directive id appears only under `SPCH-SIM_SimJobStack`. So a
-  wake-word reply just after a request is reported as ours.
-- The hook is taken under the lock, because the check that installs it runs in
-  another goroutine.
-- **1 clip plays at a time**, through a worker with one pending request. Each
-  forks `am`, a fresh VM, on a 512 MB device.
-- A url is cut to 64 bytes before it reaches the log, in `CheckURL`'s error as
-  well. `am` output is cut too: a java stack trace is kilobytes. The line goes
-  through the rate-limited log.
-- **Nothing to set with, no control.** The feature flags are computed.
-  Sendspin reads the same answer through `CanSetVolume`. `PLAY_MEDIA` and
-  `MEDIA_ANNOUNCE` appear only when Alexa's synthesizer is reachable.
-- Whether she is there is `pm`'s answer, asked in the background. A debloated
-  Dot keeps the apk and loses the package, so a file check says yes wrongly.
-  `pm` early in boot can answer a no that would last the run. It is asked every
-  30 seconds for 4.5 minutes and latched on the first yes.
-- `ListEntities` is answered once per connection, and the cold boot order lists
-  entities before `pm` says yes. So installing the hook drops the connected
-  clients, and they list again on reconnect.
-- **A watcher that cannot start says so once.** A tail that ran for a while and
-  then failed is a new fault and is logged again.
+- Nothing plays a clip on Fire OS 6 yet. The media player lists no
+  `PLAY_MEDIA` and no `MEDIA_ANNOUNCE`, because nothing has called `UsePlay`.
+- Fire OS 5 handed the URL to Alexa's `SpeechSynthesizer` through `am
+  startservice` to `amazon.speech.sim`. Fire OS 6 has neither: no `am`, no
+  `app_process` behind the `pm` script, and Alexa is PuffinApp, a native Alexa
+  Client SDK build.
+- Searched 2026-11-14, nothing on the Dot takes a URL. PuffinApp plays one
+  only when a directive says so: `AudioPlayer.Play` carries an http(s) URL its
+  own player fetches, and `SpeechSynthesizer.Speak` carries a `cid:` reference
+  to a part of the same response. Directives reach it from 2 places only:
+  - the cloud downchannel, at the `AVSEndpoint` property of
+    `com.amazon.puffin`, which LIPC can write
+  - the local hybrid engine, `AlexaHybridExecutionControllerLitespeed`, whose
+    socket PuffinApp connects to as a client. Its own speech arrives as `cid:`
+    attachments too.
+- The rest is narrow. PuffinApp's LIPC properties are volume, locale, state
+  and settings. Its `LipcIPCTransport` property feeds the SDK's IPC router,
+  which only device-local pairing and multi-room music use. Its AIPC calls are
+  audio focus, wake-word blocking and UX restore. The hybrid engine's skills
+  are alerts, time, stop and volume, and its smart-home socket is off.
+- So the daemon will play a clip itself. The media player will list a FLAC
+  format, Home Assistant transcodes any URL to it through its ffmpeg proxy,
+  and the stream goes through the mixer beside Alexa, decoded by the FLAC
+  decoder Sendspin already links.
+- Standing in for the cloud would reach her own player, at the cost of a relay
+  every session passes through and playback events for a stream Amazon never
+  issued. That waits for the voice relay.
 
 ## Device info
 

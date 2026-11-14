@@ -155,8 +155,8 @@ adb shell 'su -c "service call media.audio_flinger 9 i32 0"'
 ```sh
 # daemon log, truncated at boot and every 20 restarts
 adb shell 'su -c "cat /data/local/tmp/overdub.log"'
-# Alexa on a playback
-adb shell 'su -c "logcat -d -v brief -s tts-Server tts-Playback"'
+# Alexa's audio focus, live: logd prunes her lines before a dump reads them
+adb shell 'logcat -v brief -s PuffinApp | grep FocusManager'
 # the rule, and its packet count
 adb shell 'su -c "iptables -L INPUT -n -v | grep 6053"'
 # names, handlers, key bitmaps

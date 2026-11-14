@@ -413,63 +413,102 @@ one at a time, as there is one player.
 
 ## Ducking while Alexa holds focus
 
-- Alexa takes audio focus as `GAIN_TRANSIENT_MAY_DUCK` while she listens and
-  answers. Android 5.1 does not duck anything itself: a player has to hear the
-  focus change and lower its own level.
-- The player holds no focus, so it hears nothing. Holding focus would take a
-  resident Java process, about 25 MB on a Dot with about 110 MB free, and
-  `app_process` crashes on teardown (above).
-- The Sendspin volume is Alexa's own level, which her speech plays at too, so
-  the duck cannot be a stream volume. It is a gain on the stream's own samples,
-  applied after placement, so timing and sync are untouched.
-- `system_server` logs every focus change, and `alexa.FocusWatcher` follows
-  `logcat -s MediaFocusControl`:
+- Measured 2026-11-14 on overdub-test. The mixer does not duck a stream for
+  Alexa. A `Music` stream played across one of her replies at full level:
+  her `TTS` stream was added beside it and no duck line was logged.
+- So the duck is the daemon's. The Sendspin volume is Alexa's own level, which
+  her speech plays at too, so it cannot be a stream volume. It is a gain on the
+  stream's own samples, applied after placement, so timing and sync are
+  untouched.
+- PuffinApp, Alexa's client, logs each audio channel it takes and gives back,
+  and `alexa.FocusWatcher` follows `logcat -s PuffinApp`:
 
 ```
-I/MediaFocusControl(  601):  AudioFocus  requestAudioFocus() from com.amazon.media.AmazonAudioManager@37705de9amazon.speech.util.AudioFocusHelper$2@22ab2a6e req=3flags=0x0
-I/MediaFocusControl(  601):  AudioFocus  abandonAudioFocus() from com.amazon.media.AmazonAudioManager@37705de9amazon.speech.util.AudioFocusHelper$2@22ab2a6e
-I/MediaFocusControl(  601): AudioFocus  removeFocusStackEntry(): removing entry for com.amazon.media.AmazonAudioManager@37705de9amazon.speech.util.AudioFocusHelper$2@22ab2a6e
+I/PuffinApp( 1003): [e:5e] FocusManager:acquireChannel:channelName=Dialog,interface=SpeechRecognizer
+I/PuffinApp( 1003): [e:5f] FocusManager:acquireChannel:channelName=Dialog,interface=SpeechSynthesizer
+I/PuffinApp( 1003): [e:5e] FocusManager:releaseChannel:channelName=Dialog
+I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
 ```
 
-- Her requests overlap. One "what time is it" took focus from 3 clients in
-  turn, each requesting before the last abandoned, over 10.3 seconds. So the
-  watcher keeps a set of holders, not a flag, and the stream stays ducked until
-  the set is empty.
-- `removeFocusStackEntry` logs whenever an entry leaves from below the top of
-  the stack: after an abandon, and also after a re-request, which moves the
-  client to the top. So a removal releases its client unless it comes straight
-  after that client's own request.
-- A client that dies holding focus is logged by its binder
-  (`android.os.BinderProxy@...`), which names no holder. Only the 15-minute
-  expiry releases it.
+- That is one spoken turn. The recognizer takes `Dialog`, her reply takes it
+  over, and the recognizer's release is logged 12 ms later, while she is still
+  speaking. Her reply's release came 2 seconds after.
+- A release line names the channel but not who gave it up. The bracket names
+  the executor that logged it, and each part of the client takes and gives
+  back on its own: `e:5e` for the recognizer, `e:5f` for her speech and `e:69`
+  for alerts, in every turn seen. So a release counts only from the executor
+  that holds the channel.
+- A typed command takes `Dialog` too. A timer ringing takes `Alert`, and
+  "stop" opened a recognizer turn on `Dialog` while it rang.
 
-| `req=` | request | stream level |
+| channel | who | stream level |
 |---|---|---|
-| 3 | `GAIN_TRANSIENT_MAY_DUCK` | 20% |
-| 2, 4 | `GAIN_TRANSIENT`, `GAIN_TRANSIENT_EXCLUSIVE` | 10% |
-| 1 | `GAIN` | 100%: a permanent taker plays beside the stream, as before |
+| `Dialog` | listening and speaking | 20% |
+| `Alert`, `Communications` | alarms, timers, calls | 10% |
+| `Content` | her own music | the stream ends: see below |
+| anything else | | 100%, and not held |
 
+- `Communications` is not measured. The channel names are the Alexa SDK's,
+  and all five are in the binary.
 - The deepest holder wins. The levels match sendspinlite's on an Echo Show.
-- Nothing handles a permanent taker. If Alexa plays music herself, both streams
-  play at full level, as they did before. A gain cannot fix that: the stream
-  would need a pause the Sendspin layer can resume.
-- Her speech does duck over her own music, because the deepest holder wins. No
-  test covers a `req=1` and a `req=3` holder together, which is that pair.
+- Her own music ends the stream. Two full-level streams over each other help
+  nobody, and a gain cannot settle which one wins. While PuffinApp holds
+  `Content`, the Sendspin client reports `available: false`, the spec's word
+  for a player in use by an external system. The server then sends
+  `stream/end` and takes the Dot out of its group, so a group playing on
+  other speakers carries on without it. docs/sendspin.md has the client side.
+- Measured on overdub-test, "play NPR on TuneIn" took `Content` on `e:63` and
+  played as a `WHA` mixer stream from the multi-room daemon; "stop" released it
+  on `e:63`. The Alexa SDK puts Bluetooth from a phone and Spotify Connect on
+  the same channel, unmeasured here.
+- "pause" releases `Content` and "resume" takes it again, so a paused song
+  gives the Dot back to Sendspin. Her player logged under `e:63` from 5
+  different threads in that one session: the executor is stable, the thread is
+  not.
+- Her music runs for hours, so its hold never expires. Instead the watcher
+  keeps the pid of the PuffinApp that logged first, and releases every channel
+  once `/proc` no longer has that process: when a line arrives under a new pid,
+  and on the 2-second sweep, so a PuffinApp that dies silently is caught too.
+  A new pid while the first process still runs changes nothing.
+- The pid comes from `threadtime`, which prints the process id apart from the
+  thread's. At boot on a radar Echo, `brief` showed one line under 1562, a
+  thread of PuffinApp 1074.
 - The gain moves linearly, a full swing taking 50 ms down and 300 ms up: 100%
   to 20% in 40 ms, and back in 240 ms. No click on either edge.
 - At full gain the samples are not touched, so an unducked stream is
   bit-identical to before.
 - A stream opened while a holder is held starts at the ducked level.
-- It fails toward full level: each holder expires 15 minutes after its
-  request, and when logcat exits the set is cleared before the retry.
+- It fails toward full level: each holder expires 15 minutes after it took the
+  channel, and when logcat exits the set is cleared before the retry.
+- Each start of logcat begins at that moment, with `-T` and the epoch time.
+  `-T 1` replays the newest buffered line, and a channel taken in it may have
+  been released while logcat was down. It prints a `beginning of main` divider
+  first, and the replayed line may be any tag's, so dropping its first line
+  would not do.
+- So the watcher knows only what it has seen since it started. A daemon that
+  starts, or a logcat that restarts, while her music plays reports the Dot
+  available until she next takes the channel. That fails toward two streams
+  playing, as Fire OS 5 always did.
+- A channel that neither ducks nor is her music is not held.
+- A call longer than 15 minutes loses its duck at the expiry. Nothing in
+  PuffinApp's log refreshes a held channel.
+- A follower that cannot start says so once. A tail that ran for a while and
+  then failed is a new fault and is logged again.
+- PuffinApp logs about a line a second, and logd prunes its lines out of the
+  buffer: a `logcat -d` taken a minute later showed `chatty ... expire 18
+  lines` where her focus lines had been. A live follower reads them as they
+  arrive and caught every one. So read her focus by following, not by dumping.
+- Fire OS 5 read `MediaFocusControl` from `system_server`, which logged
+  Android's focus requests. Fire OS 6 has no Android audio stack, and nothing
+  logs that tag.
 
 ## Testing audio here
 
 - **Never test with a sustained pure tone.** A 20-second 440 Hz sine pulses
   through every route, Alexa's included, and reads as a device-wide fault. The
   Echo's echo canceller misbehaves on a stationary tone. Use a sweep.
-- Keep two controls: the same clip through Alexa's `SpeechSynthesizer`, and the
-  file on the development machine.
+- Keep two controls: her own speech, from a typed command, and the file on
+  the development machine.
 - With a cable in the jack, Android routes to `headset`, but raw ALSA writes
   still reach the speaker. `STREAM_MUSIC` has a level per route.
 - Device 23 stays `RUNNING` for about 10.5 seconds after a sound (`XRUN` by
@@ -487,14 +526,10 @@ I/MediaFocusControl(  601): AudioFocus  removeFocusStackEntry(): removing entry 
   inside the first chime hears up to 80 ms of it before the restart.
 - The player is stereo, and the chime is the same in both channels. The
   speaker sums them, so a chime in one channel would sound 6 dB quieter.
-- Alexa's `SpeechSynthesizer` takes 691 ms against 33 ms, and needs four quirks
-  of `SpeechInteractionManager`, one exact mp3 encoding, and a stack a debloated
-  Dot may not run.
-- `internal/alexa` keeps that route for the media player, where those costs do
-  not matter. Her encoding rule: `cannot estimate length of the next mp3 frame`
-  in `logcat -s tts-Server` means a variable bitrate she will not demux. It
-  looks like a missing file, since both end `Playback ended: ... FAILED`, so the
-  watcher reports that line as the reason.
+- On Fire OS 5, Alexa's `SpeechSynthesizer` took 691 ms against 33 ms, and
+  needed four quirks of `SpeechInteractionManager`, one exact mp3 encoding, and
+  a stack a debloated Dot may not run. Fire OS 6 offers no way to hand her a
+  sound at all: docs/api.md has the search.
 - A separate resident helper also measured 33 ms, but costs a second binary, a
   pipe, a child to supervise, and 10 MB.
 - The target is `GOOS=android`. Go's linux runtime hangs before `main` against

@@ -24,8 +24,8 @@ done < <(
   done
 )
 
-if [ "$found" -lt 4 ]; then
-  echo "found only $found Amazon identifiers, expected at least 4:" >&2
+if [ "$found" -lt 3 ]; then
+  echo "found only $found Amazon identifiers, expected at least 3:" >&2
   echo "  the extraction above is broken, not the identifiers." >&2
   exit 1
 fi

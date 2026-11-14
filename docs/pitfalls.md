@@ -67,10 +67,6 @@ covering whatever you are about to touch.
 
 ## Paths and uids
 
-- `/system/bin/pm` has no shebang, so `execve` answers ENOEXEC. A shell runs it
-  anyway, so it works by hand over `adb shell`. `Installed()` would read the
-  failure as a missing package, so `pm` runs as `/system/bin/sh
-  /system/bin/pm`. `am` has a shebang and runs directly.
 - `/data/local/bin` must be `0700`, and `mkdir -p` keeps whatever mode an
   earlier install left. `install.py` chmods it and reads the mode back.
 - `adb push` does not carry the local mode, and `/data/local/tmp` is `0771`, so
@@ -84,10 +80,10 @@ covering whatever you are about to touch.
 
 ## logcat followers
 
-- `internal/alexa` follows logcat in a child process for each watcher. A
+- `internal/alexa` follows logcat in a child process, for the focus watcher. A
   restart kills the daemon before its deferred `Kill` runs, so each child used
-  to be left running under init: two more `logcat` processes per restart, for
-  the rest of the boot.
+  to be left running under init: one more `logcat` process per watcher per
+  restart, for the rest of the boot.
 - Each child is started with `Pdeathsig: SIGKILL`, so the kernel kills it when
   the daemon goes. A daemon killed with `kill` left no `logcat` behind.
 

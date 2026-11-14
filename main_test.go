@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"time"
@@ -556,7 +557,8 @@ func (l nopListener) Close() error {
 func (nopListener) Addr() net.Addr { return nil }
 
 type recordingClient struct {
-	held int
+	held  int
+	noted atomic.Int32
 
 	closes chan struct{}
 	delays chan int
@@ -569,6 +571,8 @@ func newRecordingClient() *recordingClient {
 func (*recordingClient) Serve(net.Listener) error { return net.ErrClosed }
 
 func (c *recordingClient) Delay() int { return c.held }
+
+func (c *recordingClient) NoteElsewhere() { c.noted.Add(1) }
 
 func (c *recordingClient) SetDelay(ms int) {
 	c.held = ms
@@ -689,6 +693,7 @@ func (orderedClient) Serve(net.Listener) error { return net.ErrClosed }
 func (orderedClient) Delay() int               { return 0 }
 func (orderedClient) SetDelay(int)             {}
 func (c orderedClient) Close()                 { c.log.note("sessions") }
+func (orderedClient) NoteElsewhere()           {}
 
 func TestDisableDeletesTheRuleLastOfAll(t *testing.T) {
 	steps := &stepLog{}
@@ -1054,6 +1059,7 @@ type blockingDelayClient struct {
 }
 
 func (*blockingDelayClient) Serve(net.Listener) error { return net.ErrClosed }
+func (*blockingDelayClient) NoteElsewhere()           {}
 func (c *blockingDelayClient) Delay() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1688,6 +1694,7 @@ func (heldDelayClient) Serve(net.Listener) error { return net.ErrClosed }
 func (c heldDelayClient) Delay() int             { return c.ms }
 func (heldDelayClient) SetDelay(int)             {}
 func (c heldDelayClient) Close()                 { c.log.note("sessions") }
+func (heldDelayClient) NoteElsewhere()           {}
 
 func TestSwitchingOffKeepsTheFigureItsClientWasHolding(t *testing.T) {
 	steps := &stepLog{}
@@ -1766,5 +1773,31 @@ func TestSwitchingOnKeepsAFigureThePropertyRefused(t *testing.T) {
 			" the property is read to build the next client, and a figure this switch"+
 			" is still holding because the write was refused is not one the property"+
 			" can answer for", got)
+	}
+}
+
+func TestAlexaPlayingNudgesTheClientTheSwitchHolds(t *testing.T) {
+	client := newRecordingClient()
+	toggle := &sendspinSwitch{}
+	toggle.client = client
+	switched.Store(toggle)
+	t.Cleanup(func() {
+		switched.Store(nil)
+		alexaPlaying.Store(false)
+	})
+
+	noteAlexaPlaying(true)
+	if !alexaPlaying.Load() {
+		t.Error("alexa started playing and the fact the client reads still says she is not")
+	}
+	if got := client.noted.Load(); got != 1 {
+		t.Errorf("the client was nudged %d times, want 1: without it the dot keeps playing"+
+			" over her until its next poll", got)
+	}
+
+	toggle.client = nil
+	noteAlexaPlaying(false)
+	if alexaPlaying.Load() {
+		t.Error("alexa stopped and the fact still says she is playing")
 	}
 }
