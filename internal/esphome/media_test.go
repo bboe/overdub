@@ -3,6 +3,7 @@ package esphome
 import (
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -518,13 +519,13 @@ func wireFakePlay(s *Server, err error) (*[]string, func()) {
 	var mu sync.Mutex
 	var asked []string
 	done := make(chan struct{}, 8)
-	s.UsePlay(func(url string) error {
+	s.UsePlay(func(url string, _ bool) error {
 		mu.Lock()
 		asked = append(asked, url)
 		mu.Unlock()
 		done <- struct{}{}
 		return err
-	})
+	}, nil)
 	return &asked, func() {
 		select {
 		case <-done:
@@ -716,7 +717,7 @@ func TestPlaysDoNotPileUp(t *testing.T) {
 	var mu sync.Mutex
 	inFlight, most, calls := 0, 0, 0
 	release := make(chan struct{})
-	s.UsePlay(func(string) error {
+	s.UsePlay(func(string, bool) error {
 		mu.Lock()
 		inFlight++
 		calls++
@@ -729,7 +730,7 @@ func TestPlaysDoNotPileUp(t *testing.T) {
 		inFlight--
 		mu.Unlock()
 		return nil
-	})
+	}, nil)
 
 	c := &conn{sock: fakeAddr{}}
 	s.mu.Lock()
@@ -775,7 +776,7 @@ func TestThePlayerCanBeWiredWhilePlaysArrive(t *testing.T) {
 	defer restoreLog(t, &out)()
 
 	s := testServer(t, testPSK(t))
-	s.UsePlay(func(string) error { return nil })
+	s.UsePlay(func(string, bool) error { return nil }, nil)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -788,7 +789,7 @@ func TestThePlayerCanBeWiredWhilePlaysArrive(t *testing.T) {
 				return
 			default:
 			}
-			s.UsePlay(func(string) error { return nil })
+			s.UsePlay(func(string, bool) error { return nil }, nil)
 		}
 	}()
 	go func() {
@@ -836,7 +837,7 @@ func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
 			joined)
 	}
 
-	s.UsePlay(func(string) error { return nil })
+	s.UsePlay(func(string, bool) error { return nil }, nil)
 
 	s.mu.Lock()
 	left := len(s.conns)
@@ -847,7 +848,7 @@ func TestAPlayerThatArrivesLateIsListedAnyway(t *testing.T) {
 			"PLAY_MEDIA for the life of the socket", left)
 	}
 
-	s.UsePlay(func(string) error { return nil })
+	s.UsePlay(func(string, bool) error { return nil }, nil)
 	if got := out.String(); strings.Count(got, "lists the entities again") != 1 {
 		t.Errorf("the log said %q; wiring a player that was already there drops nobody", got)
 	}
@@ -1216,5 +1217,248 @@ func TestARouteWeCannotReadStillLeavesTheVolumeWorking(t *testing.T) {
 	if _, muted, ok := s.SpeakerLevel(); !ok || !muted {
 		t.Errorf("SpeakerLevel answered %v, %v; the mute guard reads this, and a dot that came"+
 			" up muted holds none of its keys when it is not known", muted, ok)
+	}
+}
+
+func listedFormats(t *testing.T, s *Server) []map[int]pbField {
+	t.Helper()
+	c := &conn{out: make(chan frame, 32)}
+	if err := s.listEntities(c); err != nil {
+		t.Fatalf("listEntities: %v", err)
+	}
+	close(c.out)
+	var formats []map[int]pbField
+	for f := range c.out {
+		if f.msgType != msgListMediaPlayer {
+			continue
+		}
+		if err := pbWalk(f.payload, func(field pbField) {
+			if field.field != 9 {
+				return
+			}
+			format := map[int]pbField{}
+			if err := pbWalk(field.data, func(sub pbField) { format[sub.field] = sub }); err != nil {
+				t.Fatalf("a supported format did not parse: %v", err)
+			}
+			formats = append(formats, format)
+		}); err != nil {
+			t.Fatalf("the media player did not parse: %v", err)
+		}
+	}
+	return formats
+}
+
+func TestAPlayerAsksHomeAssistantForFLACItCanDecode(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	if got := listedFormats(t, s); len(got) != 0 {
+		t.Fatalf("listed %d formats with nothing to play them, want none: Home Assistant"+
+			" would transcode for a player that plays nothing", len(got))
+	}
+	s.UsePlay(func(string, bool) error { return nil }, func() {})
+	formats := listedFormats(t, s)
+	if len(formats) != 2 {
+		t.Fatalf("listed %d formats, want 2: Home Assistant picks an announcement format"+
+			" only from those marked for it, and otherwise passes the url through", len(formats))
+	}
+	for i, f := range formats {
+		if string(f[1].data) != "flac" || f[2].num != 48000 || f[3].num != 2 || f[5].num != 2 {
+			t.Errorf("format %d is %q %d Hz %d ch %d bytes, want flac 48000 Hz 2 ch 2 bytes",
+				i, f[1].data, f[2].num, f[3].num, f[5].num)
+		}
+		if f[4].num != uint64(i) {
+			t.Errorf("format %d has purpose %d, want %d", i, f[4].num, i)
+		}
+	}
+	for _, entity := range listed(t, s) {
+		if entity[0].num == uint64(msgListMediaPlayer) && entity[11].num&featStop == 0 {
+			t.Error("a player that plays offers no stop, so a long clip cannot be ended")
+		}
+	}
+}
+
+func mediaCommand(s *Server, fields func(*pb)) []byte {
+	var p pb
+	p.fixed32(1, s.keySpeaker)
+	fields(&p)
+	return p.b
+}
+
+func TestTheAnnouncementFlagReachesThePlayer(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	got := make(chan bool, 2)
+	s.UsePlay(func(_ string, announcement bool) error {
+		got <- announcement
+		return nil
+	}, func() {})
+	c := &conn{sock: fakeAddr{}}
+	for _, want := range []bool{true, false} {
+		cmd := mediaCommand(s, func(p *pb) {
+			p.boolean(6, true)
+			p.str(7, "http://192.168.53.5:8123/api/esphome/ffmpeg_proxy/a/b.flac")
+			p.boolean(8, true)
+			p.boolean(9, want)
+		})
+		if err := s.handle(c, msgMediaPlayerCmd, cmd); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case a := <-got:
+			if a != want {
+				t.Errorf("announcement=%v reached the player as %v: an announcement ducks the"+
+					" stream, and anything else ends it", want, a)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the play never reached the player")
+		}
+	}
+}
+
+func TestStopReachesThePlayerAndOvertakesNothing(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	var mu sync.Mutex
+	var order []string
+	release := make(chan struct{})
+	s.UsePlay(func(url string, _ bool) error {
+		mu.Lock()
+		order = append(order, "play "+url)
+		mu.Unlock()
+		<-release
+		return nil
+	}, func() {
+		mu.Lock()
+		order = append(order, "stop")
+		mu.Unlock()
+	})
+	c := &conn{sock: fakeAddr{}}
+	play := func(url string) []byte {
+		return mediaCommand(s, func(p *pb) { p.boolean(6, true); p.str(7, url) })
+	}
+	stop := mediaCommand(s, func(p *pb) { p.boolean(2, true); p.u32(3, mediaStop) })
+
+	for _, cmd := range [][]byte{play("http://a/1"), stop, play("http://a/2")} {
+		if err := s.handle(c, msgMediaPlayerCmd, cmd); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]string(nil), order...)
+		mu.Unlock()
+		if len(got) >= 2 || time.Now().After(deadline) {
+			if !slices.Equal(got, []string{"play http://a/1", "play http://a/2"}) {
+				t.Errorf("the player saw %v, want the first play then the second: the stop"+
+					" was replaced by the newer play before it ran, so it must not stop it", got)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAStopOnItsOwnStopsThePlayer(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	stopped := make(chan struct{}, 1)
+	s.UsePlay(func(string, bool) error { return nil }, func() { stopped <- struct{}{} })
+	c := &conn{sock: fakeAddr{}}
+	stop := mediaCommand(s, func(p *pb) { p.boolean(2, true); p.u32(3, mediaStop) })
+	if err := s.handle(c, msgMediaPlayerCmd, stop); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Error("Home Assistant's stop never reached the player")
+	}
+}
+
+func TestAWakeBetweenTicksIsServedNotDropped(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	reads := make(chan time.Time, 64)
+	s.volumes = func() device.MusicVolume {
+		select {
+		case reads <- time.Now():
+		default:
+		}
+		return device.MusicVolume{Max: 30, Percent: 40, Step: 12, OK: true}
+	}
+	c := listening(s)
+	defer quiet(s, c)
+	s.wakeGap = 200 * time.Millisecond
+
+	go s.PollLive(100 * time.Millisecond)
+	first := <-reads
+	time.Sleep(150 * time.Millisecond)
+	s.NotePlayback(true)
+	woke := time.Now()
+	select {
+	case at := <-reads:
+		if at.Before(woke) {
+			t.Fatalf("a read %v before the wake; the tick does a full read only every %d",
+				woke.Sub(at), HeavyEvery)
+		}
+		if late := at.Sub(woke); late > 300*time.Millisecond {
+			t.Errorf("the state went out %v after the wake, want within a tick or two of"+
+				" the %v gap: a full read comes only every %d ticks", late, s.wakeGap,
+				HeavyEvery)
+		}
+	case <-time.After(400 * time.Millisecond):
+		t.Errorf("no read within 400 ms of a wake %v after the first read: the poll ran"+
+			" every 100 ms and dropped the wake for landing inside the %v gap",
+			woke.Sub(first), s.wakeGap)
+	}
+}
+
+func TestStopIsOfferedOnlyWithSomethingToStop(t *testing.T) {
+	s := testServer(t, testPSK(t))
+	s.UsePlay(func(string, bool) error { return nil }, nil)
+	if s.mediaFeatures()&featStop != 0 {
+		t.Error("STOP is offered with no stop hook, so Home Assistant shows a button that" +
+			" does nothing")
+	}
+}
+
+func TestASecondWakeInsideTheGapIsServedAfterIt(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	stubSensors(s)
+	reads := make(chan time.Time, 64)
+	s.volumes = func() device.MusicVolume {
+		select {
+		case reads <- time.Now():
+		default:
+		}
+		return device.MusicVolume{Max: 30, Percent: 40, Step: 12, OK: true}
+	}
+	c := listening(s)
+	defer quiet(s, c)
+	s.wakeGap = 200 * time.Millisecond
+
+	go s.PollLive(100 * time.Millisecond)
+	<-reads
+	s.NotePlayback(true)
+	served := <-reads
+	time.Sleep(50 * time.Millisecond)
+	s.NotePlayback(false)
+	select {
+	case at := <-reads:
+		if gap := at.Sub(served); gap < s.wakeGap {
+			t.Errorf("the second wake was served %v after the first, inside the %v gap: a"+
+				" peer holding the key sets the poll's rate", gap, s.wakeGap)
+		}
+		if gap := at.Sub(served); gap > s.wakeGap+150*time.Millisecond {
+			t.Errorf("the second wake was served %v after the first, want just past the %v"+
+				" gap: an owed wake waits for the gap, not for the 5th tick", gap, s.wakeGap)
+		}
+	case <-time.After(time.Second):
+		t.Error("the second wake was never served")
 	}
 }

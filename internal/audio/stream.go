@@ -304,20 +304,22 @@ func (s *Stream) duck(cut float64) {
 	s.cutTo = min(max(cut, 0), 1)
 }
 
-func (s *Stream) scale(block []int16) {
-	if s.cut == 0 && s.cutTo == 0 {
+func (s *Stream) scale(block []int16) { scaleToward(s.rate, &s.cut, s.cutTo, block) }
+
+func scaleToward(rate int, cut *float64, cutTo float64, block []int16) {
+	if *cut == 0 && cutTo == 0 {
 		return
 	}
-	down := 1 / float64(max(1, frameCount(s.rate, duckDownFor)))
-	up := 1 / float64(max(1, frameCount(s.rate, duckUpFor)))
+	down := 1 / float64(max(1, frameCount(rate, duckDownFor)))
+	up := 1 / float64(max(1, frameCount(rate, duckUpFor)))
 	for i := 0; i+ChimeChannels <= len(block); i += ChimeChannels {
 		switch {
-		case s.cut < s.cutTo:
-			s.cut = min(s.cut+down, s.cutTo)
-		case s.cut > s.cutTo:
-			s.cut = max(s.cut-up, s.cutTo)
+		case *cut < cutTo:
+			*cut = min(*cut+down, cutTo)
+		case *cut > cutTo:
+			*cut = max(*cut-up, cutTo)
 		}
-		gain := 1 - s.cut
+		gain := 1 - *cut
 		for ch := range ChimeChannels {
 			block[i+ch] = attenuate(block[i+ch], gain)
 		}

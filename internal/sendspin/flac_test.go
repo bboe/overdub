@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	flacframe "github.com/mewkiz/flac/frame"
+
+	"github.com/bboe/overdub/internal/flacread"
 )
 
 const flacVectorBlock = 4608
@@ -56,9 +58,9 @@ func flacFile(t testing.TB, name string) (header []byte, frames [][]byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := len(flacMagic)
+	n := len(flacread.Magic)
 	for {
-		last := b[n]&flacLastBlock != 0
+		last := b[n]&flacread.LastBlock != 0
 		n += 4 + int(b[n+1])<<16 | int(b[n+2])<<8 | int(b[n+3])
 		if last {
 			break
@@ -92,7 +94,7 @@ func flacStarted(t *testing.T, header string) *Session {
 }
 
 func streamInfo(rate, channels, bits int) []byte {
-	b := make([]byte, flacStreamInfoBytes)
+	b := make([]byte, flacread.StreamInfoBytes)
 	binary.BigEndian.PutUint16(b[0:], flacVectorBlock)
 	binary.BigEndian.PutUint16(b[2:], flacVectorBlock)
 	binary.BigEndian.PutUint64(b[10:],
@@ -101,7 +103,7 @@ func streamInfo(rate, channels, bits int) []byte {
 }
 
 func wrapped(info []byte) []byte {
-	return slices.Concat(flacMagic, []byte{flacLastBlock, 0, 0, byte(len(info))}, info)
+	return slices.Concat(flacread.Magic, []byte{flacread.LastBlock, 0, 0, byte(len(info))}, info)
 }
 
 func flacCRC8(b []byte) byte {
@@ -178,10 +180,10 @@ func TestAFLACStreamDecodesToTheSamplesThatWereEncoded(t *testing.T) {
 
 func TestEveryStereoLayoutDecodesToTheSamplesThatWereEncoded(t *testing.T) {
 	for name, code := range map[string]byte{
-		"independent": flacTwoChannels,
-		"left-side":   flacLeftSide,
-		"right-side":  flacLeftSide + 1,
-		"mid-side":    flacMidSide,
+		"independent": flacread.TwoChannels,
+		"left-side":   flacread.LeftSide,
+		"right-side":  flacread.LeftSide + 1,
+		"mid-side":    flacread.MidSide,
 	} {
 		header, frames := flacFile(t, "stereo-"+name+".flac")
 		if got := frames[0][3] >> 4; got != code {
@@ -203,7 +205,7 @@ func TestEveryStereoLayoutDecodesToTheSamplesThatWereEncoded(t *testing.T) {
 func TestSeveralFLACFramesInOneChunkAllDecode(t *testing.T) {
 	var chunk, want []byte
 	for v := range int16(4) {
-		chunk = append(chunk, constantFrame(flacRate48kHz, flacChunkFrames/4, 100*v)...)
+		chunk = append(chunk, constantFrame(flacread.Rate48kHz, flacChunkFrames/4, 100*v)...)
 		for range 2 * flacChunkFrames / 4 {
 			want = binary.LittleEndian.AppendUint16(want, uint16(100*v))
 		}
@@ -313,12 +315,12 @@ func TestAFLACStreamStartNeedsAHeaderForItsOwnFormat(t *testing.T) {
 		{"a bare block of the wrong length", b64(good[:33]), false},
 		{"a bare block 1 byte long", b64(append(slices.Clone(good), 0)), false},
 		{"another magic", b64(slices.Concat([]byte("fLaX"), wrapped(good)[4:])), false},
-		{"STREAMINFO not last, then more blocks", b64(slices.Concat(flacMagic,
-			[]byte{0, 0, 0, flacStreamInfoBytes}, good, []byte{0x81, 0, 0, 0})), true},
-		{"a PICTURE block first", b64(slices.Concat(flacMagic,
-			[]byte{0x86, 0, 0, flacStreamInfoBytes}, good)), false},
-		{"a STREAMINFO block of the wrong length", b64(slices.Concat(flacMagic,
-			[]byte{flacLastBlock, 0, 0, flacStreamInfoBytes + 1}, good, []byte{0})), false},
+		{"STREAMINFO not last, then more blocks", b64(slices.Concat(flacread.Magic,
+			[]byte{0, 0, 0, flacread.StreamInfoBytes}, good, []byte{0x81, 0, 0, 0})), true},
+		{"a PICTURE block first", b64(slices.Concat(flacread.Magic,
+			[]byte{0x86, 0, 0, flacread.StreamInfoBytes}, good)), false},
+		{"a STREAMINFO block of the wrong length", b64(slices.Concat(flacread.Magic,
+			[]byte{flacread.LastBlock, 0, 0, flacread.StreamInfoBytes + 1}, good, []byte{0})), false},
 	} {
 		s := flacStarted(t, tc.header)
 		if s.Streaming() != tc.plays {
@@ -343,14 +345,14 @@ func TestAFLACStreamAt44kTakesFramesAtItsOwnRate(t *testing.T) {
 	if !s.Streaming() {
 		t.Fatal("a flac stream/start at 44.1 kHz with a header saying so was refused")
 	}
-	for _, code := range []byte{flacRate44kHz, flacRateFromHeader} {
+	for _, code := range []byte{flacread.Rate44kHz, flacread.RateFromHeader} {
 		c, err := s.AudioChunk(chunkBody(1, constantFrame(code, 16, 1234)))
 		if err != nil || c.Frames() != 16 {
 			t.Errorf("a 16-frame 44.1 kHz frame with rate code %#x came back as %v, %v",
 				code, c, err)
 		}
 	}
-	if _, err := s.AudioChunk(chunkBody(1, constantFrame(flacRate48kHz, 16, 1234))); !errors.Is(err, errFLACFormat) {
+	if _, err := s.AudioChunk(chunkBody(1, constantFrame(flacread.Rate48kHz, 16, 1234))); !errors.Is(err, errFLACFormat) {
 		t.Errorf("a 48 kHz frame in a 44.1 kHz stream came back as %v, want the format"+
 			" refusal: played, it is the right audio at the wrong pitch", err)
 	}
@@ -365,12 +367,12 @@ func TestAFLACStreamAt44kTakesFramesAtItsOwnRate(t *testing.T) {
 }
 
 func TestAFLACHeaderIsReadWithoutTheSizesItClaims(t *testing.T) {
-	picture := slices.Concat(flacMagic, []byte{0x86, 0, 0, 0x24}, // PICTURE, 36 bytes
+	picture := slices.Concat(flacread.Magic, []byte{0x86, 0, 0, 0x24}, // PICTURE, 36 bytes
 		[]byte{0, 0, 0, 3},                     // picture type
 		[]byte{0, 0, 0, 0}, []byte{0, 0, 0, 0}, // no MIME type, no description
 		make([]byte, 16),      // size, depth, colours
 		[]byte{0x08, 0, 0, 0}) // 128 MB of data to come
-	seektable := slices.Concat(flacMagic, []byte{0x03, 0xff, 0xff, 0xff}, make([]byte, 32))
+	seektable := slices.Concat(flacread.Magic, []byte{0x03, 0xff, 0xff, 0xff}, make([]byte, 32))
 	for what, header := range map[string][]byte{
 		"a PICTURE block claiming 128 MB":  picture,
 		"a SEEKTABLE block claiming 16 MB": seektable,
@@ -392,7 +394,7 @@ func TestAFLACHeaderIsReadWithoutTheSizesItClaims(t *testing.T) {
 
 func TestAFLACFrameLeavingItsRateToTheHeaderDecodes(t *testing.T) {
 	s := flacStarted(t, flacHeaderB64(t))
-	c, err := s.AudioChunk(chunkBody(1, constantFrame(flacRateFromHeader, 16, 1234)))
+	c, err := s.AudioChunk(chunkBody(1, constantFrame(flacread.RateFromHeader, 16, 1234)))
 	if err != nil {
 		t.Fatalf("a frame naming no rate of its own was refused: %v", err)
 	}
@@ -407,7 +409,7 @@ func TestAFLACFrameLeavingItsRateToTheHeaderDecodes(t *testing.T) {
 }
 
 func TestAFLACChunkDecodesToNoMoreThanTheSubsetsLargestBlock(t *testing.T) {
-	biggest := constantFrame(flacRate48kHz, flacVectorBlock, 7)
+	biggest := constantFrame(flacread.Rate48kHz, flacVectorBlock, 7)
 	s := flacStarted(t, flacHeaderB64(t))
 	c, err := s.AudioChunk(chunkBody(1, biggest))
 	if err != nil {
@@ -420,7 +422,7 @@ func TestAFLACChunkDecodesToNoMoreThanTheSubsetsLargestBlock(t *testing.T) {
 	if _, err := s.AudioChunk(chunkBody(1, slices.Concat(biggest, biggest))); !errors.Is(err, errFLACLong) {
 		t.Errorf("2 of them in one chunk came back as %v", err)
 	}
-	one := constantFrame(flacRate48kHz, 1, 7)
+	one := constantFrame(flacread.Rate48kHz, 1, 7)
 	if _, err := s.AudioChunk(chunkBody(1, slices.Concat(biggest, one))); !errors.Is(err, errFLACLong) {
 		t.Errorf("a chunk of %d frames came back as %v", flacVectorBlock+1, err)
 	}
@@ -430,7 +432,7 @@ func TestAFLACChunkDecodesToNoMoreThanTheSubsetsLargestBlock(t *testing.T) {
 		t.Errorf("a second frame past the budget came back as %v; it was decoded before"+
 			" its size was weighed, which spends a frame's work the chunk had no room for", err)
 	}
-	tiny := constantFrame(flacRate48kHz, 1<<16-1, 0)
+	tiny := constantFrame(flacread.Rate48kHz, 1<<16-1, 0)
 	if _, err := s.AudioChunk(chunkBody(1, tiny)); !errors.Is(err, errFLACLong) {
 		t.Errorf("a %d-byte frame claiming 65535 frames came back as %v; on a Dot it"+
 			" costs 5.6 ms to decode, 16 times a subset block", len(tiny), err)
@@ -465,7 +467,7 @@ func FuzzFLACChunk(f *testing.F) {
 		f.Add(fr)
 	}
 	f.Add(slices.Concat(frames...))
-	f.Add(constantFrame(flacRate48kHz, flacChunkFrames, 0))
+	f.Add(constantFrame(flacread.Rate48kHz, flacChunkFrames, 0))
 	f.Fuzz(func(t *testing.T, audio []byte) {
 		pcm, err := decodeFLAC(audio, StreamRate)
 		switch {

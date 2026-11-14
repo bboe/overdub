@@ -19,6 +19,7 @@ import (
 	"github.com/bboe/overdub/internal/alexa"
 	"github.com/bboe/overdub/internal/audio"
 	"github.com/bboe/overdub/internal/button"
+	"github.com/bboe/overdub/internal/clip"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
 	"github.com/bboe/overdub/internal/mdns"
@@ -74,6 +75,10 @@ const (
 
 	commandRetry = 5 * time.Minute
 
+	clipDial          = 15 * time.Second
+	clipHeaderWait    = 15 * time.Second
+	announceDuckLevel = 20
+
 	multiGap = 350 * time.Millisecond
 )
 
@@ -85,12 +90,96 @@ var api atomic.Pointer[esphome.Server]
 
 var switched atomic.Pointer[sendspinSwitch]
 
-var alexaPlaying atomic.Bool
+var (
+	alexaPlaying atomic.Bool
+	clipPlaying  atomic.Bool
+)
+
+func elsewhere() bool { return alexaPlaying.Load() || clipPlaying.Load() }
+
+func noteElsewhere() {
+	if s := switched.Load(); s != nil {
+		s.noteElsewhere()
+	}
+}
 
 func noteAlexaPlaying(playing bool) {
 	alexaPlaying.Store(playing)
-	if s := switched.Load(); s != nil {
-		s.noteElsewhere()
+	noteElsewhere()
+}
+
+type ducker struct {
+	set  func(percent int)
+	clip func(percent int)
+
+	mu         sync.Mutex
+	alexa      int
+	announcing bool
+}
+
+func (d *ducker) alexaAt(percent int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.alexa = percent
+	d.apply()
+}
+
+func (d *ducker) announce(on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.announcing = on
+	d.apply()
+}
+
+func (d *ducker) apply() {
+	level := d.alexa
+	if level == 0 {
+		level = 100
+	}
+	if d.clip != nil {
+		d.clip(level)
+	}
+	if d.announcing {
+		level = min(level, announceDuckLevel)
+	}
+	d.set(level)
+}
+
+func noteClip(d *ducker, playing, announcement bool) {
+	d.announce(playing && announcement)
+	if clipPlaying.Swap(playing && !announcement) != (playing && !announcement) {
+		noteElsewhere()
+	}
+	server := api.Load()
+	if server == nil {
+		return
+	}
+	server.NotePlayback(playing)
+}
+
+func newClips(chime *audio.Chime, d *ducker) *clip.Player {
+	dial := device.Dialer(clipDial)
+	return &clip.Player{
+		Open: func(rate int, done func()) (clip.Feed, error) {
+			f, err := chime.OpenFeed(rate, done)
+			if err != nil {
+				return nil, err
+			}
+			return f, nil
+		},
+		Client: &http.Client{Transport: &http.Transport{
+			DialContext:           dial.DialContext,
+			ResponseHeaderTimeout: clipHeaderWait,
+			TLSHandshakeTimeout:   clipHeaderWait,
+			DisableKeepAlives:     true,
+		}},
+		OnStart: func(announcement bool) { noteClip(d, true, announcement) },
+		OnEnd: func(announcement bool, err error) {
+			noteClip(d, false, announcement)
+			if server := api.Load(); server != nil && err != nil {
+				server.NotePlaybackFailed(err.Error())
+			}
+		},
 	}
 }
 
@@ -137,12 +226,20 @@ func serve(flags config) error {
 	}
 
 	var player sendspin.Player
+	var clips *clip.Player
 	if chime != nil {
 		player = chimePlayer{chime: chime}
-		go (&alexa.FocusWatcher{OnLevel: chime.Duck, OnMusic: noteAlexaPlaying}).Run()
+		d := &ducker{set: chime.Duck, clip: chime.DuckClips}
+		clips = newClips(chime, d)
+		go (&alexa.FocusWatcher{OnLevel: d.alexaAt, OnMusic: func(playing bool) {
+			noteAlexaPlaying(playing)
+			if playing {
+				clips.Yield()
+			}
+		}}).Run()
 	}
 
-	go serveAPI(flags.Name, psk, i, player)
+	go serveAPI(flags.Name, psk, i, player, clips)
 
 	var held []string
 	for code, b := range buttons {
@@ -271,7 +368,8 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 	return "", false
 }
 
-func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Player) {
+func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Player,
+	clips *clip.Player) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		log.Printf("%s has no address yet; the button works, and the api starts if it appears", wifiIface)
@@ -312,6 +410,10 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		device.AwaitVolume(volumeWait)
 		holdKeysIfMuted()
 	}()
+
+	if clips != nil {
+		server.UsePlay(clips.Play, clips.Stop)
+	}
 
 	if commandReady(device.AlexaRegistered()) {
 		server.UseCommand(alexa.NewClient().Send)
@@ -1119,7 +1221,7 @@ func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Reco
 	}
 	if player != nil {
 		config.OutputRate = audio.OutputRate
-		config.Elsewhere = alexaPlaying.Load
+		config.Elsewhere = elsewhere
 	}
 	if server := api.Load(); server != nil && server.CanSetVolume() {
 		config.Level, config.SetVolume = speakerLevel, setSpeakerVolume

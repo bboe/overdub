@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/bboe/overdub/internal/flacread"
 	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
@@ -356,8 +357,8 @@ func (s *Session) Goodbye(reason string) error {
 const (
 	StreamRate     = 48000
 	BluetoothRate  = 44100
-	StreamChannels = 2
-	StreamBitDepth = 16
+	StreamChannels = flacread.Channels
+	StreamBitDepth = flacread.Depth
 )
 
 func streamRates() []int { return []int{StreamRate, BluetoothRate} }

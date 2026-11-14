@@ -186,6 +186,7 @@ type Server struct {
 	playWorking    bool
 	playHasPending bool
 	playWant       string
+	playAnnounce   bool
 
 	volWorking    bool
 	volHasPending bool
@@ -237,7 +238,8 @@ type Server struct {
 	updateCheck   func()
 	updateInstall func()
 
-	play        func(url string) error
+	play        func(url string, announcement bool) error
+	stopPlay    func()
 	command     func(text string) error
 	micPress    func() error
 	adbMode     func() (device.ADBMode, bool)
@@ -828,6 +830,8 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		switch {
 		case hasURL && url != "":
 			s.playLocked(conn, url, announcement)
+		case hasCommand && command == mediaStop:
+			s.stopLocked(conn)
 		case hasVolume && volumeIsFloat && isFinite(volume):
 			s.setVolumeLocked(conn, volumeWant{fraction: volume, absolute: true})
 		case hasCommand && command == mediaMute:

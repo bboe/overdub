@@ -479,6 +479,9 @@ buffer and keeps it open. Each reaches the player and the session.
   34-byte STREAMINFO is accepted too, as `aiosendspin`'s own decoder accepts it.
   A header that does not describe the `stream/start`'s rate, stereo and 16-bit
   refuses the stream.
+- `internal/flacread` holds the header and frame checks below, and clips from
+  the media player go through the same ones. Each caller passes its own cap on
+  a frame's samples and keeps its own refusal messages.
 - The header is read by hand, not by the library. `flac.New` parses a whole
   metadata block before checking its type: a 40-byte header whose PICTURE block
   claimed 128 MB allocated 128 MB, and every `stream/start` is read.
@@ -749,8 +752,9 @@ listener closed, rule deleted and no longer re-asserted, sessions ended.
   spec's precondition.
 - A Dot with no player (`audio.NewChime` failed) stays false. Available would
   make the group wait for a speaker that cannot sound.
-- **An `available: true` is withdrawn only while Alexa plays her own
-  music.** Then the Dot reports `available: false`, which the spec defines as
+- **An `available: true` is withdrawn only while something else plays on the
+  Dot**: Alexa's own music, or a media player clip that is not an
+  announcement. Then the Dot reports `available: false`, which the spec defines as
   "in use by an external system and will not yield": the server ends the
   stream and moves the Dot out of its group, and it does not resume when the
   Dot is available again. docs/audio.md has how her music is read.

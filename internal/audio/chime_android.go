@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type Chime struct {
 	done   chan struct{}
 	closed bool
 	cut    float64
+	clip   atomic.Uint64
 	opened bool
 	broken bool
 	retry  time.Time
@@ -97,6 +99,18 @@ func (c *Chime) OpenStream(rate int, say func(string, ...any)) (*Stream, error) 
 	return s, nil
 }
 
+func (c *Chime) OpenFeed(rate int, done func()) (*Feed, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("audio: a clip after close")
+	}
+	f := newFeed(rate, func() int { return c.rate }, done)
+	f.cutTo = func() float64 { return math.Float64frombits(c.clip.Load()) }
+	c.mix.add(f)
+	return f, nil
+}
+
 func (c *Chime) Duck(percent int) {
 	cut := duckCut(percent)
 	c.mu.Lock()
@@ -105,6 +119,10 @@ func (c *Chime) Duck(percent int) {
 	if s := c.stream.Load(); s != nil {
 		s.duck(cut)
 	}
+}
+
+func (c *Chime) DuckClips(percent int) {
+	c.clip.Store(math.Float64bits(duckCut(percent)))
 }
 
 func (c *Chime) retune() bool {

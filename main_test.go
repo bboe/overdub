@@ -1801,3 +1801,63 @@ func TestAlexaPlayingNudgesTheClientTheSwitchHolds(t *testing.T) {
 		t.Error("alexa stopped and the fact still says she is playing")
 	}
 }
+
+func TestTheDeeperDuckWins(t *testing.T) {
+	var got []int
+	d := &ducker{set: func(p int) { got = append(got, p) }}
+	d.announce(true)
+	d.alexaAt(10)
+	d.alexaAt(100)
+	d.announce(false)
+	if want := []int{20, 10, 20, 100}; !slices.Equal(got, want) {
+		t.Errorf("levels %v, want %v: an announcement ducks to %d%%, an alarm under it goes"+
+			" deeper, and ending the announcement hands the level back to alexa's",
+			got, want, announceDuckLevel)
+	}
+}
+
+func TestAClipDucksUnderAlexaButNotUnderItself(t *testing.T) {
+	var got []int
+	d := &ducker{set: func(int) {}, clip: func(p int) { got = append(got, p) }}
+	d.announce(true)
+	d.alexaAt(20)
+	d.alexaAt(0)
+	if want := []int{100, 20, 100}; !slices.Equal(got, want) {
+		t.Errorf("clip levels %v, want %v: a clip ducks under alexa's speech, and an"+
+			" announcement is the clip, so it does not duck itself", got, want)
+	}
+}
+
+func TestAMediaClipTakesTheDotFromSendspinAndAnAnnouncementDoesNot(t *testing.T) {
+	client := newRecordingClient()
+	toggle := &sendspinSwitch{}
+	toggle.client = client
+	switched.Store(toggle)
+	t.Cleanup(func() {
+		switched.Store(nil)
+		clipPlaying.Store(false)
+	})
+	var level []int
+	d := &ducker{set: func(p int) { level = append(level, p) }}
+
+	noteClip(d, true, true)
+	if elsewhere() {
+		t.Error("an announcement took the dot from sendspin; it should duck the stream")
+	}
+	if got := level[len(level)-1]; got != announceDuckLevel {
+		t.Errorf("an announcement left the stream at %d%%, want %d%%", got, announceDuckLevel)
+	}
+	noteClip(d, true, false)
+	if !elsewhere() || client.noted.Load() != 1 {
+		t.Errorf("a media clip left elsewhere=%v after %d nudges, want true after 1: two"+
+			" streams of music would play over each other", elsewhere(), client.noted.Load())
+	}
+	if got := level[len(level)-1]; got != 100 {
+		t.Errorf("a media clip that replaced an announcement left the stream at %d%%", got)
+	}
+	noteClip(d, false, false)
+	if elsewhere() || client.noted.Load() != 2 {
+		t.Errorf("the clip ended and elsewhere=%v after %d nudges, want false after 2",
+			elsewhere(), client.noted.Load())
+	}
+}

@@ -18,6 +18,12 @@ func (c *Chime) OpenStream(int, func(string, ...any)) (*Stream, error) {
 	return nil, errors.New("audio: built without the mixer")
 }
 
+func (c *Chime) OpenFeed(int, func()) (*Feed, error) {
+	return nil, errors.New("audio: built without the mixer")
+}
+
 func (c *Chime) Duck(int) {}
+
+func (c *Chime) DuckClips(int) {}
 
 func (c *Chime) Close() {}
