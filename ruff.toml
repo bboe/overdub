@@ -29,6 +29,10 @@ select = ["ALL"]
     "subprocess-without-shell-equals-true",
     "suspicious-subprocess-import",
 ]
+"internal/device/testdata/*" = [
+    # a fixture builder run by path, not a package
+    "implicit-namespace-package",
+]
 "internal/sendspin/testdata/*" = [
     # tools run by path, not a package
     "implicit-namespace-package",

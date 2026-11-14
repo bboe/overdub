@@ -68,11 +68,10 @@
 
 ## Going back after an update
 
-- An update leaves the binary it replaced at `bin/overdub.prev`, and
-  `mapdump.jar.prev` beside the jar when it changed the jar. It also writes the
-  trial marker, `bin/.overdub-trial`, holding the version on trial.
+- An update leaves the binary it replaced at `bin/overdub.prev`. It also
+  writes the trial marker, `bin/.overdub-trial`, holding the version on trial.
 - While the marker exists, the loop counts each start. Before the 4th start it
-  moves the previous binary and jar back, removes the marker and logs
+  moves the previous binary back, removes the marker and logs
   `the update to <version> exited 3 times`. So a new binary that exits at once
   is tried 3 times, about 15 seconds, and the Dot goes back to what worked.
 - The count starts again whenever the marker's text changes. A binary that
@@ -81,7 +80,7 @@
   update fewer tries. On the Dot, one such update was tried only twice.
 - A binary passes its trial 60 seconds after the first client subscribes to
   its states, which is Home Assistant's last step in connecting. Then it
-  removes the marker, both `.prev` files and the failure record. Time since
+  removes the marker, the `.prev` file and the failure record. Time since
   start alone would pass a binary whose API is dead, or one that crashes only
   when Home Assistant connects and Home Assistant came back after 60 seconds.
   With Home Assistant away, the trial stays open: a further install waits, and
@@ -93,17 +92,16 @@
   so a marker for a newer update survives. A binary that hangs without exiting
   and keeps its API up is not caught: nothing else measures health.
 - A binary that starts under a marker naming another version comes from an
-  install that stopped between its renames: the jar is renamed before the
-  binary. It puts back `mapdump.jar.prev`, if there is one, and removes the
-  marker and `overdub.prev`. Passing that trial instead would keep the old
-  binary with the new jar.
+  install that stopped between writing the marker and renaming the binary. It
+  removes the marker and `overdub.prev` and carries on as itself. Passing
+  that trial instead would record a version that never ran.
 - When the loop goes back, it writes the failed version to
   `bin/.overdub-failed`. The restored binary then tells Home Assistant that
   the release it offers already failed once; without the record it would
   offer the same release as a clean update.
-- With the marker present and no `overdub.prev`, the loop logs that, keeps the
-  new binary and removes `mapdump.jar.prev`.
-- `install.py` removes the marker, the failure record and both `.prev` files.
+- With the marker present and no `overdub.prev`, the loop logs that and keeps
+  the new binary.
+- `install.py` removes the marker, the failure record and the `.prev` file.
   Otherwise a binary it installed during a failing trial would be replaced by
   the loop's next rollback, after `install.py` had printed its md5 as verified.
 - The loop sets `OVERDUB_ROLLBACK=1` for the daemon. The daemon reads it to know
@@ -117,16 +115,16 @@
 
 ## Updating over the API
 
-- `internal/update` does what `install.py` does for the binary and the jar,
-  from the Dot itself. docs/usage.md has what a user sees.
+- `internal/update` does what `install.py` does for the binary, from the Dot
+  itself. docs/usage.md has what a user sees.
 - It reads `releases/latest` from GitHub's API, then downloads `SHA256SUMS`,
   `SHA256SUMS.sig` and the tarball. Each read has a size limit, and the whole
   request has a 5-minute deadline. Go's TLS reads Fire OS's CA store, which
   trusts both roots GitHub uses (USERTrust ECC for the API, ISRG Root X1 for
   the downloads): a 3.2 MB release tarball downloaded on the Dot.
 - The signature must check, the tarball's sha256 must match the line that
-  names `overdub-<tag>.tar.gz`, and the tarball must hold the binary, the jar
-  and the boot script under `overdub-<tag>/`.
+  names `overdub-<tag>.tar.gz`, and the tarball must hold the binary and the
+  boot script under `overdub-<tag>/`.
 - The release's boot script, with this Dot's name put in as `install.py` does
   it, must equal the installed one byte for byte. An update does not replace
   the boot script. A broken one would stop the daemon at the next boot, where
@@ -135,13 +133,11 @@
   while the trial marker exists. A binary still on trial would otherwise
   remove the new marker and `.prev` when its own trial passed, leaving a
   failing update with nothing to go back to.
-- A power cut between the jar's rename and the binary's leaves the old binary
-  under the new version's marker, with the new jar. It finds the marker names
-  another version and goes back to its own jar, as "Going back after an
-  update" says.
-- Each new file is written beside its target, synced, read back and renamed
-  into place. The old binary and jar are hard-linked to their `.prev` names
-  first. The jar is replaced only when it changed, and is owned by 32051.
+- A power cut between the marker's write and the binary's rename leaves the
+  old binary under the new version's marker. It finds the marker names another
+  version and forgets it, as "Going back after an update" says.
+- The new binary is written beside its target, synced, read back and renamed
+  into place. The old binary is hard-linked to its `.prev` name first.
 - After the rename the daemon shuts down as it does on SIGTERM, and the loop
   starts the new binary 5 seconds later.
 - `install.py`'s applied stamp then names a pid and a binary md5 that do not
@@ -151,7 +147,8 @@
   stamps both, because `build.sh` passes the variable inside `-ldflags`.
 - Tested on the Dot that way, with a release served from its loopback and
   signed with the release key, and driven by aioesphomeapi: `v0.2.9` updated to
-  `v0.3.0` in 7 seconds, with a changed jar owned by 32051, and the trial passed.
+  `v0.3.0` in 7 seconds, and the trial passed. That build still carried the
+  Fire OS 5 jar beside the binary; the jar is gone since.
   A signed `v0.4.0` whose binary exited at once ran 3 times, and the loop went
   back to `v0.3.0` by md5.
 
@@ -243,8 +240,7 @@ that runs as root, and no `su`.
    that starts the daemon at boot, so a reboot part way through leaves nothing
    running.
 2. Delete the boot script, the binary, the previous binary, the trial marker,
-   the failure record, the keys, the applied stamp, the staging directory and
-   `/data/local/map`.
+   the failure record, the keys, the applied stamp and the staging directory.
    The binary goes before the kill because the supervisor is a live shell
    loop: deleting the boot script does not stop it, and it respawns a killed
    daemon 5 seconds later. The loop runs `while [ -x "$BIN" ]`, so removing
@@ -297,8 +293,14 @@ that runs as root, and no `su`.
 
 ## Releases
 
-- A release is a tarball. Building needs an NDK, a JDK and an Android SDK, so it
-  carries the built binary and jar beside the scripts.
+- A release is a tarball. Building needs an NDK, so it carries the built
+  binary beside the scripts.
+- v0.3.0 and earlier were Fire OS 5 builds whose `unpack` demanded
+  `deploy/mapdump/mapdump.jar` in the tarball, so the update entity on such a
+  Dot refuses a Fire OS 6 release before writing anything. That is the
+  change-over, not a regression: no Fire OS 6 build runs on Fire OS 5, and a
+  Dot moves to Fire OS 6 through firebreak, which erases `/data`, and then
+  `install.py`. No placeholder jar is shipped.
 - `install.py` builds when `build.sh` is beside it, and installs `build/overdub`
   as it stands when it is not. The test is whether the file exists, not
   whether it can run; docs/pitfalls.md says why.

@@ -15,7 +15,7 @@ while IFS= read -r hit; do
     bad=1
   fi
 done < <(
-  git ls-files '*.go' '*.java' |
+  git ls-files '*.go' |
   while read -r source_file; do
     grep -oE '"[^"]*"' "$source_file" |
       sed 's/^"//; s/"$//' |
@@ -30,12 +30,5 @@ if [ "$found" -lt 4 ]; then
   exit 1
 fi
 
-for method in X v getAccounts; do
-  if ! grep -qF "getMethod(\"$method\"" deploy/mapdump/MapDump.java; then
-    echo "MapDump no longer calls getMethod(\"$method\")" >&2
-    bad=1
-  fi
-done
-
-[ "$bad" -eq 0 ] && echo "Amazon identifiers and MapDump method names look right"
+[ "$bad" -eq 0 ] && echo "Amazon identifiers look right"
 exit "$bad"

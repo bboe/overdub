@@ -188,7 +188,7 @@ func serve(flags config) error {
 }
 
 type trial struct {
-	marker, prev, jar, failed string
+	marker, prev, failed string
 }
 
 func (t trial) settle(version string, served <-chan struct{}, wait time.Duration) {
@@ -198,11 +198,7 @@ func (t trial) settle(version string, served <-chan struct{}, wait time.Duration
 	}
 	if string(marked) != version+"\n" {
 		log.Printf("update: the trial is for %.40q, not this binary's %s, so an install stopped "+
-			"partway; going back to the jar this binary came with", marked, version)
-		if err := os.Rename(t.jar+".prev", t.jar); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("update: %v", err)
-			return
-		}
+			"partway; forgetting it", marked, version)
 		t.remove(t.marker, t.prev)
 		return
 	}
@@ -216,7 +212,7 @@ func (t trial) settle(version string, served <-chan struct{}, wait time.Duration
 		return
 	}
 	log.Printf("update: served Home Assistant for %v, so the boot script keeps this binary", wait)
-	t.remove(t.prev, t.jar+".prev", t.failed)
+	t.remove(t.prev, t.failed)
 }
 
 func (t trial) remove(paths ...string) {
@@ -282,7 +278,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		log.Printf("%s appeared", wifiIface)
 	}
 	server := esphome.NewServer(name, deviceModel, version, mac, psk)
-	go trial{marker: trialPath, prev: prevPath, jar: alexa.JarPath, failed: failedPath}.
+	go trial{marker: trialPath, prev: prevPath, failed: failedPath}.
 		settle(version, server.Served(), trialWait)
 	for code, b := range buttons {
 		server.UseButton(b.objectID,
@@ -313,14 +309,9 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		holdKeysIfMuted()
 	}()
 
-	switch jar, registered, known := commandState(); {
-	case commandReady(jar, registered, known):
+	if commandReady(device.AlexaRegistered()) {
 		server.UseCommand(alexa.NewClient().Send)
-	case !jar:
-		log.Printf("alexa: no %s, so nothing here can run a command and the api offers no "+
-			"command box; asking again every %v", alexa.JarPath, commandRetry)
-		go waitForCommand(server)
-	default:
+	} else {
 		log.Printf("alexa: this dot holds no amazon account, so a command would have no "+
 			"credential to run with and the api offers no command box; asking again every %v",
 			commandRetry)
@@ -410,9 +401,7 @@ func useUpdate(server *esphome.Server, name string, restart func()) {
 		Name:    name,
 		Key:     key,
 		Paths: update.Paths{
-			Binary: binPath, Prev: prevPath, Trial: trialPath, Failed: failedPath, Jar: alexa.JarPath,
-			Boot:     bootPath,
-			JarOwner: alexa.MapUID,
+			Binary: binPath, Prev: prevPath, Trial: trialPath, Failed: failedPath, Boot: bootPath,
 		},
 		API: releasesURL,
 		Client: &http.Client{
@@ -427,31 +416,18 @@ func useUpdate(server *esphome.Server, name string, restart func()) {
 	server.UseUpdate(u.Check, u.Install)
 }
 
-func commandState() (jar, registered, known bool) {
-	if !alexa.JarInstalled() {
-		return false, false, false
-	}
-	registered, known = device.AlexaRegistered()
-	return true, registered, known
-}
-
 func waitForCommand(server *esphome.Server) {
 	for {
 		time.Sleep(commandRetry)
-		if commandReady(commandState()) {
+		if commandReady(device.AlexaRegistered()) {
 			server.UseCommand(alexa.NewClient().Send)
-			log.Printf("alexa: a jar and an account are both here now; the command box is offered")
+			log.Printf("alexa: an account is here now; the command box is offered")
 			return
 		}
 	}
 }
 
-func commandReady(jar, registered, known bool) bool {
-	if !jar {
-		return false
-	}
-	return registered || !known
-}
+func commandReady(registered, known bool) bool { return registered || !known }
 
 func waitForAlexa(server *esphome.Server) {
 	for attempt := 1; ; attempt++ {

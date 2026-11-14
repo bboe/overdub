@@ -3,6 +3,10 @@ package alexa
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -50,20 +54,79 @@ func TestIsAuthFailure(t *testing.T) {
 	}
 }
 
-func TestUserAgentsAreWellFormed(t *testing.T) {
-	for _, ua := range []string{uaMAP, uaAlexa} {
-		if strings.TrimSpace(ua) != ua {
-			t.Errorf("%q has surrounding whitespace", ua)
-		}
-		if n := strings.Count(ua, "/"); n != 5 {
-			t.Errorf("%q has %d slashes, want 5", ua, n)
-		}
-		if !strings.HasSuffix(ua, "/AEOBC") {
-			t.Errorf("%q does not end in the device model", ua)
-		}
+func TestTheUserAgentIsTheAlexaApps(t *testing.T) {
+	if strings.TrimSpace(uaAlexa) != uaAlexa {
+		t.Errorf("%q has surrounding whitespace", uaAlexa)
 	}
-	if !strings.Contains(uaMAP, "MAPClientLib/130050002") {
-		t.Error("uaMAP no longer names the MAP client library version")
+	if n := strings.Count(uaAlexa, "/"); n != 5 {
+		t.Errorf("%q has %d slashes, want 5", uaAlexa, n)
+	}
+	if !strings.HasPrefix(uaAlexa, "AmazonWebView/Amazon Alexa/") {
+		t.Errorf("%q is not the Alexa app's shape; alexa.amazon.com is that app's host and"+
+			" withholds the csrf cookie from an agent it does not know", uaAlexa)
+	}
+}
+
+func TestTheCookieExchangeSendsWhatTheDotWould(t *testing.T) {
+	var got *http.Request
+	var form url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(r.Context())
+		r.ParseForm()
+		form = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"response":{"tokens":{"cookies":{".amazon.com":[{"Name":"at-main","Value":"\"x\""}]}}}}`)
+	}))
+	defer srv.Close()
+	client := srv.Client()
+	client.Jar, _ = cookiejar.New(nil)
+	u, _ := url.Parse(srv.URL)
+	client.Transport = rewriteHost{host: u.Host, next: client.Transport}
+
+	if err := exchangeCookies(client, "Atnr|token", alexaDomain); err != nil {
+		t.Fatalf("exchangeCookies: %v", err)
+	}
+	if _, sent := got.Header["User-Agent"]; sent {
+		t.Errorf("the exchange sent User-Agent %q; the Dot's own calls to api.amazon.com carry none", got.UserAgent())
+	}
+	want := url.Values{
+		"app_name":             {appName},
+		"source_token":         {"Atnr|token"},
+		"source_token_type":    {"refresh_token"},
+		"requested_token_type": {"auth_cookies"},
+		"domain":               {".amazon.com"},
+	}
+	if form.Encode() != want.Encode() {
+		t.Errorf("the form was %v, want %v: app_name is the one field Amazon insists on", form, want)
+	}
+	alexaURL, _ := url.Parse("https://alexa.amazon.com/")
+	if cookies := client.Jar.Cookies(alexaURL); len(cookies) != 1 || cookies[0].Value != "x" {
+		t.Errorf("the jar holds %v for alexa.amazon.com, want at-main=x with its quotes stripped", cookies)
+	}
+}
+
+type rewriteHost struct {
+	host string
+	next http.RoundTripper
+}
+
+func (r rewriteHost) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Scheme, req.URL.Host = "http", r.host
+	return r.next.RoundTrip(req)
+}
+
+func TestEveryAlexaRequestCarriesTheAppsHeaders(t *testing.T) {
+	req, err := alexaRequest("GET", "https://alexa.amazon.com/api/language", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for header, want := range map[string]string{
+		"User-Agent": uaAlexa, "Accept": "application/json", "Accept-Language": alexaLocale,
+		"Accept-Charset": "utf-8", "Connection": "keep-alive",
+	} {
+		if got := req.Header.Get(header); got != want {
+			t.Errorf("%s is %q, want %q", header, got, want)
+		}
 	}
 }
 
@@ -102,16 +165,5 @@ func TestOAuthErrorIsClipped(t *testing.T) {
 	body := []byte(`{"error":"e","error_description":"` + strings.Repeat("x", 5000) + `"}`)
 	if got := oauthError(body, ""); len(got) > 320 {
 		t.Errorf("message is %d bytes, want it clipped", len(got))
-	}
-}
-
-func TestEverySuCandidateIsAbsolute(t *testing.T) {
-	if len(suPaths) == 0 {
-		t.Fatal("no su candidates at all, so the exec falls back to $PATH every time")
-	}
-	for _, path := range suPaths {
-		if !strings.HasPrefix(path, "/") {
-			t.Errorf("su candidate %q is relative", path)
-		}
 	}
 }

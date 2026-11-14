@@ -28,7 +28,6 @@ KEY = "/data/local/bin/.overdub-noise-key"
 LABEL = 14
 INDENT = " " * (LABEL + 4)
 LOG = "/data/local/tmp/overdub.log"
-MAP = "/data/local/map"
 SENDFLAG = "persist.overdub.sendspin"
 SENDKEY = "/data/local/bin/.overdub-sendspin-key"
 SENDLAST = "/data/local/bin/.overdub-sendspin-last"
@@ -54,7 +53,6 @@ SWEPT = [
     ADBKEY,
     APPLIED,
     STAGE,
-    MAP,
     LOG,
 ]
 
@@ -120,7 +118,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         f"rm -f {BOOT} {BOOT}.new {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
         f" {SENDKEY} {SENDKEY}.new-* {SENDPAIRS} {SENDPAIRS}.new-* {SENDLAST}"
         f" {SENDLAST}.new-* {ADBKEY} {APPLIED}\n"
-        f"rm -rf {STAGE} {MAP}\n"
+        f"rm -rf {STAGE}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh /data/local/tmp/overdub.rc"
     )
 

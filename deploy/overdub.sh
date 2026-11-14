@@ -7,7 +7,6 @@ BIN=/data/local/bin/overdub
 PREV=/data/local/bin/overdub.prev
 TRIAL=/data/local/bin/.overdub-trial
 FAILED=/data/local/bin/.overdub-failed
-JAR=/data/local/map/mapdump.jar
 LOG=/data/local/tmp/overdub.log
 
 NAME=
@@ -42,13 +41,9 @@ while [ -x "$BIN" ]; do
   if [ "$tries" -gt 3 ]; then
     if [ -x "$PREV" ]; then
       mv "$PREV" "$BIN"
-      if [ -f "$JAR.prev" ]; then
-        mv "$JAR.prev" "$JAR"
-      fi
       echo "$tried" > "$FAILED"
       echo "overdub: the update to $tried exited 3 times; back to the binary it replaced" >> "$LOG"
     else
-      rm -f "$JAR.prev"
       echo "overdub: the update to $tried exited 3 times, and $PREV is missing; keeping it" >> "$LOG"
     fi
     rm -f "$TRIAL"

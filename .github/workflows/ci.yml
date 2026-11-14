@@ -66,31 +66,11 @@ jobs:
           bad=$(git ls-files -s -- '*.sh' 'deploy/*.py' | awk '$1 != "100755" { print $4 }')
           [ -z "$bad" ] || { echo "not executable:"; echo "$bad"; exit 1; }
 
-      # MapDump loads Amazon classes by name, so a mangled one fails on the
-      # device and nowhere earlier: a wrong name is still a valid string
-      # literal, and compiling proves nothing about it. The shape is what can
-      # be checked here.
+      # The daemon resolves Amazon's identifiers by name at runtime, so a
+      # mangled one fails on the device and nowhere earlier: a wrong name is
+      # still a valid string literal, and compiling proves nothing about it.
+      # The shape is what can be checked here.
       - run: deploy/check-identifiers.sh
-
-      # Build the jar as well. That catches neither a wrong class name nor a
-      # wrong uid, but it does prove MapDump.java still compiles and that its
-      # build.sh still works, and nothing else here covers either.
-      #
-      # The JDK is pinned because the window is narrow: javac dropped -source
-      # 1.7 in JDK 20, and D8 wants 11 or newer.
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
-        with:
-          distribution: zulu
-          java-version: '17'
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
-        with:
-          packages: 'platforms;android-22 build-tools;34.0.0'
-      - name: Build mapdump.jar
-        run: |
-          export ANDROID_JAR="$ANDROID_SDK_ROOT/platforms/android-22/android.jar"
-          export R8_JAR="$ANDROID_SDK_ROOT/build-tools/34.0.0/lib/d8.jar"
-          ls -l "$ANDROID_JAR" "$R8_JAR"
-          deploy/mapdump/build.sh
 
   # The one test here that does not drive both sides from a single reading of the
   # spec: it runs a real aiosendspin server against the client. Every other
@@ -203,13 +183,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
-        with:
-          distribution: zulu
-          java-version: '17'
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
-        with:
-          packages: 'platforms;android-22 build-tools;34.0.0'
 
       # OVERDUB_VERSION is the only thing the release build does differently: it
       # stamps the tag into the binary, so a downloaded one can say what it is.
@@ -218,16 +191,10 @@ jobs:
       - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - run: OVERDUB_VERSION="$GITHUB_REF_NAME" ./build.sh
 
-      - name: Build mapdump.jar
-        run: |
-          export ANDROID_JAR="$ANDROID_SDK_ROOT/platforms/android-22/android.jar"
-          export R8_JAR="$ANDROID_SDK_ROOT/build-tools/34.0.0/lib/d8.jar"
-          deploy/mapdump/build.sh
-
-      # The tarball is the whole install: the scripts, the binary, the jar, and
-      # the documentation that explains them. Somebody unpacking it needs adb,
-      # Python 3.9 or later and a rooted Dot, and no Go, NDK, JDK or Android
-      # SDK at all. Rooting a Dot is firebreak's, so no rooting script is in it.
+      # The tarball is the whole install: the scripts, the binary and the
+      # documentation that explains them. Somebody unpacking it needs adb,
+      # Python 3.9 or later and a rooted Dot, and no Go or NDK at all. Rooting
+      # a Dot is firebreak's, so no rooting script is in it.
       #
       # THIRD-PARTY.txt travels with it because clause 2 of the BSD licences
       # compiled into the binary asks that it does.
@@ -238,12 +205,11 @@ jobs:
           # archive would be hashed, attested and published.
           set -o pipefail
           dir="overdub-$GITHUB_REF_NAME"
-          mkdir -p "$dir/build" "$dir/deploy/mapdump"
+          mkdir -p "$dir/build"
           cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
           cp -r docs "$dir/docs"
           cp deploy/install.py deploy/uninstall.py deploy/overdub.sh deploy/overdub.rc "$dir/deploy/"
           cp build/overdub "$dir/build/overdub"
-          cp deploy/mapdump/mapdump.jar "$dir/deploy/mapdump/"
           # Same inputs, same tarball: the mtimes, ordering and owner a tar
           # otherwise picks up from the runner are pinned, and gzip -n keeps
           # the name and timestamp out of the header.

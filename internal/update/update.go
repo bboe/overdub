@@ -1,7 +1,6 @@
 // Package update offers Home Assistant the latest overdub release and installs
 // it: it reads GitHub's latest release, checks SHA256SUMS against the release
-// key, unpacks the binary and the jar, and leaves them for the boot script to
-// try.
+// key, unpacks the binary, and leaves it for the boot script to try.
 package update
 
 import (
@@ -46,10 +45,7 @@ type Paths struct {
 	Prev   string
 	Trial  string
 	Failed string
-	Jar    string
 	Boot   string
-
-	JarOwner int
 }
 
 type Updater struct {
@@ -346,7 +342,6 @@ func (u *Updater) get(url string, limit int64, accept string, progress func(floa
 
 type unpacked struct {
 	binary []byte
-	jar    []byte
 	boot   []byte
 }
 
@@ -357,9 +352,8 @@ func unpack(tarball []byte, prefix string) (unpacked, error) {
 	}
 	var files unpacked
 	want := map[string]*[]byte{
-		prefix + "build/overdub":              &files.binary,
-		prefix + "deploy/mapdump/mapdump.jar": &files.jar,
-		prefix + "deploy/overdub.sh":          &files.boot,
+		prefix + "build/overdub":     &files.binary,
+		prefix + "deploy/overdub.sh": &files.boot,
 	}
 	tr := tar.NewReader(zr)
 	for {
@@ -410,57 +404,31 @@ func (u *Updater) checkBoot(boot []byte) error {
 func (u *Updater) swap(files unpacked, version string) error {
 	p := u.Paths
 	newBinary := p.Binary + ".new"
-	if err := writeFile(newBinary, files.binary, 0o755, -1); err != nil {
+	if err := writeFile(newBinary, files.binary, 0o755); err != nil {
 		return err
-	}
-
-	jarOld, jarErr := os.ReadFile(p.Jar)
-	jarChanged := jarErr == nil && !bytes.Equal(jarOld, files.jar)
-	newJar := p.Jar + ".new"
-	if jarChanged {
-		if err := writeFile(newJar, files.jar, 0o644, p.JarOwner); err != nil {
-			os.Remove(newBinary)
-			return err
-		}
 	}
 
 	undo := func(err error) error {
 		os.Remove(newBinary)
-		os.Remove(newJar)
 		os.Remove(p.Trial)
 		return err
 	}
-	for _, path := range []string{p.Prev, p.Jar + ".prev"} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return undo(err)
-		}
+	if err := os.Remove(p.Prev); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return undo(err)
 	}
 	if err := os.Link(p.Binary, p.Prev); err != nil {
 		return undo(err)
 	}
-	if jarChanged {
-		if err := os.Link(p.Jar, p.Jar+".prev"); err != nil {
-			return undo(err)
-		}
-	}
-	if err := writeFile(p.Trial, []byte(version+"\n"), 0o600, -1); err != nil {
+	if err := writeFile(p.Trial, []byte(version+"\n"), 0o600); err != nil {
 		return undo(err)
 	}
-	if jarChanged {
-		if err := os.Rename(newJar, p.Jar); err != nil {
-			return undo(err)
-		}
-	}
 	if err := os.Rename(newBinary, p.Binary); err != nil {
-		if jarChanged {
-			os.Rename(p.Jar+".prev", p.Jar)
-		}
 		return undo(err)
 	}
 	return nil
 }
 
-func writeFile(path string, data []byte, mode os.FileMode, uid int) error {
+func writeFile(path string, data []byte, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return err
@@ -468,9 +436,6 @@ func writeFile(path string, data []byte, mode os.FileMode, uid int) error {
 	_, err = f.Write(data)
 	if err == nil {
 		err = f.Chmod(mode)
-	}
-	if err == nil && uid >= 0 {
-		err = f.Chown(uid, uid)
 	}
 	if err == nil {
 		err = f.Sync()

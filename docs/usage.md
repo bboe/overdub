@@ -79,25 +79,12 @@ This needs the repository, not the tarball.
   setting is optional; [constraints.md](constraints.md) says why.
 - If it cannot find the NDK, it says so. Set `ANDROID_NDK_HOME`.
 
-Alexa commands also need `mapdump.jar`, which `build.sh` does not build. Skip
-this if you do not want them. `$SDK` is your Android SDK root;
-`deploy/mapdump/build.sh` names both jars, where to get them, and the JDK it
-needs:
-
-```sh
-ANDROID_JAR=$SDK/platforms/android-22/android.jar \
-R8_JAR=$SDK/build-tools/34.0.0/lib/d8.jar deploy/mapdump/build.sh
-```
-
 ## Installing from source
 
 ```sh
 deploy/install.py kitchen                          # binary, boot script, key
 ```
 
-- `install.py` no longer installs `mapdump.jar`: Fire OS 6 has no
-  `app_process` to run it. Alexa commands return once the credential is read
-  on Fire OS 6.
 - Running it again is safe. It pushes only what differs from the Dot, and
   restarts the daemon only when what runs may differ from what is installed.
   With nothing to change it ends `Already installed; nothing changed.`
@@ -166,13 +153,13 @@ deploy/uninstall.py
 - The daemon gets `SIGTERM`, so it releases the button and destroys its uinput
   clones.
 - It removes the boot script, the binary, the API key, the Sendspin identity,
-  its pairing records and the last server to play, `/data/local/map`, the log,
-  and every `persist.overdub.*` property. A new install starts with Sendspin on
+  its pairing records and the last server to play, the log, and every
+  `persist.overdub.*` property. A new install starts with Sendspin on
   and no output delay.
 - `/data/local/bin` goes too if it is then empty.
 - The tcp/6053 and tcp/8928 rules go once the daemon is confirmed gone, so no
   reboot is needed. An uninstall that reports trouble stops before this step.
-- Removing the jar revokes nothing; see [Alexa commands](#alexa-commands).
+- Uninstalling revokes nothing; see [Alexa commands](#alexa-commands).
 - The Sendspin identity matters as much as the API key: the pairing token
   derives from it, so a copy left behind stays valid. A server that paired
   keeps its record; remove the player there too.
@@ -225,7 +212,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 7. Off on a Dot never set up, or deregistered; everything else still works.
 8. `intercept`, `monitor` or `pass through`.
 9. `Secure` only when a key was installed.
-10. Listed only with `mapdump.jar` installed and the Dot registered.
+10. Listed only while the Dot is registered.
 11. Off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule
     and ends any session. Survives a reboot.
 12. How far ahead of a chunk's timestamp the Dot plays. A music server can set
@@ -384,8 +371,8 @@ Each gesture also fires `esphome.overdub_pressed` on Home Assistant's bus:
 
 ### Alexa commands
 
-With `mapdump.jar` installed, the Dot gets a text box and a matching action.
-Either runs text on the Echo as though spoken:
+A registered Dot gets a text box and a matching action. Either runs text on
+the Echo as though spoken:
 
 ```yaml
 action: esphome.kitchen_send_command
@@ -393,12 +380,13 @@ data:
   text: play dance party music on Amazon Music
 ```
 
-- Both appear only when the jar is installed and the Dot is registered to an
-  Amazon account. Otherwise neither is listed, and the daemon log says why.
+- Both appear only when the Dot is registered to an Amazon account. Otherwise
+  neither is listed, and the daemon log says why. There is no other switch:
+  a registered Dot always offers them.
 - If the registration cannot be read, the box is offered.
 - The box shows the last command it was given.
 - The daemon checks again every 5 minutes, so the box appears without a restart
-  once both are true.
+  once the Dot is registered.
 - **Registration is the credential.** `binary_sensor.<name>_alexa_registered`
   reports it. A factory-reset or restored Dot is usually not registered.
 
@@ -414,8 +402,8 @@ To register a Dot:
 > **This is an unofficial endpoint, reached with an account-level credential.**
 > `/api/behaviors/preview` is undocumented, and its request shape can change.
 >
-> MapDump reads the OAuth refresh token this Echo was registered with. The
-> daemon trades it for cookies scoped to `.amazon.com`: `at-main`,
+> The daemon reads the OAuth refresh token this Echo was registered with out
+> of its own store, and trades it for cookies scoped to `.amazon.com`: `at-main`,
 > `sess-at-main`, `session-id`, `session-token`, `ubid-main` and `x-main`. That
 > is a signed-in retail session, order history and addresses included, the same
 > breadth [alexa_media_player](https://github.com/alandtse/alexa_media_player)
@@ -492,11 +480,14 @@ To register a Dot:
 ### Updating
 
 - The `firmware` update entity shows the latest overdub release on GitHub.
-  **Install** downloads it, checks it, and replaces the binary and
-  `mapdump.jar`. The daemon then restarts into the new release, which takes
-  about 7 seconds.
+  **Install** downloads it, checks it, and replaces the binary. The daemon
+  then restarts into the new release, which takes about 7 seconds.
 - The Dot looks for a release a minute after it starts, then every 6 hours.
   Home Assistant's **Check for updates** looks again, at most once a minute.
+- A Dot on v0.3.0 or earlier cannot install a Fire OS 6 release this way:
+  those builds expect `mapdump.jar` in the tarball and refuse one without it.
+  They are Fire OS 5 builds, and a Fire OS 6 release would not run on them
+  anyway. Move the Dot with firebreak and run `install.py`.
 - An update installs only a release signed with the overdub release key. A
   release that changes the boot script cannot install this way: the entity's
   release notes then say to run `install.py` from that release.
