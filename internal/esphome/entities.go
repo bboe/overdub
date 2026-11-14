@@ -1,6 +1,9 @@
 package esphome
 
-import "github.com/bboe/overdub/internal/device"
+import (
+	"github.com/bboe/overdub/internal/clip"
+	"github.com/bboe/overdub/internal/device"
+)
 
 const (
 	entityCategoryNone       = 0
@@ -115,6 +118,17 @@ func (s *Server) listEntities(conn *conn) error {
 	speaker.str(5, speakerIcon)
 	speaker.boolean(6, false) // disabled_by_default
 	speaker.u32(7, entityCategoryNone)
+	if s.play != nil {
+		for _, purpose := range []uint32{formatPurposeDefault, formatPurposeAnnouncement} {
+			var format pb
+			format.str(1, clipCodec)
+			format.u32(2, clip.Rate)
+			format.u32(3, clip.Channels)
+			format.u32(4, purpose)
+			format.u32(5, clip.Depth/8) // sample_bytes
+			speaker.sub(9, format.b)    // supported_formats
+		}
+	}
 	speaker.u32(11, s.mediaFeatures()) // feature_flags
 	if err := s.send(conn, msgListMediaPlayer, speaker.b); err != nil {
 		return err

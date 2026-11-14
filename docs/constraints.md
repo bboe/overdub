@@ -63,7 +63,7 @@
 | `golang.org/x/crypto` | the Noise ciphers | BSD-3-Clause | yes | -- |
 | `golang.org/x/net` | `dns/dnsmessage`, for mDNS | BSD-3-Clause | yes | 69 KB |
 | `golang.org/x/sys` | required, indirect | BSD-3-Clause | no | -- |
-| `github.com/mewkiz/flac` | FLAC from a Sendspin server | Unlicense | yes | 71 KB |
+| `github.com/mewkiz/flac` | FLAC from a Sendspin server or Home Assistant | Unlicense | yes | 71 KB |
 | `github.com/icza/bitio` | required, indirect | Apache-2.0 | no | -- |
 | `github.com/mewkiz/pkg`, `github.com/mewpkg/term` | required, indirect | Unlicense | no | -- |
 | Go standard library | every Go binary | BSD-3-Clause | yes | -- |
@@ -106,7 +106,7 @@
 - The chime is generated, not stored or encoded. `internal/audio` renders two
   sine tones, at the frequencies Amazon's own chime uses, measured by DFT.
   docs/audio.md has the numbers.
-- Nothing plays a clip on Fire OS 6 yet. Fire OS 5 handed Alexa the URL, and
-  her synthesizer decoded it; Fire OS 6 has no way in. The daemon will play
-  one itself, as FLAC that Home Assistant transcodes to, through the decoder
-  Sendspin already links. docs/api.md has the search.
+- A clip is played by the daemon. Fire OS 5 handed Alexa the URL, and her
+  synthesizer decoded it; Fire OS 6 has no way in. Home Assistant transcodes
+  the URL to FLAC, and the decoder Sendspin already links decodes it, so no
+  new decoder enters the tree. docs/api.md has the search and the route.

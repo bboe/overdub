@@ -451,6 +451,8 @@ I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
 - `Communications` is not measured. The channel names are the Alexa SDK's,
   and all five are in the binary.
 - The deepest holder wins. The levels match sendspinlite's on an Echo Show.
+- An announcement from the media player ducks the stream to 20% too, and the
+  deeper of it and Alexa's level wins.
 - Her own music ends the stream. Two full-level streams over each other help
   nobody, and a gain cannot settle which one wins. While PuffinApp holds
   `Content`, the Sendspin client reports `available: false`, the spec's word
@@ -501,6 +503,29 @@ I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
 - Fire OS 5 read `MediaFocusControl` from `system_server`, which logged
   Android's focus requests. Fire OS 6 has no Android audio stack, and nothing
   logs that tag.
+
+## A clip in the mixer
+
+- A clip from the media player is a third source in the daemon's own mixer,
+  beside the chime and a Sendspin stream. All three reach Fire OS 6's mixer as
+  one stream. docs/api.md has where the clip comes from.
+- The decoder writes into a queue that holds 2 seconds and makes it wait when
+  full, so a fast fetch is not buffered whole in memory.
+- Nothing sounds until 300 ms are queued or the clip has ended, so a slow
+  fetch does not stutter from its first block. A clip shorter than that plays
+  once it ends.
+- The clip arrives at 48 kHz. The player runs at whatever rate a Sendspin
+  stream last asked for, 44.1 kHz over Bluetooth, so the clip is resampled
+  linearly when the two differ. At the same rate no sample is touched.
+- The rate can change mid-clip, when a Sendspin stream opens at the other one.
+  The read position then keeps a fraction, so the next frame is checked
+  whatever the two rates are. Checking it only when they differed read one
+  frame past the queue at the clip's end, and the panic took the writer and
+  the daemon with it.
+- A clip is not placed in time. It plays as it decodes.
+- A clip ducks under Alexa with the same ramp as the stream, at the mixer's
+  rate. It follows her level only: an announcement ducks the stream, and is
+  the clip.
 
 ## Testing audio here
 

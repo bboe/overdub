@@ -953,11 +953,11 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 			switch {
 			case c.elsewhere.Load() == toldElsewhere:
 			case c.elsewhere.Load():
-				c.Play.Printf("sendspin: alexa is playing on this dot, so it told %q it is"+
-					" unavailable", name)
+				c.Play.Printf("sendspin: something else is playing on this dot, so it told"+
+					" %q it is unavailable", name)
 			default:
-				c.Play.Printf("sendspin: alexa stopped playing, so this dot told %q it is"+
-					" available again; nothing resumes until somebody plays", name)
+				c.Play.Printf("sendspin: nothing else is playing on this dot, so it told %q"+
+					" it is available again; nothing resumes until somebody plays", name)
 			}
 			told, toldElsewhere = c.bluetooth.Load(), c.elsewhere.Load()
 		}

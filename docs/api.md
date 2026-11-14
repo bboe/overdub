@@ -150,7 +150,10 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   the poll that drains the channel takes the same lock to publish.
 - Both polls hold a wake to `wakeGap`, because a peer causes most wakes and a
   route can flap.
-  `PollLive` drops an early one: its own tick comes in 500 ms. `PollSensors`
+  `PollLive` keeps an early one and serves it at the first pass after the
+  gap. It used to drop it, reasoning that its own tick comes in 500 ms, but a
+  tick reads the media player, the volume and the mute only every 5th, so a
+  clip's start reached Home Assistant 2.1 to 2.6 seconds late. `PollSensors`
   waits out the rest and then serves it, or the value stays wrong until the
   minute tick.
 - The polls are the only device readers. A wedged poll leaves every subscriber
@@ -469,8 +472,72 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 
 ## Playing a clip
 
-- Nothing plays a clip on Fire OS 6 yet. The media player lists no
-  `PLAY_MEDIA` and no `MEDIA_ANNOUNCE`, because nothing has called `UsePlay`.
+- The daemon plays a clip itself, through `internal/clip`. The media player
+  lists 2 `supported_formats`, FLAC at 48 kHz, stereo, 2-byte samples, one
+  for ordinary playback and one for announcements. Home Assistant then hands
+  every URL to its ffmpeg proxy and sends the proxy's URL instead, for each
+  ESPHome player that lists formats. It picks an announcement format only from
+  those marked for announcements, so both are listed.
+- The proxy URL is on Home Assistant itself, so **the Dot must reach Home
+  Assistant's port**. Measured 2026-11-14: caroline, on Fire OS 5, connected
+  to 192.168.53.5:8123; overdub-test, on Fire OS 6, was refused on every port,
+  by the network, not the Dot. Its own firewall passes all of `wlan0`.
+- The clip is read as it arrives, not saved, by `internal/flacread`, which
+  Sendspin uses too; docs/sendspin.md has its traps. STREAMINFO must be the
+  first block, as the format requires, and say 48 kHz, stereo and 16-bit. The
+  blocks after it are skipped, never allocated, and may claim 1 MB together.
+  A clip frame may hold 16,384 samples, the cap the clip passes in.
+- `testdata/clip.flac` is what the proxy streams: ffmpeg writing FLAC to a
+  pipe, so STREAMINFO holds no totals and a comment block follows it.
+  `clip.py` there makes it, and prints the hash of ffmpeg's own decode, which
+  the test holds the decoder to.
+- **1 clip plays at a time.** A new one stops the old, and the old one's end
+  is reported at once. Otherwise its duck or Sendspin's withdrawal holds
+  through the new clip's fetch, up to 15 seconds. The player reads idle in
+  that gap, which is true: nothing plays. After that only the current clip
+  reports, so a replaced clip's late end does not mark the player idle under
+  the new one. `stop` (feature `STOP`, command 2) goes
+  through the same worker as play, so the newest command wins and a stop
+  cannot overtake a later play.
+- The state is `playing` from the first decoded frame to the end of the queue.
+  It goes idle when the last block is handed to the mixer, up to 800 ms before
+  the speaker finishes: Fire OS 6's mixer holds 16 blocks of 50 ms.
+- On the Dot, served from the Dot itself, a 3-second clip held the mixer's
+  stream open 3.10 seconds, and a stop 2.2 seconds in closed it at 2.33.
+- A clip and a Sendspin stream meet as Alexa and a stream do. An announcement
+  ducks the stream to 20%, the same as her speech, and the deeper of the two
+  wins. Anything else makes the Dot unavailable to Sendspin, as her music
+  does, so the server ends its stream. Her music starting stops a media clip
+  and leaves an announcement playing. docs/audio.md has the duck.
+- A clip ducks under her speech and alarms to the same levels as the stream.
+  An announcement does not duck itself: its 20% applies to the stream only.
+- Her music stops a media clip in one step under the player's lock. A check
+  for media, then a separate stop, could stop an announcement that replaced
+  the media clip between the two.
+- A failure is logged once and reported as the player going idle: a refused
+  connection, an HTTP status, or a reply that is not FLAC in the listed format.
+  A failed fetch logs its cause, not the URL: the line is cut at 64 bytes, and
+  the proxy's URL alone is longer.
+- A clip ends with a reason when nothing moves for 15 seconds, whether the
+  fetch stalls or the mixer stops taking audio. The watch runs until the
+  mixer reports the clip done, not until the fetch ends: up to 2 seconds are
+  still queued then, and a mixer that stopped reading would otherwise leave
+  the clip playing. Otherwise a stream that stops
+  sending without closing reads `playing`, and keeps Sendspin off, until
+  somebody presses stop. Home Assistant generates the speech when the proxy
+  is first read, and that fits inside the 15 seconds.
+- Each fetch uses a new connection. A kept-alive one would sit open to Home
+  Assistant for the rest of the boot, and go stale across its restarts.
+- A stream cut inside a frame header is a failure, not an end: FLAC ends on a
+  frame boundary.
+- A clip's start and end are reported under one lock, and each checks that
+  the clip is still current under it. Otherwise a stop landing as the first
+  frame decodes reports the end, then a late start, and leaves the player
+  `playing` with the duck or Sendspin's withdrawal held.
+- A stopped or replaced clip is cut off at once, with no ramp.
+- A peer holding the API key can make the Dot fetch any http or https URL it
+  can route to. On Fire OS 5 Alexa fetched it instead, from the same network.
+  Only a reply in the listed FLAC format plays.
 - Fire OS 5 handed the URL to Alexa's `SpeechSynthesizer` through `am
   startservice` to `amazon.speech.sim`. Fire OS 6 has neither: no `am`, no
   `app_process` behind the `pm` script, and Alexa is PuffinApp, a native Alexa
@@ -489,10 +556,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   which only device-local pairing and multi-room music use. Its AIPC calls are
   audio focus, wake-word blocking and UX restore. The hybrid engine's skills
   are alerts, time, stop and volume, and its smart-home socket is off.
-- So the daemon will play a clip itself. The media player will list a FLAC
-  format, Home Assistant transcodes any URL to it through its ffmpeg proxy,
-  and the stream goes through the mixer beside Alexa, decoded by the FLAC
-  decoder Sendspin already links.
+- So the daemon plays a clip itself, as above.
 - Standing in for the cloud would reach her own player, at the cost of a relay
   every session passes through and playback events for a stream Amazon never
   issued. That waits for the voice relay.

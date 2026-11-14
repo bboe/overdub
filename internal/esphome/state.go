@@ -384,8 +384,8 @@ func (s *Server) PollLive(every time.Duration) {
 	s.mu.Unlock()
 	tick := time.NewTicker(every)
 	defer tick.Stop()
-	var last time.Time
-	woken := false
+	var lastWake time.Time
+	woke, owed := false, false
 	ticks := 0
 	watched := false
 	for {
@@ -397,25 +397,30 @@ func (s *Server) PollLive(every time.Duration) {
 			}
 			watched = listening
 		}
-		if listening && (!woken || time.Since(last) >= s.wakeGap) {
-			last = time.Now()
+		serve := listening && owed && time.Since(lastWake) >= s.wakeGap
+		if serve {
+			lastWake, owed = time.Now(), false
+		}
+		if listening && (!woke || serve) {
 			var readings []reading
-			if woken || ticks%SoundEvery == 0 {
+			if serve || ticks%SoundEvery == 0 {
 				readings = append(readings, s.readSound())
 			}
-			if woken || ticks%HeavyEvery == 0 {
+			if serve || ticks%HeavyEvery == 0 {
 				readings = append(readings, s.readLive()...)
 			}
 			if len(readings) > 0 {
 				s.publish("live", readings)
 			}
+		}
+		if !woke {
 			ticks++
 		}
 		select {
 		case <-tick.C:
-			woken = false
+			woke = false
 		case <-s.liveWake:
-			woken = true
+			woke, owed = true, true
 		}
 	}
 }

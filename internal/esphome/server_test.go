@@ -2445,7 +2445,7 @@ func TestAPeerSuppliedStringIsBoundedBeforeItIsNoted(t *testing.T) {
 			}
 		}},
 		{"a url to play", func(_ *testing.T, s *Server, conn *conn) {
-			s.UsePlay(func(string) error { return nil })
+			s.UsePlay(func(string, bool) error { return nil }, nil)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.playLocked(conn, long, false)

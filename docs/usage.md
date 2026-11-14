@@ -201,7 +201,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | update | `firmware` | config | the latest release (13) |
 
 1. See [The action button](#the-action-button).
-2. Volume and mute. Playback is not offered yet.
+2. Volume and mute, and playback of any URL Home Assistant can transcode.
 3. Setting it presses the mute key, ring included.
 4. A reading that is not a signal is missing, not zero.
 5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
@@ -267,10 +267,32 @@ Sendspin identity.
 
 ### Playing something on it
 
-Nothing plays a URL on Fire OS 6 yet, so `media_player.play_media` and
-`tts.speak` do nothing on this Dot. Fire OS 6 has no way to hand Alexa a
-sound. The daemon playing clips itself comes next; docs/api.md has the
-reasons.
+`media_player.play_media` and `tts.speak` play through the daemon. Home
+Assistant transcodes the media to FLAC and the Dot fetches it from Home
+Assistant, so **the Dot must be able to reach Home Assistant's port**, 8123 by
+default. A Dot on an isolated network often cannot, even though Home
+Assistant reaches the Dot. Ask the Dot:
+
+```sh
+adb shell 'toybox nc -w 3 <home assistant address> 8123 </dev/null && echo open'
+```
+
+```yaml
+action: tts.speak
+target:
+  entity_id: tts.home_assistant_cloud
+data:
+  media_player_entity_id: media_player.kitchen_speaker
+  message: "The back door has been open for 10 minutes"
+```
+
+- An announcement, which is what `tts.speak` sends, plays over a Sendspin
+  stream and lowers it to 20% meanwhile.
+- Anything else stops a Sendspin stream, as Alexa's own music does.
+- `media_player.media_stop` ends a clip. A new one replaces the old.
+- When nothing plays, the daemon log says why: `playback: clip: HTTP 404`,
+  `playback: clip: fetch: dial tcp ...: connect: connection refused` for a Dot
+  that cannot reach Home Assistant, or `the reply is not FLAC`.
 
 While Alexa listens or speaks, a Sendspin stream drops to 20%, and to 10%
 while an alarm or timer rings. When she plays music herself, the Dot leaves

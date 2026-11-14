@@ -16,13 +16,22 @@ const (
 	featVolumeMute    = 1 << 3
 	featPlayMedia     = 1 << 9
 	featVolumeStep    = 1 << 10
+	featStop          = 1 << 12
 	featMediaAnnounce = 1 << 20
+)
+
+const (
+	clipCodec = "flac"
+
+	formatPurposeDefault      = 0
+	formatPurposeAnnouncement = 1
 )
 
 const (
 	mediaStateIdle    = 1
 	mediaStatePlaying = 2
 
+	mediaStop       = 2
 	mediaMute       = 3
 	mediaUnmute     = 4
 	mediaVolumeUp   = 6
@@ -94,13 +103,16 @@ func (s *Server) mediaFeatures() uint32 {
 	if s.play != nil {
 		flags |= featPlayMedia | featMediaAnnounce
 	}
+	if s.play != nil && s.stopPlay != nil {
+		flags |= featStop
+	}
 	return flags
 }
 
-func (s *Server) UsePlay(play func(url string) error) {
+func (s *Server) UsePlay(play func(url string, announcement bool) error, stop func()) {
 	s.mu.Lock()
 	relist := s.play == nil && play != nil
-	s.play = play
+	s.play, s.stopPlay = play, stop
 	var dropped []string
 	if relist {
 		for c := range s.conns {
@@ -135,7 +147,7 @@ func (s *Server) NotePlaybackFailed(detail string) {
 	if detail == "" {
 		detail = "no reason given"
 	}
-	s.untrustedLog.Printf("playback: alexa reported a failure: %s", untrustedlog.Cut(detail))
+	s.untrustedLog.Printf("playback: %s", untrustedlog.Cut(detail))
 	s.NotePlayback(false)
 }
 
@@ -154,7 +166,22 @@ func (s *Server) playLocked(conn *conn, url string, announcement bool) {
 	conn.noted = fmt.Sprintf("esphome api: %s asked to play %s (announcement=%v)",
 		conn.sock.RemoteAddr(), untrustedlog.Cut(url), announcement)
 
-	s.playWant, s.playHasPending = url, true
+	s.playWant, s.playAnnounce, s.playHasPending = url, announcement, true
+	if s.playWorking {
+		return
+	}
+	s.playWorking = true
+	go s.playWorker()
+}
+
+func (s *Server) stopLocked(conn *conn) {
+	if s.stopPlay == nil {
+		conn.noted = fmt.Sprintf("esphome api: %s asked to stop, and there is nothing here "+
+			"that plays", conn.sock.RemoteAddr())
+		return
+	}
+	conn.noted = fmt.Sprintf("esphome api: %s stopped playback", conn.sock.RemoteAddr())
+	s.playWant, s.playHasPending = "", true
 	if s.playWorking {
 		return
 	}
@@ -170,14 +197,20 @@ func (s *Server) playWorker() {
 			s.mu.Unlock()
 			return
 		}
-		url, play := s.playWant, s.play
+		url, announcement, play, stop := s.playWant, s.playAnnounce, s.play, s.stopPlay
 		s.playHasPending = false
 		s.mu.Unlock()
 
+		if url == "" {
+			if stop != nil {
+				stop()
+			}
+			continue
+		}
 		if play == nil {
 			continue
 		}
-		if err := play(url); err != nil {
+		if err := play(url, announcement); err != nil {
 			s.untrustedLog.Printf("playback: %s", untrustedlog.Cut(err.Error()))
 			s.NotePlayback(false)
 		}
