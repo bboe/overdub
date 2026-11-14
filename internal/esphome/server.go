@@ -151,9 +151,7 @@ type Server struct {
 	keyVolume   uint32
 	keyCPU      uint32
 	keyMemory   uint32
-	keyJack     uint32
 	keyJackOn   uint32
-	keyBT       uint32
 	keyOutput   uint32
 	keyBTDevice uint32
 	keySound    uint32
@@ -217,6 +215,7 @@ type Server struct {
 	muteHasPending bool
 	muteWorking    bool
 	jack           func() (bool, bool)
+	btRoute        func() (bool, bool)
 	sound          func() (bool, bool)
 	micMute        func() (bool, bool)
 
@@ -282,8 +281,6 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyVolume:    entityKey("volume"),
 		keyCPU:       entityKey("cpu_temperature"),
 		keyMemory:    entityKey("memory_available"),
-		keyJack:      entityKey("jack_volume"),
-		keyBT:        entityKey("bluetooth_volume"),
 		keyOutput:    entityKey("output_device"),
 		keyBTDevice:  entityKey("bluetooth_device"),
 		keyJackOn:    entityKey("audio_jack"),
@@ -302,6 +299,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		wifi:         device.WifiSignal,
 		volumes:      device.MusicVolumes,
 		jack:         device.JackOccupied,
+		btRoute:      device.BluetoothRouted,
 		sound:        device.SpeakerPlaying,
 		cpu:          device.CPUTemperature,
 		micMute:      device.MicMuted,

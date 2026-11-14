@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/untrustedlog"
 )
 
@@ -68,11 +67,11 @@ const (
 	routeBluetooth = "bluetooth"
 )
 
-func activeRoute(v device.MusicVolume, occupied, jackKnown bool) (string, bool) {
-	if !v.BluetoothRouteOK {
+func activeRoute(btOn, btKnown, occupied, jackKnown bool) (string, bool) {
+	if !btKnown {
 		return "", false
 	}
-	if v.BluetoothRoute {
+	if btOn {
 		return routeBluetooth, true
 	}
 	if !jackKnown {
@@ -82,19 +81,6 @@ func activeRoute(v device.MusicVolume, occupied, jackKnown bool) (string, bool) 
 		return routeJack, true
 	}
 	return routeSpeaker, true
-}
-
-func activeVolume(v device.MusicVolume, occupied, jackKnown bool) (step int, percent float32, ok bool) {
-	if route, known := activeRoute(v, occupied, jackKnown); known && route == routeBluetooth {
-		return v.BluetoothStep, v.Bluetooth, v.BluetoothOK
-	}
-	if !jackKnown {
-		return 0, 0, false
-	}
-	if occupied {
-		return v.JackStep, v.Jack, v.JackOK
-	}
-	return v.SpeakerStep, v.Speaker, v.SpeakerOK
 }
 
 func (s *Server) mediaFeatures() uint32 {
@@ -454,12 +440,10 @@ func (w volumeWant) target(step, max int) int {
 
 func (s *Server) readVolumeStep() (step, max int, muted, ok bool) {
 	v := s.volumes()
-	occupied, jackKnown := s.jack()
-	step, _, ok = activeVolume(v, occupied, jackKnown)
-	if !ok || v.Max <= 0 {
+	if !v.OK || v.Max <= 0 {
 		return 0, 0, false, false
 	}
-	return step, v.Max, v.Muted, true
+	return v.Step, v.Max, v.Muted, true
 }
 
 func clampStep(step, max int) int {

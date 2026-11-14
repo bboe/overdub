@@ -116,22 +116,21 @@ func (s *Server) readLive() []reading {
 	memory, memoryOK := s.memory()
 	volumes := s.volumes()
 	occupied, jackOK := s.jack()
+	btOn, btOK := s.btRoute()
 	muted, micOK := s.micMute()
 	out := []reading{
 		{key: s.keyCPU, value: cpu, ok: cpuOK},
 		{key: s.keyMemory, value: memory, ok: memoryOK},
-		{key: s.keyVolume, value: volumes.Speaker, ok: volumes.SpeakerOK},
-		{key: s.keyJack, value: volumes.Jack, ok: volumes.JackOK},
-		{key: s.keyBT, value: volumes.Bluetooth, ok: volumes.BluetoothOK},
+		{key: s.keyVolume, value: volumes.Percent, ok: volumes.OK},
 		{key: s.keyJackOn, value: boolValue(occupied), ok: jackOK, kind: kindBinary},
 	}
-	route, routeKnown := activeRoute(volumes, occupied, jackOK)
+	route, routeKnown := activeRoute(btOn, btOK, occupied, jackOK)
 	out = append(out, reading{key: s.keyOutput, text: route, ok: routeKnown, kind: kindTextSensor})
 	s.routeObserved(route, routeKnown)
-	if step, _, ok := activeVolume(volumes, occupied, jackOK); ok && volumes.Max > 0 {
+	if volumes.OK && volumes.Max > 0 {
 		out = append(out, reading{
 			key:   s.keySpeaker,
-			value: float32(step) / float32(volumes.Max),
+			value: float32(volumes.Step) / float32(volumes.Max),
 			muted: volumes.Muted,
 			state: mediaStateFor(s.playing()),
 			ok:    true,

@@ -195,11 +195,11 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 		t.Errorf("liveTick is %v, and time.NewTicker panics on that", liveTick)
 	}
 	heavy := liveTick * esphome.HeavyEvery
-	if heavy <= device.VolumeReadBudget() {
+	if heavy <= device.RouteReadBudget() {
 		t.Errorf("the expensive readings run every %v and one may take %v, so a slow read "+
-			"delays the readings behind it", heavy, device.VolumeReadBudget())
+			"delays the readings behind it", heavy, device.RouteReadBudget())
 	}
-	stacked := device.VolumeReadBudget() + device.MicReadBudget() + device.SpeakerReadBudget()
+	stacked := device.RouteReadBudget() + device.MicReadBudget() + device.SpeakerReadBudget()
 	if stacked >= heavy {
 		t.Errorf("one heavy tick can spend %v on its forks against an interval of %v, so a "+
 			"device that answers slowly pushes the next tick out", stacked, heavy)

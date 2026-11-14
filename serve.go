@@ -62,6 +62,7 @@ const (
 
 	nodeWait    = 60 * time.Second
 	guardWait   = 2 * time.Second
+	volumeWait  = 30 * time.Second
 	addressWait = 5 * time.Minute
 	macWait     = 60 * time.Second
 	macRetry    = 30 * time.Second
@@ -303,10 +304,14 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		return err
 	})
 
+	go device.FollowVolume()
 	server.UseVolumeSetter(device.SetMusicVolume)
 	server.UseMute(setSpeakerMute)
 	useMuteLevel(server.SpeakerLevel)
-	go holdKeysIfMuted()
+	go func() {
+		device.AwaitVolume(volumeWait)
+		holdKeysIfMuted()
+	}()
 
 	switch jar, registered, known := commandState(); {
 	case commandReady(jar, registered, known):

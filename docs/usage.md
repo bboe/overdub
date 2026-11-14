@@ -197,9 +197,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | switch | `microphone_muted` | control | on: muted (3) |
 | sensor | `uptime` | diagnostic | seconds since boot |
 | sensor | `wifi_signal` | diagnostic | dBm (4) |
-| sensor | `volume` | diagnostic | % of the speaker's 30 steps |
-| sensor | `jack_volume` | diagnostic | % for the 3.5 mm output |
-| sensor | `bluetooth_volume` | diagnostic | % for a paired speaker |
+| sensor | `volume` | diagnostic | %, 0 while muted |
 | sensor | `cpu_temperature` | diagnostic | °C, the SoC's thermal zone |
 | sensor | `memory_available` | diagnostic | MiB an allocation could get |
 | binary_sensor | `audio_jack` | diagnostic | on: a plug in the socket |
@@ -216,7 +214,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | update | `firmware` | config | the latest release (13) |
 
 1. See [The action button](#the-action-button).
-2. Volume and mute of the live route, and playback of an mp3 URL through
+2. Volume and mute, and playback of an mp3 URL through
    Alexa's synthesizer.
 3. Setting it presses the mute key, ring included.
 4. A reading that is not a signal is missing, not zero.
@@ -244,7 +242,7 @@ Sendspin identity.
 |---|---|---|
 | 60 seconds | uptime, signal | always |
 | 60 seconds | registration, Bluetooth device | subscribed |
-| 2.5 seconds | 3 volumes, jack, route, temperature, memory, mic | subscribed |
+| 2.5 seconds | volume, jack, route, temperature, memory, mic | subscribed |
 | 500 ms | whether the speaker is playing | subscribed |
 
 - The first subscriber wakes both polls. The registration has no state on the
@@ -257,25 +255,23 @@ Sendspin identity.
 
 - A volume change appears within a few seconds, whether it came from the keys,
   an app or Alexa.
-- Setting it from Home Assistant sets the level of the route in
-  `output_device` exactly. It is silent: no key press, so no tick.
+- Setting it from Home Assistant sets Alexa's own level, so the Alexa app and
+  "Alexa, volume up" agree with it. Each set plays Alexa's volume sound and
+  lights the ring, as a key press does.
 - Music Assistant can set it over Sendspin too.
 - Sendspin ducks to 20% while Alexa listens and answers, and comes back when
   she is done. docs/audio.md has how.
-- Android keeps a level per route: `volume` for the speaker, `jack_volume` for
-  the socket, `bluetooth_volume` for a paired speaker. All 3 are reported
-  whatever is connected.
-- Mute is not per route. Muted, all 3 read 0.
-- `bluetooth_volume` is the Dot's attenuation, in series with the speaker's own
-  volume. Turning the speaker itself down is invisible here.
+- The Dot keeps a level per output, and `volume` is the live one's. Plugging
+  or unplugging the jack switches to that output's level. Muted, `volume`
+  reads 0.
 - Plugging in a cable disconnects a paired speaker, and it does not reconnect
   when you pull the cable. Connecting a speaker with a cable already in works:
   the Dot plays to the speaker.
 
 #### Muting holds the volume keys
 
-- Android does not lift its mute on a volume key; it resets the level to 1 step
-  instead. So while the Dot is muted, the daemon grabs the volume keys.
+- A volume key does not lift the mute: it moves the level in silence. So while
+  the Dot is muted, the daemon grabs the volume keys.
 - The first key press lifts the mute and moves nothing. The next moves the
   volume.
 - A Home Assistant slider moved while muted sets the level and leaves the mute

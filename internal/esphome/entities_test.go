@@ -66,8 +66,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 		"volume":           {s.keyVolume, "Volume", "%", "", stateClassMeasurement, volumeIcon},
 		"cpu_temperature":  {s.keyCPU, "CPU temperature", "°C", "temperature", stateClassMeasurement, ""},
 		"memory_available": {s.keyMemory, "Memory available", "MiB", "data_size", stateClassMeasurement, ""},
-		"jack_volume":      {s.keyJack, "Jack volume", "%", "", stateClassMeasurement, volumeIcon},
-		"bluetooth_volume": {s.keyBT, "Bluetooth volume", "%", "", stateClassMeasurement, volumeIcon},
 	}
 
 	seen := map[string]bool{}

@@ -549,11 +549,7 @@ func sensorReading(t *testing.T, msgType int, payload []byte) (uint32, float32, 
 func speakerReads(read func() (float32, bool)) func() device.MusicVolume {
 	return func() device.MusicVolume {
 		v, ok := read()
-		return device.MusicVolume{
-			Max: 30, Speaker: v, SpeakerStep: int(v) * 30 / 100, SpeakerOK: ok,
-			Jack: 70, JackStep: 21, JackOK: true,
-			Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true,
-		}
+		return device.MusicVolume{Max: 30, Percent: v, Step: int(v) * 30 / 100, OK: ok}
 	}
 }
 
@@ -563,12 +559,9 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.cpu = func() (float32, bool) { return 41.3, true }
 	s.memory = func() (float32, bool) { return 126.5, true }
 	s.volumes = func() device.MusicVolume {
-		return device.MusicVolume{
-			Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-			Jack: 70, JackStep: 21, JackOK: true,
-			Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true,
-		}
+		return device.MusicVolume{Max: 30, Percent: 40, Step: 12, OK: true}
 	}
+	s.btRoute = func() (bool, bool) { return false, true }
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
 	s.micMute = func() (bool, bool) { return false, true }
@@ -577,14 +570,14 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.btDevice = func() (string, bool) { return "JBL Go 3", true }
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
-		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJack: 70, s.keyJackOn: 1,
-		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.7,
+		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJackOn: 1,
+		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.4,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
-		s.keyADB: 0, s.keyAlexa: 1, s.keyBT: 80, s.keyOutput: 0, s.keyBTDevice: 0,
+		s.keyADB: 0, s.keyAlexa: 1, s.keyOutput: 0, s.keyBTDevice: 0,
 	}
 }
 
-const sensorCount = 17
+const sensorCount = 15
 
 func listening(s *Server) *conn {
 	c := &conn{out: make(chan frame, sendQueue), sock: fakeAddr{}, states: true}
@@ -660,8 +653,7 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 }
 
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
-	for _, failing := range []string{"uptime", "wifi_signal", "volume", "jack_volume",
-		"bluetooth_volume", "bluetooth_device", "cpu_temperature", "memory_available",
+	for _, failing := range []string{"uptime", "wifi_signal", "volume", "bluetooth_device", "cpu_temperature", "memory_available",
 		"audio_jack", "speaker_playing"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
@@ -681,24 +673,9 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				fail(&s.wifi)
 				failedKey = s.keyWifi
 			case "volume":
-				s.volumes = func() device.MusicVolume {
-					return device.MusicVolume{Max: 30, Jack: 70, JackStep: 21, JackOK: true,
-						Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true}
-				}
+				s.volumes = func() device.MusicVolume { return device.MusicVolume{} }
 				failedKey = s.keyVolume
-			case "jack_volume":
-				s.volumes = func() device.MusicVolume {
-					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-						Bluetooth: 80, BluetoothStep: 24, BluetoothOK: true, BluetoothRouteOK: true}
-				}
-				failedKey = s.keyJack
 				delete(want, s.keySpeaker)
-			case "bluetooth_volume":
-				s.volumes = func() device.MusicVolume {
-					return device.MusicVolume{Max: 30, Speaker: 40, SpeakerStep: 12, SpeakerOK: true,
-						Jack: 70, JackStep: 21, JackOK: true, BluetoothRouteOK: true}
-				}
-				failedKey = s.keyBT
 			case "bluetooth_device":
 				s.btDevice = func() (string, bool) { return "", false }
 				failedKey = s.keyBTDevice
@@ -706,7 +683,6 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn
 				alsoFailed = s.keyOutput
-				delete(want, s.keySpeaker)
 			case "speaker_playing":
 				s.sound = func() (bool, bool) { return false, false }
 				failedKey = s.keySound
@@ -2042,26 +2018,25 @@ func TestTheJackIsPublishedWhenItChanges(t *testing.T) {
 	}
 
 	occupied = false
-	if got := pollAll(s); len(got) != 3 {
-		t.Fatalf("unplugging published %d readings, want 3: the jack itself, the output device "+
-			"that is now the speaker, and the media player whose volume is the speaker's "+
-			"rather than the socket's", len(got))
+	if got := pollAll(s); len(got) != 2 {
+		t.Fatalf("unplugging published %d readings, want 2: the jack itself and the output "+
+			"device that is now the speaker; the one level moves with neither", len(got))
 	}
 	if got := pollAll(s); len(got) != 0 {
 		t.Error("a jack state equal to the published one was sent again")
 	}
 
-	if value, missing, ok := jackAmong(t, c, s.keyJackOn, 3); !ok {
+	if value, missing, ok := jackAmong(t, c, s.keyJackOn, 2); !ok {
 		t.Error("the unplug never arrived")
 	} else if value != 0 || missing {
 		t.Errorf("the unplug carried value %v missing %v, want the jack at 0", value, missing)
 	}
 
 	occupied = true
-	if got := pollAll(s); len(got) != 3 {
-		t.Fatalf("plugging in published %d readings, want 3", len(got))
+	if got := pollAll(s); len(got) != 2 {
+		t.Fatalf("plugging in published %d readings, want 2", len(got))
 	}
-	if value, _, ok := jackAmong(t, c, s.keyJackOn, 3); !ok {
+	if value, _, ok := jackAmong(t, c, s.keyJackOn, 2); !ok {
 		t.Error("the plug never arrived")
 	} else if value != 1 {
 		t.Errorf("the plug carried value %v, want the jack at 1", value)
@@ -2202,6 +2177,7 @@ func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 		{"wifi", s.wifi, device.WifiSignal},
 		{"volumes", s.volumes, device.MusicVolumes},
 		{"jack", s.jack, device.JackOccupied},
+		{"btRoute", s.btRoute, device.BluetoothRouted},
 		{"sound", s.sound, device.SpeakerPlaying},
 		{"micMute", s.micMute, device.MicMuted},
 		{"cpu", s.cpu, device.CPUTemperature},
