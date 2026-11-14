@@ -3,6 +3,7 @@
 package evdev
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -44,6 +45,8 @@ const (
 	uiSetKeybit  = 0x40045565 // _IOW(UINPUT_IOCTL_BASE, 101, int)
 	uiDevCreate  = 0x5501     // _IO(UINPUT_IOCTL_BASE, 1)
 	uiDevDestroy = 0x5502     // _IO(UINPUT_IOCTL_BASE, 2)
+	uiGetSysname = 0x8040552c // _IOC(_IOC_READ, UINPUT_IOCTL_BASE, 44, sysnameBytes)
+	sysnameBytes = 64
 
 	EventSize = 16 // sec(4) + usec(4) + type(2) + code(2) + value(4)
 )
@@ -214,6 +217,15 @@ func emit(w io.Writer, code uint16, value int32) error {
 	}
 	_, err := w.Write(Event{Type: evSyn, Code: synReport, Value: 0}.marshal())
 	return err
+}
+
+func (u *Uinput) Sysname() (string, error) {
+	var buf [sysnameBytes]byte
+	if err := ioctlPtr(u.f.Fd(), uiGetSysname, unsafe.Pointer(&buf[0])); err != nil {
+		return "", fmt.Errorf("uiGetSysname: %w", err)
+	}
+	name, _, _ := bytes.Cut(buf[:], []byte{0})
+	return string(name), nil
 }
 
 func (u *Uinput) Close() error {

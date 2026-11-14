@@ -196,6 +196,24 @@ func stopping() {
 	}
 }
 
+func restartReaders(i *button.Interceptor) {
+	clone, err := i.CloneNode(nodeWait)
+	if err != nil {
+		log.Printf("warning: %v; key readers were not restarted, and keys passed on may"+
+			" reach nothing until a reboot", err)
+		return
+	}
+	began := time.Now()
+	restarted, err := device.RestartInputReaders(clone)
+	if err != nil {
+		log.Printf("warning: %v; keys passed on may reach nothing until a reboot", err)
+	}
+	if len(restarted) > 0 {
+		log.Printf("restarted %s onto the clone at %s, read back in %v",
+			strings.Join(restarted, " and "), clone, time.Since(began).Round(time.Millisecond))
+	}
+}
+
 func serve(flags config) error {
 	psk, err := loadPSK(noiseKeyPath)
 	if err != nil {
@@ -207,6 +225,7 @@ func serve(flags config) error {
 		return err
 	}
 	defer i.Close()
+	go restartReaders(i)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

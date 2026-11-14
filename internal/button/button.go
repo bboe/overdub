@@ -10,8 +10,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bboe/overdub/internal/evdev"
@@ -33,6 +36,12 @@ type watch struct {
 	pressedAt time.Time
 	latched   Mode
 }
+
+const (
+	virtualInputDir = "/sys/devices/virtual/input"
+	inputDevDir     = "/dev/input"
+	accessPoll      = 50 * time.Millisecond
+)
 
 type Mode int32
 
@@ -109,6 +118,57 @@ func Open(path, uiName string, wait time.Duration, start map[uint16]Mode) (*Inte
 		i.watched[code] = w
 	}
 	return i, nil
+}
+
+func (i *Interceptor) CloneNode(wait time.Duration) (string, error) {
+	sysname, err := i.clone.Sysname()
+	if err != nil {
+		return "", err
+	}
+	path, err := eventNode(filepath.Join(virtualInputDir, sysname))
+	if err != nil {
+		return "", err
+	}
+	if err := waitForAccess(path, i.node.Name(), wait); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func waitForAccess(path, like string, limit time.Duration) error {
+	want, err := os.Stat(like)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(limit)
+	for {
+		if got, err := os.Stat(path); err == nil && sameAccess(got, want) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s never took the owner and mode of %s", path, like)
+		}
+		time.Sleep(accessPoll)
+	}
+}
+
+func sameAccess(a, b os.FileInfo) bool {
+	sa, okA := a.Sys().(*syscall.Stat_t)
+	sb, okB := b.Sys().(*syscall.Stat_t)
+	return okA && okB && a.Mode() == b.Mode() && sa.Uid == sb.Uid && sa.Gid == sb.Gid
+}
+
+func eventNode(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("the clone's sysfs entry: %w", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "event") {
+			return filepath.Join(inputDevDir, e.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("%s has no event node", dir)
 }
 
 func (i *Interceptor) Mode(code uint16) Mode {

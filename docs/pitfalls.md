@@ -87,6 +87,14 @@ covering whatever you are about to touch.
 - Each child is started with `Pdeathsig: SIGKILL`, so the kernel kills it when
   the daemon goes. A daemon killed with `kill` left no `logcat` behind.
 
+## Key readers on Fire OS 6
+
+- `acebuttond` and `ace_usagestat_protod` open the input nodes once and keep a
+  destroyed one. After a daemon restart they poll the old clone's dead
+  descriptor, burn CPU, and never open the new clone, so an action press
+  passed on reaches nothing. The daemon restarts both after making its clone.
+  docs/button.md has the measurements.
+
 ## The firewall
 
 - FireOS runs iptables with `INPUT policy DROP` and a port allowlist without
