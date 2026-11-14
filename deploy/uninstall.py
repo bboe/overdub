@@ -200,6 +200,43 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         print("Uninstall incomplete.", file=sys.stderr)
         sys.exit(1)
 
+    answer = shell(
+        "live() {\n"
+        "  for p in $(pidof $1); do\n"
+        '    f=$(ls -l /proc/$p/fd 2>/dev/null | grep " /dev/input/event")\n'
+        '    [ -n "$f" ] || return 1\n'
+        '    echo "$f" | grep -q "(deleted)" && return 1\n'
+        "  done\n"
+        '  [ -n "$(pidof $1)" ]\n'
+        "}\n"
+        "for pair in acebuttond:acebuttond usagestat_protod:ace_usagestat_protod; do\n"
+        "  s=${pair%%:*}; b=${pair#*:}\n"
+        '  [ "$(getprop init.svc.$s)" = running ] || continue\n'
+        "  live $b && continue\n"
+        "  old=$(pidof $b)\n"
+        "  setprop ctl.restart $s || { echo failed $s; continue; }\n"
+        "  i=0\n"
+        "  while [ $i -lt 50 ]; do\n"
+        '    [ "$(pidof $b)" != "$old" ] && live $b && break\n'
+        "    sleep 0.1; i=$((i + 1))\n"
+        "  done\n"
+        "  [ $i -lt 50 ] && echo restarted $s || echo failed $s\n"
+        "done; echo checked"
+    )[1].split("\n")
+    restarted = [line.split()[1] for line in answer if line.startswith("restarted ")]
+    failed = [line.split()[1] for line in answer if line.startswith("failed ")]
+    if "checked" not in answer or failed:
+        warn(
+            "buttons",
+            " and ".join(failed or ["The key readers"])
+            + " did not come back onto the real keys. They may still read the clone"
+            " the daemon removed, burning CPU, until a reboot.",
+        )
+    elif restarted:
+        ok("buttons", " and ".join(restarted) + " restarted onto the real keys")
+    else:
+        ok("buttons", "no key reader held the removed clone")
+
     closed = []
     for port in (API_PORT, SENDSPIN_PORT):
         rule = f"-i wlan0 -p tcp --dport {port} -j ACCEPT"

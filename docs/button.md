@@ -32,6 +32,51 @@
 - The wait for `wlan0` never gives up. Nothing restarts a daemon that has not
   exited, so an expired wait would lose the API for the rest of the boot.
 
+### The readers on Fire OS 6
+
+- Fire OS 6 has no `EventHub`. `acebuttond` reads the keys, and
+  `ace_usagestat_protod` counts them. Each opens every `/dev/input` node when
+  it starts and never handles one going away.
+- So a daemon restart breaks both. The old clone is destroyed, and each keeps
+  polling its dead descriptor: `ls -l /proc/<pid>/fd` shows
+  `/dev/input/event3 (deleted)`. The new clone takes the same node and is never
+  opened. Keys passed on reach nothing, so the action button in monitor or
+  pass through does nothing for Alexa, and the two burn CPU until a reboot.
+- Mute does not need the clone. `acebuttond` reads the privacy driver at
+  `/sys/devices/soc/10010000.keypad/amz_privacy`. Two presses of 113 injected
+  into `event1` reached the daemon and the clone, and LIPC `muteState` stayed
+  at 8. Its boot log reads `8-enable mic, 9-disable mic`.
+- 138 written into the live clone reached Alexa: `FactoryResetNeo` logged
+  `buttonName=uber`, and PuffinApp took `Dialog` for `SpeechRecognizer`.
+- Measured on main-bedroom and overdub-test after a reinstall: `acebuttond` at
+  44 to 64% in `top`, logged by `perfmonitord` at 150 to 190%, and
+  `ace_usagestat_protod` at 26%. donut, with no daemon, showed neither.
+- So the daemon restarts both, through `ctl.restart`, once its clone's node
+  is ready. `UI_GET_SYSNAME` names the clone's sysfs entry, and the node is the
+  `event` child under it. A restart took under a second, and each reopened the
+  live clone and left `top`.
+- The init services are `acebuttond` and `usagestat_protod`; the second runs
+  `/system/bin/ace_usagestat_protod`.
+- Ready means the keypad's owner, group and mode, not only present. ueventd
+  makes the node, then sets its owner, and both readers run as non-root uids
+  in group `input`. One restarted in between is refused the node, and opens
+  nodes only at start.
+- `setprop` exits 0 whether or not init acts, so a restart is read back: the
+  service's binary must hold the clone's node among its descriptors within 30
+  seconds. 5 was too few at boot: on a cold boot of overdub-test and biscuit,
+  `ace_usagestat_protod` opened the clone, but past 5 seconds. With the longer
+  wait, a boot read back in 10.7 and 8.2 seconds; after boot, about 1. Each reader is
+  read back on its own, and one that fails does not stop the other.
+- At boot `acebuttond` can pick up the clone itself: on 3 of 4 cold boots it
+  held `event3` already, so it was left alone. A reader that already holds it is left alone, and only a service
+  whose `init.svc.<name>` reads `running` is touched: empty means the Dot
+  does not have it, and `stopped` means somebody stopped it.
+- None of this holds up the daemon. It runs beside the API, and a failure is a
+  logged warning: the button works without it, and only keys passed on are
+  lost.
+- Uninstalling restarts both again, after the daemon stops, so they let go of
+  the clone it removed.
+
 ### What is fatal, and why
 
 - A failed grab. The real node still delivers to `EventHub`, so the clone would

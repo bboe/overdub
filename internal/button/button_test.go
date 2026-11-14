@@ -607,3 +607,27 @@ func TestAReleaseThatFailedIsAStuckKey(t *testing.T) {
 			"have been the half that failed, and Android acts on the key before it", err)
 	}
 }
+
+func TestTheCloneIsReadyOnlyWithTheKeypadsOwnerAndMode(t *testing.T) {
+	dir := t.TempDir()
+	like, path := dir+"/event1", dir+"/event3"
+	for _, f := range []string{like, path} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(like, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForAccess(path, like, 100*time.Millisecond); err == nil {
+		t.Error("a node not yet given the keypad's mode read as ready: a reader restarted" +
+			" then is refused it, and opens nodes only at start")
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		os.Chmod(path, 0o660)
+	}()
+	if err := waitForAccess(path, like, 2*time.Second); err != nil {
+		t.Errorf("the node took the keypad's mode and still read as not ready: %v", err)
+	}
+}

@@ -254,12 +254,18 @@ that runs as root, and no `su`.
    the loop: it shows as bare `sh`, and a `/proc/*/cmdline` scan matches its
    own subshells. The loop recreates the log every 5-second cycle, so a log
    that came back means the supervisor survived.
-5. Delete the firewall rules, once the daemon is confirmed dead. The daemon
+5. Restart `acebuttond` and `ace_usagestat_protod`, once the daemon is
+   confirmed dead, if either holds a deleted input node: the clone the daemon
+   destroyed. docs/button.md has why. A service not `running` is skipped.
+   Each restart is read back, as the daemon's is: a new pid holding live input
+   nodes and no deleted one within 5 seconds. Uninstall runs after boot, where
+   one restart took about a second; a reader that misses it is warned about.
+6. Delete the firewall rules, once the daemon is confirmed dead. The daemon
    re-asserts `tcp/6053` every 30 seconds and `tcp/8928` while Sendspin is on,
    so an earlier delete would be undone. Each rule is deleted in a loop,
    because the chain is not ours alone, then read back. A rule left behind is
    reported, not failed on: nothing listens behind it, and a reboot clears it.
-6. Clear every `persist.overdub.*` property and remove its file, then read
+7. Clear every `persist.overdub.*` property and remove its file, then read
    back the switch flag. Each property changes what the next install does: a
    Dot switched off through Home Assistant would come back off, and a tuned
    output delay would come back. The script enumerates

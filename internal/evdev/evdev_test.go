@@ -52,6 +52,7 @@ func TestIoctlRequestsMatchTheKernelMacros(t *testing.T) {
 		{"_IOW('U', 101, int)", uiSetKeybit, ioc(iocWrite, sizeofInt, 'U', 101)},
 		{"_IO('U', 1)", uiDevCreate, ioc(iocNone, 0, 'U', 1)},
 		{"_IO('U', 2)", uiDevDestroy, ioc(iocNone, 0, 'U', 2)},
+		{"_IOC(_IOC_READ, 'U', 44, sysnameBytes)", uiGetSysname, ioc(iocRead, sysnameBytes, 'U', 44)},
 	} {
 		if tt.have != tt.want {
 			t.Errorf("%s is 0x%08x, the constant is 0x%08x", tt.macro, tt.want, tt.have)
