@@ -119,6 +119,7 @@ type Client struct {
 
 	delay      atomic.Int64
 	bluetooth  atomic.Bool
+	elsewhere  atomic.Bool
 	toldVolume atomic.Int64
 	toldMute   atomic.Int64
 	onDisk     atomic.Int64
@@ -792,6 +793,17 @@ func (c *Client) SetDelay(ms int) {
 	c.tellServer()
 }
 
+func (c *Client) NoteElsewhere() {
+	session, _ := c.reporting()
+	if session == nil {
+		return
+	}
+	select {
+	case session.recheck <- struct{}{}:
+	default:
+	}
+}
+
 func (c *Client) tellServer() {
 	session, _ := c.reporting()
 	if session == nil {
@@ -911,33 +923,49 @@ func (c *Client) keepDelays(wake <-chan struct{}, done <-chan struct{}, written 
 
 func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{},
 	name string) {
-	if c.Config.OutputRate == nil {
+	if c.Config.OutputRate == nil && c.Config.Elsewhere == nil {
 		return
 	}
 	tick := time.NewTicker(waitOr(c.outputEvery, outputEvery))
 	defer tick.Stop()
-	told := c.bluetooth.Load()
+	told, toldElsewhere := c.bluetooth.Load(), c.elsewhere.Load()
 	for {
-		rate := c.Config.OutputRate()
+		rate := StreamRate
+		if c.Config.OutputRate != nil {
+			rate = c.Config.OutputRate()
+		}
 		held, available := c.reporting()
 		if held == session {
 			c.bluetooth.Store(rate == BluetoothRate)
+			c.elsewhere.Store(c.Config.Elsewhere != nil && c.Config.Elsewhere())
 		}
-		if held == session && c.bluetooth.Load() != told {
+		if held == session && (c.bluetooth.Load() != told || c.elsewhere.Load() != toldElsewhere) {
 			if err := c.state(session, available); err != nil {
 				c.Peer.Printf("sendspin: this player could not declare the format, lead and"+
 					" buffer its output needs, so its connection goes: %v", err)
 				nc.Close()
 				return
 			}
-			told = c.bluetooth.Load()
-			c.Play.Printf("sendspin: this dot's output runs at %d Hz, so it asked %q for"+
-				" audio at that rate", rate, name)
+			if c.bluetooth.Load() != told {
+				c.Play.Printf("sendspin: this dot's output runs at %d Hz, so it asked %q for"+
+					" audio at that rate", rate, name)
+			}
+			switch {
+			case c.elsewhere.Load() == toldElsewhere:
+			case c.elsewhere.Load():
+				c.Play.Printf("sendspin: alexa is playing on this dot, so it told %q it is"+
+					" unavailable", name)
+			default:
+				c.Play.Printf("sendspin: alexa stopped playing, so this dot told %q it is"+
+					" available again; nothing resumes until somebody plays", name)
+			}
+			told, toldElsewhere = c.bluetooth.Load(), c.elsewhere.Load()
 		}
 		select {
 		case <-stop:
 			return
 		case <-tick.C:
+		case <-session.recheck:
 		}
 	}
 }
@@ -945,6 +973,9 @@ func (c *Client) watchOutput(session *Session, nc net.Conn, stop <-chan struct{}
 func (c *Client) state(session *Session, available bool) error {
 	c.stating.Lock()
 	defer c.stating.Unlock()
+	if held, ready := c.reporting(); held == session {
+		available = ready
+	}
 	player := &playerState{
 		OutputDelayMS:      int(c.heldDelay() / time.Millisecond),
 		RequiredLeadTimeMS: c.lead(),
@@ -963,7 +994,7 @@ func (c *Client) state(session *Session, available bool) error {
 		}
 	}
 	return session.WriteJSON(typeClientState, clientState{
-		Available: available,
+		Available: available && !c.elsewhere.Load(),
 		Player:    player,
 	})
 }

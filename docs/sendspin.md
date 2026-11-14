@@ -749,10 +749,27 @@ listener closed, rule deleted and no longer re-asserted, sessions ended.
   spec's precondition.
 - A Dot with no player (`audio.NewChime` failed) stays false. Available would
   make the group wait for a speaker that cannot sound.
-- **An `available: true` is never withdrawn.** If `OpenStream` fails the Dot
-  drops chunks, logs 1 line and keeps its slot. Every reachable `OpenStream`
-  failure clears at the next `stream/start`; withdrawing would trade one silent
-  track for a session outside the group.
+- **An `available: true` is withdrawn only while Alexa plays her own
+  music.** Then the Dot reports `available: false`, which the spec defines as
+  "in use by an external system and will not yield": the server ends the
+  stream and moves the Dot out of its group, and it does not resume when the
+  Dot is available again. docs/audio.md has how her music is read.
+- The focus watcher nudges the client the moment her channel moves, and the
+  client sends `client/state` at once. The nudge goes to whichever client the
+  switch holds.
+- The fact is also read with the output rate, every 2.5 seconds: at once when
+  the player role is activated, about 205 ms before the clock agrees, and then
+  on each tick. That covers a client built later, a nudge that lands while the
+  switch is between clients, and one that lands while no session holds the
+  role. After the role is taken again the fact can be up to a tick old.
+- `client/state` re-reads readiness as it writes. The output loop reads it
+  first and writes later, so a flip landing as the clock agreed could send a
+  stale `available: false` after the `true`, and nothing would send `true`
+  again.
+- A failed `OpenStream` does not withdraw. The Dot drops chunks, logs 1 line
+  and keeps its slot. Every reachable `OpenStream` failure clears at the next
+  `stream/start`; withdrawing would trade one silent track for a session
+  outside the group.
 - `supported_commands` is in `client/state`'s player object only: `volume` and
   `mute` when the Dot can set them, and always `set_output_delay` (spec #177).
   A current server marks a client whose `client/hello` carries the list as on

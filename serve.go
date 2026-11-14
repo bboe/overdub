@@ -72,11 +72,6 @@ const (
 
 	holdTime = 600 * time.Millisecond
 
-	playbackWait = 30 * time.Second
-
-	alexaWait  = 30 * time.Second
-	alexaTries = 10
-
 	commandRetry = 5 * time.Minute
 
 	multiGap = 350 * time.Millisecond
@@ -89,6 +84,15 @@ var advertised atomic.Pointer[mdns.Responder]
 var api atomic.Pointer[esphome.Server]
 
 var switched atomic.Pointer[sendspinSwitch]
+
+var alexaPlaying atomic.Bool
+
+func noteAlexaPlaying(playing bool) {
+	alexaPlaying.Store(playing)
+	if s := switched.Load(); s != nil {
+		s.noteElsewhere()
+	}
+}
 
 func withdraw() {
 	if r := advertised.Load(); r != nil {
@@ -135,7 +139,7 @@ func serve(flags config) error {
 	var player sendspin.Player
 	if chime != nil {
 		player = chimePlayer{chime: chime}
-		go (&alexa.FocusWatcher{OnLevel: chime.Duck}).Run()
+		go (&alexa.FocusWatcher{OnLevel: chime.Duck, OnMusic: noteAlexaPlaying}).Run()
 	}
 
 	go serveAPI(flags.Name, psk, i, player)
@@ -318,8 +322,6 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 		go waitForCommand(server)
 	}
 
-	go waitForAlexa(server)
-
 	useUpdate(server, name, func() {
 		stopping()
 		i.Close()
@@ -429,52 +431,6 @@ func waitForCommand(server *esphome.Server) {
 
 func commandReady(registered, known bool) bool { return registered || !known }
 
-func waitForAlexa(server *esphome.Server) {
-	for attempt := 1; ; attempt++ {
-		if alexa.Installed() {
-			usePlayback(server)
-			if attempt > 1 {
-				log.Printf("alexa: %s answered on attempt %d; the media player can play now",
-					alexa.Package, attempt)
-			}
-			return
-		}
-		if attempt == 1 {
-			log.Printf("alexa: %s is not installed yet, so the media player offers the volume "+
-				"alone; asking again for %v", alexa.Package, alexaWait*(alexaTries-1))
-		}
-		if attempt >= alexaTries {
-			log.Printf("alexa: %s never answered; nothing here can play a clip until a restart",
-				alexa.Package)
-			return
-		}
-		time.Sleep(alexaWait)
-	}
-}
-
-func usePlayback(server *esphome.Server) {
-	watcher := &alexa.PlaybackWatcher{
-		OnStart: func() { server.NotePlayback(true) },
-		OnEnd: func(ok bool, detail string) {
-			if ok {
-				server.NotePlayback(false)
-				return
-			}
-			server.NotePlaybackFailed(detail)
-		},
-	}
-	go watcher.Run()
-	server.UsePlay(func(url string) error {
-		watcher.Expect(playbackWait)
-		if err := alexa.Speak(url); err != nil {
-			watcher.Cancel()
-			return err
-		}
-		watcher.Extend(playbackWait)
-		return nil
-	})
-}
-
 func loadPSK(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -502,6 +458,7 @@ type sendspinServer interface {
 	Delay() int
 	SetDelay(ms int)
 	Close()
+	NoteElsewhere()
 }
 
 type chimePlayer struct{ chime *audio.Chime }
@@ -555,6 +512,15 @@ type sendspinSwitch struct {
 	served      chan struct{}
 	hold        chan struct{}
 	held        sync.WaitGroup
+}
+
+func (s *sendspinSwitch) noteElsewhere() {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+	if client != nil {
+		client.NoteElsewhere()
+	}
 }
 
 func (s *sendspinSwitch) On() bool {
@@ -1153,6 +1119,7 @@ func sendspinClient(name, mac string, keys sendspin.Keys, records *sendspin.Reco
 	}
 	if player != nil {
 		config.OutputRate = audio.OutputRate
+		config.Elsewhere = alexaPlaying.Load
 	}
 	if server := api.Load(); server != nil && server.CanSetVolume() {
 		config.Level, config.SetVolume = speakerLevel, setSpeakerVolume

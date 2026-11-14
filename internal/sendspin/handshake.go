@@ -209,6 +209,7 @@ type Session struct {
 
 	writing sync.Mutex
 	report  chan struct{}
+	recheck chan struct{}
 
 	displaced atomic.Bool
 	streams   streamGate
@@ -294,6 +295,7 @@ func Handshake(ws *Conn, keys Keys, psks PSKSet) (*Session, error) {
 		hash:     k.hash,
 		clock:    newClock(),
 		report:   make(chan struct{}, 1),
+		recheck:  make(chan struct{}, 1),
 	}
 	s.longTerm.Store(k.longTerm)
 	return s, nil

@@ -1,8 +1,10 @@
 package alexa
 
 import (
+	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,28 +16,35 @@ const (
 	fullPercent     = 100
 	holdFor         = 15 * time.Minute
 
-	requestMark = "requestAudioFocus() from "
-	reqMark     = " req="
-	abandonMark = "abandonAudioFocus() from "
-	removeMark  = "removeFocusStackEntry(): removing entry for "
+	acquireMark = "FocusManager:acquireChannel:channelName="
+	releaseMark = "FocusManager:releaseChannel:channelName="
+	tagMark     = " PuffinApp: "
+
+	musicChannel = "Content"
 )
 
-var focusArgv = []string{"/system/bin/logcat", "-T", "1", "-v", "brief", "-s", "MediaFocusControl"}
+func focusArgv(from time.Time) []string {
+	since := fmt.Sprintf("%d.%03d", from.Unix(), from.Nanosecond()/int(time.Millisecond))
+	return []string{"/system/bin/logcat", "-T", since, "-v", "threadtime", "-s", "PuffinApp"}
+}
 
 type focusHolder struct {
-	req   int
-	until time.Time
+	executor string
+	until    time.Time
 }
 
 type FocusWatcher struct {
 	OnLevel func(percent int)
+	OnMusic func(playing bool)
 
-	notify    sync.Mutex
-	mu        sync.Mutex
-	requested string
-	holders   map[string]focusHolder
-	level     int
-	now       func() time.Time
+	notify  sync.Mutex
+	mu      sync.Mutex
+	holders map[string]focusHolder
+	level   int
+	music   bool
+	pid     string
+	now     func() time.Time
+	alive   func(pid string) bool
 }
 
 func (w *FocusWatcher) clock() time.Time {
@@ -61,86 +70,127 @@ func (w *FocusWatcher) read(r io.Reader) error {
 }
 
 func (w *FocusWatcher) line(line string) {
-	if i := strings.Index(line, requestMark); i >= 0 {
-		rest := line[i+len(requestMark):]
-		j := strings.LastIndex(rest, reqMark)
-		if j < 0 {
-			return
+	if pid := pidOf(line); pid != "" {
+		w.mu.Lock()
+		was := w.pid
+		w.mu.Unlock()
+		switch {
+		case pid == was:
+		case was == "":
+			w.change(func() { w.pid = pid })
+		case !w.running(was):
+			log.Printf("focus watcher: PuffinApp is pid %s now, and %s is gone, so every"+
+				" channel the old one held is released", pid, was)
+			w.change(func() {
+				clear(w.holders)
+				w.pid = pid
+			})
 		}
-		req, ok := leadingInt(rest[j+len(reqMark):])
-		if !ok {
-			return
+	}
+	if i := strings.Index(line, acquireMark); i >= 0 {
+		channel, _, _ := strings.Cut(line[i+len(acquireMark):], ",")
+		if executor, ok := executorOf(line[:i]); ok {
+			w.acquire(strings.TrimSpace(channel), executor)
 		}
-		client := strings.TrimSpace(rest[:j])
-		w.request(client, req)
-		w.requested = client
 		return
 	}
-	if i := strings.Index(line, abandonMark); i >= 0 {
-		w.requested = ""
-		w.release(strings.TrimSpace(line[i+len(abandonMark):]))
-		return
-	}
-	if i := strings.Index(line, removeMark); i >= 0 {
-		client := strings.TrimSpace(line[i+len(removeMark):])
-		requested := w.requested
-		w.requested = ""
-		if client == requested {
-			return
+	if i := strings.Index(line, releaseMark); i >= 0 {
+		channel, _, _ := strings.Cut(line[i+len(releaseMark):], ",")
+		if executor, ok := executorOf(line[:i]); ok {
+			w.release(strings.TrimSpace(channel), executor)
 		}
-		w.release(client)
 	}
 }
 
-func leadingInt(s string) (int, bool) {
-	n, digits := 0, 0
-	for digits < len(s) && digits < 9 && s[digits] >= '0' && s[digits] <= '9' {
-		n = n*10 + int(s[digits]-'0')
-		digits++
+func (w *FocusWatcher) running(pid string) bool {
+	if w.alive != nil {
+		return w.alive(pid)
 	}
-	return n, digits > 0
+	_, err := os.Stat("/proc/" + pid)
+	return err == nil
 }
 
-func (w *FocusWatcher) request(client string, req int) {
-	if client == "" {
+func pidOf(line string) string {
+	i := strings.Index(line, tagMark)
+	if i < 0 {
+		return ""
+	}
+	fields := strings.Fields(line[:i])
+	if len(fields) != 5 {
+		return ""
+	}
+	return fields[2]
+}
+
+func executorOf(prefix string) (string, bool) {
+	prefix = strings.TrimRight(prefix, " ")
+	if !strings.HasSuffix(prefix, "]") {
+		return "", false
+	}
+	open := strings.LastIndex(prefix, "[")
+	if open < 0 {
+		return "", false
+	}
+	executor := prefix[open+1 : len(prefix)-1]
+	return executor, executor != ""
+}
+
+func (w *FocusWatcher) acquire(channel, executor string) {
+	var until time.Time
+	switch {
+	case percentFor(channel) < fullPercent:
+		until = w.clock().Add(holdFor)
+	case channel != musicChannel:
 		return
 	}
 	w.change(func() {
 		if w.holders == nil {
 			w.holders = map[string]focusHolder{}
 		}
-		w.holders[client] = focusHolder{req: req, until: w.clock().Add(holdFor)}
+		w.holders[channel] = focusHolder{executor: executor, until: until}
 	})
 }
 
-func (w *FocusWatcher) release(client string) {
-	if client == "" {
-		return
-	}
+func (w *FocusWatcher) release(channel, executor string) {
 	w.change(func() {
-		delete(w.holders, client)
+		if h, ok := w.holders[channel]; ok && h.executor == executor {
+			delete(w.holders, channel)
+		}
 	})
 }
 
 func (w *FocusWatcher) expire() {
+	w.mu.Lock()
+	pid := w.pid
+	w.mu.Unlock()
+	if pid != "" && !w.running(pid) {
+		held := 0
+		w.change(func() {
+			held = len(w.holders)
+			clear(w.holders)
+			w.pid = ""
+		})
+		log.Printf("focus watcher: PuffinApp %s is gone, so the %d channels it held are"+
+			" released", pid, held)
+		return
+	}
 	dropped := 0
 	w.change(func() {
 		now := w.clock()
-		for client, h := range w.holders {
-			if now.After(h.until) {
-				delete(w.holders, client)
+		for channel, h := range w.holders {
+			if !h.until.IsZero() && now.After(h.until) {
+				delete(w.holders, channel)
 				dropped++
 			}
 		}
 	})
 	if dropped > 0 {
-		log.Printf("focus watcher: %d clients never abandoned audio focus, so their hold"+
+		log.Printf("focus watcher: %d channels were never released, so their hold"+
 			" was dropped after %v", dropped, holdFor)
 	}
 }
 
 func (w *FocusWatcher) reset() {
-	w.requested = ""
 	w.change(func() {
 		clear(w.holders)
 	})
@@ -153,26 +203,30 @@ func (w *FocusWatcher) change(mutate func()) {
 	w.mu.Lock()
 	mutate()
 	level := fullPercent
-	for _, h := range w.holders {
-		level = min(level, percentFor(h.req))
+	for channel := range w.holders {
+		level = min(level, percentFor(channel))
 	}
-	was := w.level
+	_, music := w.holders[musicChannel]
+	was, wasMusic := w.level, w.music
 	if was == 0 {
 		was = fullPercent
 	}
-	w.level = level
+	w.level, w.music = level, music
 	w.mu.Unlock()
 
 	if level != was && w.OnLevel != nil {
 		w.OnLevel(level)
 	}
+	if music != wasMusic && w.OnMusic != nil {
+		w.OnMusic(music)
+	}
 }
 
-func percentFor(req int) int {
-	switch req {
-	case 3:
+func percentFor(channel string) int {
+	switch channel {
+	case "Dialog":
 		return duckPercent
-	case 2, 4:
+	case "Alert", "Communications":
 		return deepDuckPercent
 	}
 	return fullPercent

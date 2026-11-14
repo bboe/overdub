@@ -1,3 +1,7 @@
+// Package alexa runs a typed command through Alexa's cloud, which plays it on
+// this Dot as though it were spoken. docs/command.md has the route and the
+// credential. It also follows Alexa's audio focus in logcat, so the stream can
+// duck while she holds it.
 package alexa
 
 import (

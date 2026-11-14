@@ -227,6 +227,7 @@ type Config struct {
 	SetVolume      func(percent int)
 	SetMute        func(on bool)
 	OutputRate     func() int
+	Elsewhere      func() bool
 }
 
 func (c Config) setsVolume() bool { return c.Level != nil && c.SetVolume != nil }

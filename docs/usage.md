@@ -201,8 +201,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | update | `firmware` | config | the latest release (13) |
 
 1. See [The action button](#the-action-button).
-2. Volume and mute, and playback of an mp3 URL through
-   Alexa's synthesizer.
+2. Volume and mute. Playback is not offered yet.
 3. Setting it presses the mute key, ring included.
 4. A reading that is not a signal is missing, not zero.
 5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
@@ -268,53 +267,15 @@ Sendspin identity.
 
 ### Playing something on it
 
-`media_player.play_media` hands the URL to Alexa's synthesizer. She fetches it
-and plays it like her own speech, mixed and ducked. Her rules:
+Nothing plays a URL on Fire OS 6 yet, so `media_player.play_media` and
+`tts.speak` do nothing on this Dot. Fire OS 6 has no way to hand Alexa a
+sound. The daemon playing clips itself comes next; docs/api.md has the
+reasons.
 
-- **CBR mp3, 48 kbps, 24 kHz, mono.** She refuses variable bitrate, and the
-  refusal looks like a missing file. Home Assistant's `tts.speak` takes
-  `preferred_bitrate: 48` from 2026.9.
-- **`http://` only, with no comma or double quote in the URL.** Those two
-  characters end the intent early. `https` is unverified.
-- **The Dot fetches the clip itself**, so the server must be reachable *from
-  the Dot*. A `/local/` file served by Home Assistant is the ordinary case.
-
-```yaml
-action: tts.speak
-target:
-  entity_id: tts.home_assistant_cloud
-data:
-  media_player_entity_id: media_player.kitchen_speaker
-  message: "The back door has been open for 10 minutes"
-  options:
-    preferred_bitrate: 48
-```
-
-- The entity reads `playing` only while Alexa plays, from her playback log.
-  Expect about 0.7 seconds before it moves.
-- If she never starts, it goes back to idle after 30 seconds.
-
-**When nothing plays, read her log, not the daemon's.** The daemon logs only
-the request:
-
-```sh
-adb shell 'logcat -d -v brief -s tts-Server tts-Playback'
-```
-
-- `cannot estimate length of the next mp3 frame`: variable bitrate.
-- `Playback ended: ... FAILED` with nothing before it: usually the fetch, a 404
-  or a URL the Dot cannot route to.
-- **No lines at all**: the request never reached her.
-
-A Dot on an IoT network often cannot reach the server even though the server
-reaches the Dot. Ask the Dot:
-
-```sh
-url=http://<host>:8123/
-adb shell "curl -sS -m 5 -o /dev/null -w %{http_code} $url"
-```
-
-`200` means the route is open. A curl error and `000` means it is not.
+While Alexa listens or speaks, a Sendspin stream drops to 20%, and to 10%
+while an alarm or timer rings. When she plays music herself, the Dot leaves
+Sendspin play: Music Assistant stops it, or plays on without it in a group.
+It does not resume when she stops; press play again.
 
 ### The button modes
 
@@ -528,7 +489,6 @@ To register a Dot:
 ```sh
 adb shell 'cat /data/local/tmp/overdub.log'      # emptied when the service starts
 adb shell 'iptables -L INPUT -n -v | grep 6053'  # packet counter
-adb shell 'logcat -d -v brief -s tts-Server tts-Playback'   # playback
 ```
 
 - **Home Assistant times out adding the Dot**: check the tcp/6053 packet

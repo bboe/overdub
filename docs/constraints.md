@@ -106,8 +106,7 @@
 - The chime is generated, not stored or encoded. `internal/audio` renders two
   sine tones, at the frequencies Amazon's own chime uses, measured by DFT.
   docs/audio.md has the numbers.
-- A clip is not a sound this daemon makes. `internal/alexa` hands Alexa a URL,
-  and her synthesizer demuxes, decodes, mixes and ducks it. An mp3 decoder is a
-  dependency this tree could not check in isolation.
-- The cost is her encoding rule and her four quirks, on a path where latency
-  does not matter. Whoever asks for the clip also serves it.
+- Nothing plays a clip on Fire OS 6 yet. Fire OS 5 handed Alexa the URL, and
+  her synthesizer decoded it; Fire OS 6 has no way in. The daemon will play
+  one itself, as FLAC that Home Assistant transcodes to, through the decoder
+  Sendspin already links. docs/api.md has the search.

@@ -9,11 +9,17 @@ import (
 	"time"
 )
 
-func keepFollowing(name string, argv []string, line func(string), ended func()) {
+const (
+	watchRetry = 10 * time.Second
+	sweepEvery = 2 * time.Second
+)
+
+func keepFollowing(name string, argv func(time.Time) []string, line func(string),
+	ended func()) {
 	said := false
 	for {
 		start := time.Now()
-		err := follow(argv, line)
+		err := follow(argv(start), line)
 		if ended != nil {
 			ended()
 		}
@@ -50,4 +56,17 @@ func readLines(r io.Reader, line func(string)) error {
 		line(sc.Text())
 	}
 	return sc.Err()
+}
+
+func shouldSay(said bool, ranFor time.Duration, err error) (say, nowSaid bool) {
+	if ranFor >= watchRetry {
+		said = false
+	}
+	if err == nil {
+		return false, said
+	}
+	if said {
+		return false, true
+	}
+	return true, true
 }
