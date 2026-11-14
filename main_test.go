@@ -184,7 +184,7 @@ func TestTheSensorTickRespectsTheFloor(t *testing.T) {
 	if floor < esphome.MinSensorTick {
 		floor = esphome.MinSensorTick
 	}
-	if budget := device.AccountReadBudget() + device.BluetoothReadBudget(); budget >= floor {
+	if budget := device.RegistrationReadBudget() + device.BluetoothReadBudget(); budget >= floor {
 		t.Errorf("the registration and the Bluetooth device are read every %v and may take "+
 			"%v between them, so a slow read delays the tick behind it", floor, budget)
 	}
@@ -410,22 +410,19 @@ func TestTheBlueprintFiltersToOneButton(t *testing.T) {
 	}
 }
 
-func TestTheCommandNeedsBothAJarAndAnAccount(t *testing.T) {
+func TestTheCommandNeedsAnAccountOrNoReading(t *testing.T) {
 	for _, tt := range []struct {
-		name                   string
-		jar, registered, known bool
-		want                   bool
+		name              string
+		registered, known bool
+		want              bool
 	}{
-		{"a jar and a registered dot", true, true, true, true},
-		{"no jar at all", false, true, true, false},
-		{"a jar on a dot with no account", true, false, true, false},
-		{"a jar, and no reading either way", true, false, false, true},
-		{"no jar, and no reading either way", false, false, false, false},
+		{"a registered dot", true, true, true},
+		{"a dot with no account", false, true, false},
+		{"no reading either way", false, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := commandReady(tt.jar, tt.registered, tt.known); got != tt.want {
-				t.Errorf("commandReady(%v, %v, %v) = %v, want %v",
-					tt.jar, tt.registered, tt.known, got, tt.want)
+			if got := commandReady(tt.registered, tt.known); got != tt.want {
+				t.Errorf("commandReady(%v, %v) = %v, want %v", tt.registered, tt.known, got, tt.want)
 			}
 		})
 	}

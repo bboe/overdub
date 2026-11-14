@@ -2,7 +2,6 @@ package alexa
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +9,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,15 +19,9 @@ import (
 )
 
 const (
-	MapUID  = 32051
-	mapDir  = "/data/local/map"
-	mapJar  = mapDir + "/mapdump.jar"
-	mapKey  = "com.amazon.dcp.sso.token.oauth.amazon.refresh_token"
-	mapMain = "MapDump"
+	uaAlexa = "AmazonWebView/Amazon Alexa/2.2.651540.0/iOS/18.3.1/iPhone"
 
-	uaMAP = "AmazonWebView/MAPClientLib/130050002/Android/5.1.1/AEOBC"
-
-	uaAlexa = "AmazonWebView/AmazonAlexa/2.2.223830.0/Android/5.1.1/AEOBC"
+	appName = "Amazon Alexa"
 
 	exchangePath = "/ap/exchangetoken/cookies"
 
@@ -47,13 +37,6 @@ type Client struct {
 	token string
 
 	http *http.Client
-}
-
-const JarPath = mapJar
-
-func JarInstalled() bool {
-	_, err := os.Stat(mapJar)
-	return err == nil
 }
 
 func NewClient() *Client { return &Client{} }
@@ -73,16 +56,16 @@ func (a *Client) Send(text string) error {
 	}
 	a.token = ""
 	if again := a.attempt(text); again != nil {
-		return fmt.Errorf("refused, and again after re-extracting the token: %w", again)
+		return fmt.Errorf("refused, and again after re-reading the token: %w", again)
 	}
 	return nil
 }
 
 func (a *Client) attempt(text string) error {
 	if a.token == "" {
-		token, err := extractToken()
+		token, err := readToken()
 		if err != nil {
-			return fmt.Errorf("extract token: %w", err)
+			return fmt.Errorf("token: %w", err)
 		}
 		a.token = token
 	}
@@ -119,36 +102,13 @@ func pick(devices []Device) (Device, error) {
 	return Device{}, fmt.Errorf("no device on the account matches this Dot's serial %q", serial)
 }
 
-var suPaths = []string{"/sbin/su", "/system/xbin/su", "/system/bin/su"}
-
-func suPath() string {
-	for _, path := range suPaths {
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-	return "su"
-}
-
-func extractToken() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, suPath(), strconv.Itoa(MapUID), "-c",
-		fmt.Sprintf("CLASSPATH=%s app_process %s %s %s", mapJar, mapDir, mapMain, mapKey))
-	var token, diag bytes.Buffer
-	cmd.Stdout = &token
-	cmd.Stderr = &diag
-	cmd.WaitDelay = 2 * time.Second
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, clip(diag.Bytes()))
-	}
-	value := strings.TrimSpace(token.String())
-	if value == "" {
-		return "", fmt.Errorf("MapDump exited 0 with nothing on stdout: %s", clip(diag.Bytes()))
+func readToken() (string, error) {
+	value, err := device.AlexaToken()
+	if err != nil {
+		return "", err
 	}
 	if !tokenShaped(value) {
-		return "", fmt.Errorf("MapDump wrote %d bytes that are not a token: %s",
-			len(value), clip(diag.Bytes()))
+		return "", fmt.Errorf("the store holds %d bytes that are not a token", len(value))
 	}
 	return value, nil
 }
@@ -223,8 +183,7 @@ func oauthError(body []byte, token string) string {
 
 func exchangeCookies(client *http.Client, token, domain string) error {
 	form := url.Values{
-		"di.os.name":           {"FireOS"},
-		"app_name":             {"Amazon Alexa"},
+		"app_name":             {appName},
 		"source_token":         {token},
 		"source_token_type":    {"refresh_token"},
 		"requested_token_type": {"auth_cookies"},
@@ -236,9 +195,7 @@ func exchangeCookies(client *http.Client, token, domain string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("x-amzn-identity-auth-domain", "api.amazon.com")
-	req.Header.Set("User-Agent", uaMAP)
-	req.Header.Set("Accept", "*/*")
+	req.Header["User-Agent"] = []string{""}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -293,9 +250,9 @@ func alexaRequest(method, u string, body io.Reader) (*http.Request, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", uaAlexa)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("DNT", "1")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", alexaLocale)
+	req.Header.Set("Accept-Charset", "utf-8")
 	req.Header.Set("Connection", "keep-alive")
 	return req, nil
 }
@@ -317,7 +274,6 @@ func csrfToken(client *http.Client, base string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Referer", base+"/spa/index.html")
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -342,7 +298,6 @@ func listDevices(client *http.Client, base string) ([]Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Referer", base+"/spa/index.html")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -394,8 +349,6 @@ func sendText(client *http.Client, base, csrf string, target Device, text, local
 	}
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	req.Header.Set("csrf", csrf)
-	req.Header.Set("Referer", base+"/spa/index.html")
-	req.Header.Set("Origin", base)
 
 	resp, err := client.Do(req)
 	if err != nil {

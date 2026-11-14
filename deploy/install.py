@@ -40,7 +40,6 @@ KEY_LINE = re.compile(r"ssh-|[A-Za-z0-9+/]{32,}")
 KEY_SHAPE = re.compile(r"[A-Za-z0-9+/]{43}=")
 LABEL = 14
 INDENT = " " * (LABEL + 4)
-MAP_DIR = "/data/local/map"
 MD5_SHAPE = re.compile(r"^[0-9a-f]{32}", re.MULTILINE)
 OD_LINE = re.compile(r"(?:\s*[0-9a-f]{2})+\s*")
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -397,7 +396,7 @@ def install_binary(boot_script: str) -> None:
     if not re.search(r"^drwx------", shell(f"ls -ldn {BIN_DIR}")[1], re.MULTILINE):
         STATE.changed = True
     shell_ok(f"mkdir -p {BIN_DIR}\nchmod 700 {BIN_DIR}")
-    shell_ok(f"rm -f {TRIAL} {FAILED} {BINARY}.prev {MAP_DIR}/mapdump.jar.prev")
+    shell_ok(f"rm -f {TRIAL} {FAILED} {BINARY}.prev")
     if probe(f"-e {TRIAL}") != "no":
         fail(
             "binary",

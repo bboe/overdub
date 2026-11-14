@@ -12,7 +12,6 @@ func TestEveryDumpsysReadAsksItsServiceAndIsBounded(t *testing.T) {
 		service string
 	}{
 		{"route", routeDump, "audio"},
-		{"registration", accountDump, "account"},
 		{"bluetooth device", btDump, "bluetooth_manager"},
 		{"speaker", speakerDump, "media.audio_flinger"},
 	} {

@@ -2,6 +2,3 @@
 __pycache__/
 backups/
 build/
-deploy/mapdump/classes/
-deploy/mapdump/mapdump.jar
-deploy/mapdump/out/

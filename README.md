@@ -15,11 +15,11 @@ keeps running.
 
 - This runs on a Dot you own and have already rooted. Nobody supports it, and a
   FireOS update can break any of it.
-- **Alexa commands are optional, and they risk the account, not the Dot.** They
-  reach an undocumented Alexa app endpoint with a credential that carries the
-  whole Amazon account, which may sit outside Amazon's terms. Read
-  [Alexa commands](docs/usage.md#alexa-commands) before you build MapDump. Without the jar,
-  the daemon does not offer them.
+- **Alexa commands risk the account, not the Dot.** They reach an undocumented
+  Alexa app endpoint with the credential the Dot was registered with, which
+  carries the whole Amazon account and may sit outside Amazon's terms. Every
+  registered Dot offers them; read [Alexa commands](docs/usage.md#alexa-commands)
+  before you use one.
 - **Sendspin plays only for a paired server.** Pair Music Assistant with the
   token the installer prints; until then it connects and plays nothing. Any
   server that holds the token can pair, so treat it as a password; see
@@ -117,7 +117,7 @@ README.
 ## Install from a release
 
 Each [release](https://github.com/bboe/overdub/releases) carries one tarball
-with the scripts, the binary and `mapdump.jar`, already built:
+with the scripts and the binary, already built:
 
 ```sh
 tar xf overdub-v1.0.0.tar.gz
@@ -174,7 +174,7 @@ defends against.
 - [Network adb, and the microphone](docs/device.md): what Home Assistant can
   switch on the Dot itself
 - [Audio](docs/audio.md): making a sound here, and the chime
-- [Alexa commands](docs/command.md): the credential, MapDump, the text command
+- [Alexa commands](docs/command.md): the credential, the text command
 - [Music Assistant](docs/sendspin.md): the Sendspin client, its handshake, its
   clock
 - [Things that fail silently](docs/pitfalls.md): failures that report success

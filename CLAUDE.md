@@ -86,7 +86,7 @@ pages imported below apply to everything. Read the page for a subsystem
 - rooting: firebreak's
   [docs/rooting.md](https://github.com/bboe/firebreak/blob/main/docs/rooting.md).
   `deploy/dot_firmware.py` only translates its arguments and runs firebreak.
-- `docs/command.md`: the Alexa command path, the credential, MapDump
+- `docs/command.md`: the Alexa command path, the credential, the headers
 - `docs/hardware.md`: anything run against the real device
 - `docs/sendspin.md`: the Sendspin client, its WebSocket, its handshake
 - `docs/usage.md`: what a user runs and sees -- the installer's output, the

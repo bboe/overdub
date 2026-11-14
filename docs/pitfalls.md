@@ -25,10 +25,6 @@ covering whatever you are about to touch.
 - The `-L` that `build.sh` hands cgo for its `libpthread` stubs must stay
   relative. An absolute path enters cgo's action hash, so two directories give
   two binaries. The `cd` at the top makes the relative path resolve.
-- `zip` records each entry's mtime in its headers. `deploy/mapdump/build.sh`
-  pins it to zip's 1980 floor and passes `-X`.
-- `TZ=UTC` must cover **both** the `touch` and the `zip`. A zip entry carries a
-  DOS stamp in local time, so a mismatch writes the offset into the headers.
 - A reproducible binary cannot say what it was built from. `git checkout`
   carries modified files across a branch change, so the build is not the
   branch, and every check downstream passes on the wrong binary.
@@ -77,14 +73,6 @@ covering whatever you are about to touch.
   /system/bin/pm`. `am` has a shebang and runs directly.
 - `/data/local/bin` must be `0700`, and `mkdir -p` keeps whatever mode an
   earlier install left. `install.py` chmods it and reads the mode back.
-- MAP's uid, 32051, cannot traverse `0700`. `app_process` does not report a
-  permission error: it prints `ClassNotFoundException: MapDump` on
-  `DexPathList[[]]` and then `Aborted`, which reads like a bad jar. So the jar
-  lives in `/data/local/map`, owned by 32051, mode `0755`, and `install.py`
-  checks that uid 32051 can read it.
-- Uid 32051 cannot write to `/data/local/tmp` (`root:shell`). The failure is
-  `EACCES` from inside dalvik, well after start. Nothing the jar does at
-  runtime touches that directory.
 - `adb push` does not carry the local mode, and `/data/local/tmp` is `0771`, so
   a `0600` key lands `0666` and any uid can reach it by name. `install.py`
   stages secrets through a `0700` directory of its own, then removes it. The

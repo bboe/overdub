@@ -88,7 +88,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 |---|---|---|---|
 | uptime | `/proc/uptime` | 67 µs | minute |
 | signal | `/proc/net/wireless` | 1.8 ms | minute |
-| registration | `dumpsys account` | 10.5 ms | minute, subscribed |
+| registration | `map.db`, read twice | 2 reads, 50 ms apart | minute, subscribed |
 | Bluetooth name | `dumpsys bluetooth_manager` | 11.5 ms | minute, subscribed |
 | button modes | held in memory | -- | minute |
 | adb mode | `/proc/net/tcp`, `iptables -C` | 2 forks if open | minute |
@@ -305,31 +305,20 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 
 ### Whether the Dot is registered
 
-- From `dumpsys account`, which lists the accounts `AccountManager` holds. A
-  registered Dot has one of Amazon's type:
-
-```
-  Accounts: 1
-    Account {name=Bryce, type=com.amazon.account}
-```
-
-- An unregistered one says `Accounts: 0`.
-- `alexa.Installed()` cannot answer this. `amazon.speech.sim` is in
-  `/system/priv-app`, so `pm path` finds it on a Dot never set up.
-- It does **not** gate the clip route. A clip played to `Playback ended: ...
-  SUCCESS` on a Dot with no account.
-- The authenticator line names the same type and is present on an unregistered
-  Dot too:
-
-```
-    ServiceInfo: AuthenticatorDescription {type=com.amazon.account}, ...
-```
-
-  So a line counts only if it opens with `Account {` and ends with the type.
-- A dump with no `Accounts:` line is no reading.
-- The fork runs only while somebody is subscribed. `PollSensors` itself is not
-  gated and must not be: it re-asserts the adb firewall rule and reads the adb
-  mode.
+- From `/data/ace/kvstorage/map.db`, Alexa's own credential store: a
+  `refresh_token` row is a registered Dot. docs/command.md has the store and
+  the reader, because the same row is the command's credential.
+- A store without the row, without the table or empty is "not registered".
+  A store that is missing, cannot be read or parsed, or did not settle in 5
+  reads, is no reading.
+- Fire OS 5 read `dumpsys account`. Fire OS 6 has no account service, and
+  the registered Dot's `pm path amazon.speech.sim` was never an answer either:
+  the package is in `/system/priv-app` on a Dot never set up.
+- It does **not** gate the clip route. On Fire OS 5 a clip played to
+  `Playback ended: ... SUCCESS` on a Dot with no account.
+- It is read only while somebody is subscribed, as the fork it replaced was.
+  `PollSensors` itself is not gated and must not be: it re-asserts the adb
+  firewall rule and reads the adb mode.
 - So the first subscriber after a restart gets no registration state at all.
   The entity shows unknown, not unavailable, until the next minute tick.
 

@@ -14,13 +14,12 @@ type bootLoop struct {
 	dir  string
 	bin  string
 	prev string
-	jar  string
 }
 
 func newBootLoop(t *testing.T) *bootLoop {
 	t.Helper()
 	dir := t.TempDir()
-	for _, sub := range []string{"bin", "map", "tmp", "stubs"} {
+	for _, sub := range []string{"bin", "tmp", "stubs"} {
 		if err := os.Mkdir(filepath.Join(dir, sub), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -29,7 +28,6 @@ func newBootLoop(t *testing.T) *bootLoop {
 		dir:  dir,
 		bin:  filepath.Join(dir, "bin", "overdub"),
 		prev: filepath.Join(dir, "bin", "overdub.prev"),
-		jar:  filepath.Join(dir, "map", "mapdump.jar"),
 	}
 }
 
@@ -77,7 +75,6 @@ func (b *bootLoop) run(t *testing.T) (runs []string, log string) {
 	script := string(raw)
 	for _, r := range []struct{ old, new string }{
 		{"/data/local/bin", b.dir + "/bin"},
-		{"/data/local/map", b.dir + "/map"},
 		{"/data/local/tmp", b.dir + "/tmp"},
 		{"sleep 5", ":"},
 		{"\nNAME=\n", "\nNAME=kitchen\n"},
@@ -109,15 +106,10 @@ func TestAnUpdateThatKeepsExitingRunsThreeTimesThenTheLoopGoesBack(t *testing.T)
 	b.place(t, b.stub(t, "new", 5, ""), b.bin)
 	b.place(t, b.stub(t, "old", 5, ""), b.prev)
 	b.write(t, b.trial(), "v2\n")
-	b.write(t, b.jar, "new jar")
-	b.write(t, b.jar+".prev", "old jar")
 
 	runs, log := b.run(t)
 	checkRuns(t, runs, "new", "new", "new", "old", "old")
-	if data, _ := os.ReadFile(b.jar); string(data) != "old jar" {
-		t.Errorf("the jar holds %q after going back", data)
-	}
-	for _, path := range []string{b.trial(), b.prev, b.jar + ".prev"} {
+	for _, path := range []string{b.trial(), b.prev} {
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("%s outlived the rollback", filepath.Base(path))
 		}
@@ -161,21 +153,14 @@ func TestAMissingPreviousBinaryIsLoggedAndTheUpdateKept(t *testing.T) {
 	b := newBootLoop(t)
 	b.place(t, b.stub(t, "new", 5, ""), b.bin)
 	b.write(t, b.trial(), "v2\n")
-	b.write(t, b.jar, "new jar")
-	b.write(t, b.jar+".prev", "old jar")
 
 	runs, log := b.run(t)
 	checkRuns(t, runs, "new", "new", "new", "new", "new")
 	if !strings.Contains(log, "the update to v2 exited 3 times, and") || !strings.Contains(log, "is missing; keeping it") {
 		t.Errorf("the log does not say the previous binary is missing:\n%s", log)
 	}
-	if data, _ := os.ReadFile(b.jar); string(data) != "new jar" {
-		t.Errorf("the jar holds %q; the update was kept, so its jar should be too", data)
-	}
-	for _, path := range []string{b.jar + ".prev", b.failed()} {
-		if _, err := os.Stat(path); err == nil {
-			t.Errorf("%s is there after the loop kept the update", filepath.Base(path))
-		}
+	if _, err := os.Stat(b.failed()); err == nil {
+		t.Error("the failed-update record is there after the loop kept the update")
 	}
 }
 
@@ -194,11 +179,10 @@ func newTrial(t *testing.T, marker string) trial {
 	tr := trial{
 		marker: filepath.Join(dir, "trial"),
 		prev:   filepath.Join(dir, "overdub.prev"),
-		jar:    filepath.Join(dir, "mapdump.jar"),
 		failed: filepath.Join(dir, "failed"),
 	}
 	for path, text := range map[string]string{
-		tr.marker: marker, tr.prev: "old binary", tr.jar: "new jar", tr.jar + ".prev": "old jar", tr.failed: "v2\n",
+		tr.marker: marker, tr.prev: "old binary", tr.failed: "v2\n",
 	} {
 		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
@@ -221,13 +205,10 @@ func served() <-chan struct{} {
 func TestASettledTrialRemovesTheMarkerAndThePreviousFiles(t *testing.T) {
 	tr := newTrial(t, "v2\n")
 	tr.settle("v2", served(), time.Millisecond)
-	for _, path := range []string{tr.marker, tr.prev, tr.jar + ".prev", tr.failed} {
+	for _, path := range []string{tr.marker, tr.prev, tr.failed} {
 		if exists(path) {
 			t.Errorf("%s outlived a trial that passed", filepath.Base(path))
 		}
-	}
-	if data, _ := os.ReadFile(tr.jar); string(data) != "new jar" {
-		t.Errorf("the jar holds %q after a trial that passed", data)
 	}
 }
 
@@ -268,7 +249,7 @@ func TestATrialLeavesANewerMarkerAlone(t *testing.T) {
 	}
 }
 
-func TestABinaryUnderAnotherVersionsTrialGoesBackToItsJar(t *testing.T) {
+func TestABinaryUnderAnotherVersionsTrialForgetsIt(t *testing.T) {
 	tr := newTrial(t, "v3\n")
 	done := make(chan struct{})
 	go func() {
@@ -280,15 +261,12 @@ func TestABinaryUnderAnotherVersionsTrialGoesBackToItsJar(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a binary under another version's trial waited for that trial")
 	}
-	if data, _ := os.ReadFile(tr.jar); string(data) != "old jar" {
-		t.Errorf("the jar holds %q, want the one v2 came with", data)
-	}
-	for _, path := range []string{tr.marker, tr.prev, tr.jar + ".prev"} {
+	for _, path := range []string{tr.marker, tr.prev} {
 		if exists(path) {
 			t.Errorf("%s outlived an install that stopped partway", filepath.Base(path))
 		}
 	}
 	if !exists(tr.failed) {
-		t.Error("going back to the jar removed the failed-update record")
+		t.Error("forgetting the stale trial removed the failed-update record")
 	}
 }

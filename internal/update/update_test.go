@@ -28,7 +28,6 @@ const bootScript = "#!/system/bin/sh\nBIN=/data/local/bin/overdub\n\nNAME=\n\nec
 type fakeRelease struct {
 	version string
 	binary  []byte
-	jar     []byte
 	boot    string
 	sumsFor string
 	signer  ed25519.PrivateKey
@@ -53,7 +52,6 @@ func (f fakeRelease) tarball(t *testing.T) []byte {
 	}{
 		{dir + "README.md", []byte("readme")},
 		{dir + "build/overdub", f.binary},
-		{dir + "deploy/mapdump/mapdump.jar", f.jar},
 		{dir + "deploy/overdub.sh", []byte(f.boot)},
 	} {
 		if f.symlink && file.name == dir+"build/overdub" {
@@ -132,15 +130,12 @@ func newDot(t *testing.T, boot string) *dot {
 			Prev:   filepath.Join(dir, "overdub.prev"),
 			Trial:  filepath.Join(dir, ".overdub-trial"),
 			Failed: filepath.Join(dir, ".overdub-failed"),
-			Jar:    filepath.Join(dir, "mapdump.jar"),
 			Boot:   filepath.Join(dir, "overdub.sh"),
-
-			JarOwner: os.Getuid(),
 		},
 		restarted: make(chan struct{}, 1),
 	}
 	for path, data := range map[string]string{
-		d.paths.Binary: "old binary", d.paths.Jar: "old jar", d.paths.Boot: boot,
+		d.paths.Binary: "old binary", d.paths.Boot: boot,
 	} {
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 			t.Fatal(err)
@@ -202,9 +197,9 @@ func keys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func installedBoot() string { return strings.Replace(bootScript, "NAME=\n", "NAME=kitchen\n", 1) }
 
-func TestAnUpdateSwapsTheBinaryAndJarAndLeavesATrial(t *testing.T) {
+func TestAnUpdateSwapsTheBinaryAndLeavesATrial(t *testing.T) {
 	pub, priv := keys(t)
-	srv := fakeRelease{version: "v0.3.0", binary: []byte("new binary"), jar: []byte("new jar"),
+	srv := fakeRelease{version: "v0.3.0", binary: []byte("new binary"),
 		boot: bootScript, signer: priv}.serve(t)
 	d := newDot(t, installedBoot())
 	os.WriteFile(d.paths.Prev, []byte("stale"), 0o755)
@@ -229,8 +224,6 @@ func TestAnUpdateSwapsTheBinaryAndJarAndLeavesATrial(t *testing.T) {
 	for path, want := range map[string]string{
 		d.paths.Binary:          "new binary",
 		d.paths.Prev:            "old binary",
-		d.paths.Jar:             "new jar",
-		d.paths.Jar + ".prev":   "old jar",
 		d.paths.Trial:           "v0.3.0\n",
 		d.paths.Binary + ".new": "<open " + d.paths.Binary + ".new: no such file or directory>",
 	} {
@@ -238,36 +231,18 @@ func TestAnUpdateSwapsTheBinaryAndJarAndLeavesATrial(t *testing.T) {
 			t.Errorf("%s holds %q, want %q", filepath.Base(path), got, want)
 		}
 	}
-	for path, want := range map[string]os.FileMode{d.paths.Binary: 0o755, d.paths.Jar: 0o644} {
-		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
-			t.Errorf("%s's mode is %v (%v), want %v", filepath.Base(path), info.Mode(), err, want)
-		}
+	if info, err := os.Stat(d.paths.Binary); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("the binary's mode is %v (%v), want 0755", info.Mode(), err)
 	}
 	if s := d.last(); !s.InProgress || !s.HasProgress || s.Progress != 100 {
 		t.Errorf("the last state before the restart was %+v", s)
 	}
 }
 
-func TestAnUnchangedJarIsLeftAloneAndAStalePrevIsRemoved(t *testing.T) {
-	pub, priv := keys(t)
-	srv := fakeRelease{version: "v0.3.0", binary: []byte("new binary"), jar: []byte("old jar"),
-		boot: bootScript, signer: priv}.serve(t)
-	d := newDot(t, installedBoot())
-	os.WriteFile(d.paths.Jar+".prev", []byte("ancient jar"), 0o644)
-	u := d.updater(srv, pub)
-	u.check()
-	if err := u.install(); err != nil {
-		t.Fatal(err)
-	}
-	if got := d.read(t, d.paths.Jar+".prev"); !strings.HasPrefix(got, "<") {
-		t.Errorf("mapdump.jar.prev holds %q; the boot script would put it back on a rollback", got)
-	}
-}
-
 func TestAnUpdateIsRefused(t *testing.T) {
 	pub, priv := keys(t)
 	_, other := keys(t)
-	good := fakeRelease{version: "v0.3.0", binary: []byte("new binary"), jar: []byte("new jar"),
+	good := fakeRelease{version: "v0.3.0", binary: []byte("new binary"),
 		boot: bootScript, signer: priv}
 	for _, c := range []struct {
 		name     string
@@ -305,12 +280,8 @@ func TestAnUpdateIsRefused(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("install gave %v, want an error saying %q", err, c.want)
 			}
-			for path, want := range map[string]string{
-				d.paths.Binary: "old binary", d.paths.Jar: "old jar",
-			} {
-				if got := d.read(t, path); got != want {
-					t.Errorf("%s holds %q after a refused update", filepath.Base(path), got)
-				}
+			if got := d.read(t, d.paths.Binary); got != "old binary" {
+				t.Errorf("the binary holds %q after a refused update", got)
 			}
 			for _, path := range []string{d.paths.Trial, d.paths.Prev, d.paths.Binary + ".new"} {
 				if _, err := os.Stat(path); err == nil {
@@ -329,7 +300,7 @@ func TestAnUpdateIsRefused(t *testing.T) {
 func TestAFailedInstallIsShownInTheNotesAndClearsProgress(t *testing.T) {
 	pub, _ := keys(t)
 	_, other := keys(t)
-	srv := fakeRelease{version: "v0.3.0", binary: []byte("b"), jar: []byte("j"), boot: bootScript,
+	srv := fakeRelease{version: "v0.3.0", binary: []byte("b"), boot: bootScript,
 		signer: other}.serve(t)
 	d := newDot(t, installedBoot())
 	u := d.updater(srv, pub)
@@ -447,7 +418,7 @@ func TestABinaryTheLoopWentBackToNamesTheFailedReleaseAtOnce(t *testing.T) {
 
 func TestAReleaseThatFailedIsNamedInTheNotes(t *testing.T) {
 	pub, priv := keys(t)
-	srv := fakeRelease{version: "v0.3.0", binary: []byte("b"), jar: []byte("j"), boot: bootScript,
+	srv := fakeRelease{version: "v0.3.0", binary: []byte("b"), boot: bootScript,
 		signer: priv}.serve(t)
 	for failed, named := range map[string]bool{"v0.3.0\n": true, "v0.2.9\n": false, "": false} {
 		d := newDot(t, installedBoot())
@@ -467,7 +438,7 @@ func TestAReleaseThatFailedIsNamedInTheNotes(t *testing.T) {
 
 func TestAnInstallWaitsForTheRunningTrial(t *testing.T) {
 	pub, priv := keys(t)
-	srv := fakeRelease{version: "v0.3.0", binary: []byte("new binary"), jar: []byte("new jar"),
+	srv := fakeRelease{version: "v0.3.0", binary: []byte("new binary"),
 		boot: bootScript, signer: priv}.serve(t)
 	d := newDot(t, installedBoot())
 	os.WriteFile(d.paths.Trial, []byte("v0.2.0\n"), 0o600)
