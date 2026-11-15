@@ -54,11 +54,6 @@ donut, the Echo Dot (3rd Generation), `ro.product.model` `AEODN`:
 - The clone advertises every keycode the action node declares, because the input core
   drops events for a keycode the device has not claimed. It declares `EV_KEY`
   alone, so other event types are dropped rather than re-emitted.
-- `system_server`'s `EventHub` reads `event1`, and
-  `/system/usr/keylayout/mtk-kpd.kl` maps 138 to `BUTTON_MODE` and 113 to
-  `MUTE`. An AccessibilityService with `FLAG_REQUEST_FILTER_KEY_EVENTS` could
-  consume `KEYCODE_BUTTON_MODE` with no root. The evdev route needs no APK and
-  no accessibility grant.
 
 ## The privacy driver
 
@@ -91,43 +86,30 @@ no firewall rule. Without `noise_psk` the client gets
 ```sh
 adb forward tcp:16053 tcp:6053
 pip install aioesphomeapi
-adb shell 'su -c "cat /data/local/bin/.overdub-noise-key"'   # the key it needs
+adb shell cat /data/local/bin/.overdub-noise-key   # the key it needs
 # APIClient("127.0.0.1", 16053, None, noise_psk=<that key>)
 ```
 
-A button press, and the volume as `internal/device` reads it:
+A button press on biscuit or radar, whose action key is on `event1`; donut's
+is on `event3`. Then the volume and mute as `internal/device` reads them:
 
 ```sh
-adb shell 'su -c "sendevent /dev/input/event1 1 138 1;
+adb shell 'sendevent /dev/input/event1 1 138 1;
   sendevent /dev/input/event1 0 0 0;
   sendevent /dev/input/event1 1 138 0;
-  sendevent /dev/input/event1 0 0 0"'
-adb shell 'su -c "dumpsys audio"' |
-  sed -n '/^- STREAM_MUSIC:/,/^- STREAM_ALARM:/p'
-adb shell 'su -c "input keyevent 25"'    # volume down one step; 24 is up
+  sendevent /dev/input/event1 0 0 0'
+adb shell lipc-get-prop -i -q com.doppler.audiod MainVolume
+adb shell lipc-get-prop -i -q com.doppler.audiod Mute
 ```
 
-## The stream mute
-
-- `Mute count` moves only when something calls `setStreamMute`. Nothing on the
-  device does that unprompted: "Alexa, mute" sets the speaker level to 0 and
-  leaves every count at 0, `input keyevent 164` does nothing, and stepping below
-  zero clamps. This fits API 22, which has no `ADJUST_TOGGLE_MUTE`.
-- `mute affected streams` includes `STREAM_MUSIC`, so the call takes.
-- The mute belongs to the stream, not a route: one `Mute count` per stream, one
-  index per device. Muting leaves every index in place (`speaker: 7,
-  headset: 13, headphone: 21` under `Mute count: 1`), and the mute holds across
-  the jack. Routes keep separate levels, so unmuting returns to the live one.
-- A volume key pressed while the stream is muted does not lift the mute and
-  destroys the level. Muted at step 5, one press leaves `Mute count` at 1 and
-  the stored level at **1**: the muted index reads 0 and the press moves up from
-  there. This is why the daemon grabs `event2` while it holds a mute;
-  docs/api.md has the rest.
-- A volume key pressed while *Alexa*-muted lifts that mute and restores a level,
-  so a probe that presses one changes state. That is Alexa's level-0 mute, not
-  the stream mute.
+- `input keyevent` is there but cannot run: it is a script that starts
+  `app_process`, which Fire OS 6 lacks.
 
 ## What a held key is worth
+
+Measured on Fire OS 5, where Alexa's key handling was an APK. Fire OS 6's
+`acebuttond` holds it now, and its holds are not measured; treat these as the
+hazard until they are.
 
 Alexa's key handling is in
 `/system/priv-app/SpeechInteractionManager/SpeechInteractionManager.apk`. Two
@@ -154,72 +136,32 @@ UP, SHORT, LONG, VERY_LONG, SUPER_LONG, EXTREME_LONG, REPEAT`:
   them there, not from wall-clock time around a test.
 - A stranded action button wipes the Dot 20 seconds later.
 - A stranded mute is half the advanced-reset combo from 8 seconds. The volume
-  half needs a hand while the Dot is unmuted; while muted the daemon holds
-  `event2`, so the combo cannot complete.
+  half needs a hand while the Dot is unmuted; while muted the daemon holds the
+  volume keys, so the combo cannot complete. "How the device is wired" has the
+  node.
 - Mute alone is safe to hold. `MuteButtonHandler.onButtonPress` has no reset
   path, and its one long-hold branch needs
   `hasSystemFeature("com.amazon.edge.enable_toggle_offline")`, which this Dot
   lacks.
-- A key left down lasts as long as the daemon. `dumpsys input` reports
-  `KeyDowns` per device. Killing the daemon removes the input device, and the
-  clone the supervisor builds starts with no key down. `sendevent ... 1 113 0`
-  clears it at once.
-- `pkill -f` does not work on this toolbox and reports nothing when it fails.
-  Take the pid from `ps` and check that it changed.
-
-## Binder calls worth knowing
-
-The microphone mute is AudioFlinger's `mMicMute`, and no dumpsys prints it. The
-read is `GET_MIC_MUTE`, transaction 18 on `IAudioFlinger`; the reply is one
-int32.
-
-```sh
-# 00000000 live, 00000001 muted
-adb shell 'su -c "service call media.audio_flinger 18"'
-# music level on the live route
-adb shell 'su -c "service call audio 13 i32 3"'
-# its maximum, 30 on biscuit
-adb shell 'su -c "service call audio 15 i32 3"'
-# set it to 9
-adb shell 'su -c "service call audio 4 i32 3 i32 9 i32 0 s16 overdub"'
-# master mute, 00000001 is silence
-adb shell 'su -c "service call media.audio_flinger 11"'
-# lift it
-adb shell 'su -c "service call media.audio_flinger 9 i32 0"'
-```
-
-- A call costs about 12 ms: 500 calls take 6 seconds.
-- The microphone mute fires on the key-**down**. A lone `1` mutes, a lone `0`
-  does nothing, and a second `1` while held does nothing.
-- `dumpsys audio`'s `Mute count` is not this. It is the per-stream output mute,
-  0 whatever the microphone does.
-- A silent Dot whose every reading looks right is the master mute. No dumpsys
-  on this build prints it: audio reaches the HAL, DL1 prepares and starts, I2S
-  enables, the amp pops, and nothing is heard. Counting from `GET_MIC_MUTE` at
-  18 gives `SET_MASTER_MUTE` 9, `MASTER_VOLUME` 10 and `MASTER_MUTE` 11. Read it
-  first when the Dot goes quiet.
-- **Do not find a transaction by calling it.** A blind setter call can zero the
-  music volume, mute streams or set the master mute, and none of it announces
-  itself. Probe the getters, which answer a level or maximum you already know,
-  and derive the setters from the order.
-- A mute taken over `service call` is permanent. AudioService releases a stream
-  mute or solo when the caller's binder dies, and `service call` passes none.
-  `setStreamSolo(3, true)` mutes `RING`, `ALARM`, `NOTIFICATION` and `TTS`
-  across a daemon restart; only `setStreamSolo(3, false)` clears them.
-- Injecting keycode 113 is a real microphone mute, so it stays until pressed
-  again.
+- A key left down lasts as long as the daemon. Killing the daemon removes the
+  input device, and the clone the supervisor builds starts with no key down.
+  `sendevent ... 1 113 0` clears it at once.
+- `pkill -f` works on Fire OS 6's toybox, and matches the `adb shell` command
+  line that runs it: a pattern spelled out in that command kills its own
+  shell. Fire OS 5's toolbox `pkill -f` did nothing and said nothing. Either
+  way, take the pid from `ps` and check that it changed.
 
 ## What the device says about itself
 
 ```sh
 # daemon log, truncated at boot and every 20 restarts
-adb shell 'su -c "cat /data/local/tmp/overdub.log"'
+adb shell cat /data/local/tmp/overdub.log
 # Alexa's audio focus, live: logd prunes her lines before a dump reads them
 adb shell 'logcat -v brief -s PuffinApp | grep FocusManager'
 # the rule, and its packet count
-adb shell 'su -c "iptables -L INPUT -n -v | grep 6053"'
+adb shell 'iptables -L INPUT -n -v | grep 6053'
 # names, handlers, key bitmaps
-adb shell su -c 'cat /proc/bus/input/devices'
+adb shell cat /proc/bus/input/devices
 # events, without grabbing
-adb shell su -c getevent
+adb shell getevent
 ```

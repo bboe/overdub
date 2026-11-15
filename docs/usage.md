@@ -563,9 +563,6 @@ adb shell 'iptables -L INPUT -n -v | grep 6053'  # packet counter
   `adb shell 'rm -f /data/local/bin/.overdub-noise-key'`
 - **Nothing starts; the log says `NAME is unset`**: the boot script was
   installed by hand. Rerun `deploy/install.py <name>`.
-- **Mute stopped working** on Fire OS 5: the clone's name. Android picks a
-  keylayout by device name, so it must match the keypad's, `mtk-kpd`. The
-  daemon logs the name it cloned.
 - **The mute button offers no intercept**: an Echo Dot (3rd Generation). Its
   mute is the privacy switch, on a node the daemon reads without holding.
 - **Every keycode looks wrong**: the build. `GOARCH=arm` is required.

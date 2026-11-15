@@ -7,26 +7,15 @@
 - On biscuit `event1` carries the action button *and* mute, so an exclusive
   `EVIOCGRAB` takes both. docs/hardware.md has donut's layout, where they are
   apart. A `uinput` clone, named after the node it stands in for (`mtk-kpd`
-  here), re-emits every key the daemon does not consume, and Android applies the same keylayout to it. `EventHub`
-  finds the clone by inotify.
+  here), re-emits every key the daemon does not consume. Fire OS 6's key
+  readers are restarted onto it; "The readers on Fire OS 6" below says why.
 - Read the key bitmap with `EVIOCGBIT`, never from sysfs. The sysfs word size
   differs from `/proc/bus/input/devices` here, and a wrong guess silently breaks
   mute.
-- The clone copies the node's `struct input_id` from `EVIOCGID`. Android picks a
-  keylayout by `Vendor_XXXX_Product_XXXX_Version_XXXX.kl`, then
-  `Vendor_XXXX_Product_XXXX.kl`, then the device name, then `Generic.kl`.
-  Biscuit has neither vendor file, so the name `mtk-kpd` selects `mtk-kpd.kl`.
-  The copied ids keep the clone matching on a Dot that ships a vendor file.
-- The bus decides `IsExternal`. With no `device.internal` in the `.idc` (true
-  for both nodes here), `EventHub::isExternalDeviceLocked` calls a device
-  external when its bus is `BUS_USB` or `BUS_BLUETOOTH`. Biscuit's keypad is
-  `BUS_HOST`.
-- The clone's `InputDeviceIdentifier` is byte-identical to the keypad's
-  (`bus=0x0019, vendor=0x2454, product=0x6500, version=0x0010`). Android still
-  gives them different descriptors, so per-device settings do not collide.
-- No test proves the id reaching `uinput` is the one read from the node. That
-  needs `/dev/uinput` and root. The daemon logs the id it cloned; compare it
-  with `dumpsys input`.
+- The clone copies the node's name and its `struct input_id`, from
+  `EVIOCGID`, so it presents as the node to whatever reads it. Fire OS 5's
+  Android chose a keylayout by them. Which of them `acebuttond` checks is not
+  measured. The daemon logs the id it cloned.
 - The button is taken before the network is waited for, and the API waits for
   `wlan0` in its own goroutine. Mute passes through the read loop, so the read
   loop cannot wait either.
@@ -66,12 +55,13 @@
   service's binary must hold the clone's node among its descriptors within 30
   seconds. 5 was too few at boot: on a cold boot of overdub-test and biscuit,
   `ace_usagestat_protod` opened the clone, but past 5 seconds. With the longer
-  wait, a boot read back in 10.7 and 8.2 seconds; after boot, about 1. Each reader is
-  read back on its own, and one that fails does not stop the other.
+  wait, a boot read back in 10.7 and 8.2 seconds; after boot, about 1. Each
+  reader is read back on its own, and one that fails does not stop the other.
 - At boot `acebuttond` can pick up the clone itself: on 3 of 4 cold boots it
-  held `event3` already, so it was left alone. A reader that already holds it is left alone, and only a service
-  whose `init.svc.<name>` reads `running` is touched: empty means the Dot
-  does not have it, and `stopped` means somebody stopped it.
+  held `event3` already, so it was left alone. A reader that already holds it
+  is left alone, and only a service whose `init.svc.<name>` reads `running` is
+  touched: empty means the Dot does not have it, and `stopped` means somebody
+  stopped it.
 - None of this holds up the daemon. It runs beside the API, and a failure is a
   logged warning: the button works without it, and only keys passed on are
   lost.
@@ -84,11 +74,11 @@
 
 ### What is fatal, and why
 
-- A failed grab. The real node still delivers to `EventHub`, so the clone would
-  land every key twice and mute would toggle on and straight off. Exiting gives
-  the button back to Alexa.
+- A failed grab. The real node still delivers to the key readers, so every key
+  passed on would land twice, and a key the daemon keeps would reach Alexa
+  anyway. Exiting gives the button back to Alexa.
 - A failed re-emission. A write fails for the clone, not for one key, so the
-  daemon would hold the grab with mute going nowhere.
+  daemon would hold the grab with every key it passes on going nowhere.
 - A key left down on the clone is a reset gesture held. Alexa resets to factory
   on the action button alone at 20 seconds, and does an advanced reset on mute
   and volume down at 8 seconds (docs/hardware.md). Exiting destroys the clone,
@@ -108,9 +98,9 @@ that reading almost always wants to change it.
 - The action button ships in **intercept**, mute in **monitor**. Intercepting
   mute by default would leave the mute button unable to mute. The zero value is
   intercept, because a key nobody configured is one this daemon keeps.
-- The three modes are two independent choices: whether Android sees the key,
-  and whether Home Assistant hears of it. Measured with 138 injected into
-  `event1`, counted against `uber` in logcat:
+- The three modes are two independent choices: whether Alexa sees the key,
+  and whether Home Assistant hears of it. Measured on Fire OS 5 with 138
+  injected into `event1`, counted against `uber` in logcat:
 
 | mode | daemon reports | Alexa sees the key |
 |---|---|---|
@@ -127,11 +117,9 @@ that reading almost always wants to change it.
 
 - The grab. Monitor and pass through re-emit 138 through the clone like every
   other key. Releasing the grab beside a live clone lands every key twice.
-- Android's input layer treats both devices the same: same keylayout, same
-  `Sources: 0x00000501`, same `KeyboardType`, same `IsExternal`. `mtk-kpd.kl`
-  maps `key 138 BUTTON_MODE`.
-- Alexa's app layer does not care which device sent the key. Measured in pass
-  through with 138 injected into `event1` (`EVIOCGRAB` gates reads, not writes):
+- On Fire OS 5, Alexa's app layer did not care which device sent the key.
+  Measured in pass through with 138 injected into `event1` (`EVIOCGRAB` gates
+  reads, not writes):
 
 ```
 HeadlessKeyPolicyManager: KEYCODE_BUTTON_MODE, scanCode=138, deviceId=24, source=0x501
@@ -144,26 +132,26 @@ SPCH-SIM_SimStateMachine:    ReadyState -> ListenState
 - `deviceId=24` is the clone. That measures press-to-talk only. Stopping a
   timer and setup mode use the same `uber` key and `KeyListener`, and were not
   measured separately.
-- Releasing the grab to pass a key through would give two paths to Android. A
-  key held at the release keeps its native key-down and never gets an up:
+- Releasing the grab to pass a key through would give the readers two paths.
+  A key held at the release keeps its native key-down and never gets an up:
   `EVIOCGRAB` synthesizes no release, and an up through the clone cannot clear
-  it, because `dumpsys input` tracks `KeyDowns` per device. `BUTTON_MODE` held
-  past 600 ms is setup mode.
+  it, because a reader tracks keys per device. On Fire OS 5, `BUTTON_MODE`
+  held past 600 ms was setup mode.
 
 ### Latching
 
 - A press latches its mode at the key-down until the key-up, because a toggle
   can arrive between the two. Consuming the down and passing the up is
-  harmless. Passing the down and consuming the up leaves Android holding
-  `BUTTON_MODE` for ever.
-- A key held across daemon start has no latch: Android took its key-down from
-  the real node before the grab. Nothing is reported. The release reads the
+  harmless. Passing the down and consuming the up leaves the readers holding
+  the key for ever.
+- A key held across daemon start has no latch: the readers took its key-down
+  from the real node before the grab. Nothing is reported. The release reads the
   current mode, and is passed on unless that mode is intercept. It cannot clear
   the native key-down, but it can end the app layer's state machine, which
   ignores the device.
-- Autorepeats of an unlatched key are dropped in every mode. `EventHub` reads
-  any non-zero value as a down, so a stale repeat on the clone is a fresh
-  key-down.
+- Autorepeats of an unlatched key are dropped in every mode. Fire OS 5's
+  `EventHub` read any non-zero value as a down, so a stale repeat on the clone
+  was a fresh key-down. `acebuttond` is not measured, so the rule stays.
 - `Interceptor` owns the mode and the server reads it. The read loop checks it
   on every event and cannot take the server lock, so one copy lives with the
   button.
@@ -210,8 +198,9 @@ SPCH-SIM_SimStateMachine:    ReadyState -> ListenState
   and reports the count, so a single press waits the full gap. The chime does
   not wait: it plays at the key-down, 33 ms in.
 - The gap must stay under the hold threshold. `main_test.go` asserts this.
-- A hold is reported while the key is still down. The 600 ms threshold is
-  Alexa's: `BUTTON_MODE` held past it is setup mode.
+- A hold is reported while the key is still down. The 600 ms threshold was
+  Alexa's on Fire OS 5: `BUTTON_MODE` held past it was setup mode.
+  `acebuttond`'s is not measured.
 - `AfterFunc` promises only "not before", so on a busy core the hold timer can
   lose to the release. The release then decides by the duration it carries,
   and fires `long_press_start` and `long_press_end` together. The alternative

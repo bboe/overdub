@@ -2,12 +2,12 @@
 
 ## The target
 
-- overdub is moving from Fire OS 5 to rooted Fire OS 6, one subsystem at a
-  time. Fire OS 6 has no `app_process`, AudioFlinger or OpenSL ES. Sound
-  already goes through Fire OS 6's mixer, so a build from `main` is silent on
-  Fire OS 5.
-- `GOARCH=arm` is required. FireOS 5 on biscuit runs a 32-bit ARM userspace on
-  an arm64 kernel.
+- overdub runs on rooted Fire OS 6. It has no `app_process`, AudioFlinger or
+  OpenSL ES, and sound goes through Amazon's mixer. A Fire OS 5 Dot needs a
+  release from before the move.
+- `GOARCH=arm` is required. Every model runs a 32-bit ARM userspace,
+  `armeabi-v7a`: biscuit and radar on an `armv7l` kernel, donut on an arm64
+  one (`armv8l`).
 - `struct input_event` is 16 bytes there and 24 bytes in a 64-bit userspace. A
   wrong-arch build would desynchronise every evdev read, not fail.
 - `internal/evdev` asserts an 8-byte `syscall.Timeval` at compile time, so a
