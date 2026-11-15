@@ -59,6 +59,11 @@ keep Alexa and add a Home Assistant button and some entities.
 - An Echo Dot (2nd Generation), model **RS03QR** (printed on the underside),
   codename biscuit, on Fire OS 6 8349 with firebreak's root adb. Everything
   here was measured on that model.
+- An Echo (2nd Generation), codename radar, on the same build, runs it as
+  biscuit does.
+- An Echo Dot (3rd Generation), codename donut, on the same build, runs it
+  too. Its mute button is the privacy switch: Home Assistant sees its presses,
+  but cannot hold it.
 - overdub is moving from Fire OS 5 to Fire OS 6. This branch installs on Fire
   OS 6 only; a release before the move runs on Fire OS 5 with Magisk 17.3.
 - `adb`, from Android

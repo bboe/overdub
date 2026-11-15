@@ -506,3 +506,30 @@ func TestOneButtonsSelectDoesNotMoveAnother(t *testing.T) {
 		t.Errorf("the mute button was moved to %q, want pass through", moved["mute_button"])
 	}
 }
+
+func TestAButtonOfferedFewerModesRefusesTheOthers(t *testing.T) {
+	var out lockedBuffer
+	defer restoreLog(t, &out)()
+
+	s := testServer(t, testPSK(t))
+	held := "monitor"
+	s.UseButton("mute_button", func() string { return held }, func(choice string) { held = choice })
+	s.OfferModes("mute_button", []string{"monitor", "pass through"})
+	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
+	key := s.button("mute_button").keyMode
+	if err := s.handle(c, msgSelectCommand, selectCommand(key, "intercept")); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if held != "monitor" {
+		t.Errorf("a watched button took %q: nothing grabs its node, so it cannot hold a key", held)
+	}
+	if err := s.handle(c, msgSelectCommand, selectCommand(key, "pass through")); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if held != "pass through" {
+		t.Errorf("an offered mode was refused; the button holds %q", held)
+	}
+	if got := s.button("action_button").options; len(got) != 3 {
+		t.Errorf("narrowing the mute button left the action button %v", got)
+	}
+}

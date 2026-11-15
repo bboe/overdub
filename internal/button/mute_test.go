@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -83,5 +84,99 @@ func TestANodeThatIsNotTheVolumeKeysIsRefused(t *testing.T) {
 	if err := volumeKeysOn(node); err == nil {
 		t.Error("a node that declares no volume keycodes was accepted; grabbing one" +
 			" takes the wrong device exclusively and leaves a mute no press can lift")
+	}
+}
+
+func carrying(keys ...uint16) *Interceptor {
+	i := watching(testKey, ModeIntercept)
+	i.clone, i.keys = &evdev.Uinput{}, append([]uint16{testKey}, keys...)
+	return i
+}
+
+func TestVolumeKeysOnTheActionNodeAreHeldInsideItsGrab(t *testing.T) {
+	i := carrying(KeyVolumeUp, KeyVolumeDown)
+	h, err := i.HoldVolume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []emitted
+	err = i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeUp, Value: 1},
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeUp, Value: 2},
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeUp, Value: 0},
+	)), func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}, noDown, func(uint16, Mode, time.Duration) {})
+	if !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("emitted %v while the keys were held: a press would move a level nobody"+
+			" can hear", got)
+	}
+	if err := h.Wait(); err != nil {
+		t.Errorf("the press was not reported to the guard: %v", err)
+	}
+}
+
+func TestAPressHeldAcrossTheReleaseKeepsItsUp(t *testing.T) {
+	i := carrying(KeyVolumeUp, KeyVolumeDown)
+	h, err := i.HoldVolume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []emitted
+	emit := func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}
+	i.route(bytes.NewReader(events(evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 1})),
+		emit, noDown, func(uint16, Mode, time.Duration) {})
+	h.Close()
+	i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 0},
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 1},
+	)), emit, noDown, func(uint16, Mode, time.Duration) {})
+	if want := []emitted{{KeyVolumeDown, 1}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("emitted %v, want %v: the up of a swallowed down is swallowed too, and the"+
+			" next press passes", got, want)
+	}
+	if err := h.Wait(); !errors.Is(err, ErrReleased) && err != nil {
+		t.Errorf("a released guard waited with %v", err)
+	}
+}
+
+func TestOnlyANodeWithBothVolumeKeysCanHoldThem(t *testing.T) {
+	if _, err := carrying(KeyVolumeUp).HoldVolume(); err == nil {
+		t.Error("a node without volume down held the volume keys")
+	}
+	w := watching(testKey, ModeMonitor)
+	w.keys = []uint16{KeyVolumeUp, KeyVolumeDown}
+	if _, err := w.HoldVolume(); err == nil {
+		t.Error("a watched node held the volume keys; nothing grabs it, so they still reach Alexa")
+	}
+}
+
+func TestAKeyHeldWhenTheMuteStartsRepeatsNowhere(t *testing.T) {
+	i := carrying(KeyVolumeUp, KeyVolumeDown)
+	var got []emitted
+	emit := func(code uint16, value int32) error {
+		got = append(got, emitted{code, value})
+		return nil
+	}
+	i.route(bytes.NewReader(events(evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 1})),
+		emit, noDown, func(uint16, Mode, time.Duration) {})
+	if _, err := i.HoldVolume(); err != nil {
+		t.Fatal(err)
+	}
+	i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 2},
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 2},
+		evdev.Event{Type: evdev.EvKey, Code: KeyVolumeDown, Value: 0},
+	)), emit, noDown, func(uint16, Mode, time.Duration) {})
+	if want := []emitted{{KeyVolumeDown, 1}, {KeyVolumeDown, 0}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("emitted %v, want %v: a repeat moves a level nobody can hear, and the"+
+			" release of a down the clone saw must reach it", got, want)
 	}
 }

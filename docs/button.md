@@ -4,9 +4,10 @@
 
 `internal/button` over `internal/evdev`.
 
-- `event1` carries the action button *and* mute, so an exclusive `EVIOCGRAB`
-  takes both. A `uinput` clone named `mtk-kpd` re-emits every key the daemon
-  does not consume, and Android applies the same keylayout to it. `EventHub`
+- On biscuit `event1` carries the action button *and* mute, so an exclusive
+  `EVIOCGRAB` takes both. docs/hardware.md has donut's layout, where they are
+  apart. A `uinput` clone, named after the node it stands in for (`mtk-kpd`
+  here), re-emits every key the daemon does not consume, and Android applies the same keylayout to it. `EventHub`
   finds the clone by inotify.
 - Read the key bitmap with `EVIOCGBIT`, never from sysfs. The sysfs word size
   differs from `/proc/bus/input/devices` here, and a wrong guess silently breaks

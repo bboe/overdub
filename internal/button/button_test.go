@@ -204,7 +204,7 @@ func TestOpenClosesTheNodeItCannotUse(t *testing.T) {
 	}
 	fails := func() {
 		t.Helper()
-		if _, err := Open(p, "mtk-kpd", time.Second, map[uint16]Mode{138: ModeIntercept}); err == nil {
+		if _, err := Open(p, time.Second, map[uint16]Mode{138: ModeIntercept}); err == nil {
 			t.Fatal("Open accepted a regular file as an input node")
 		}
 	}
@@ -224,7 +224,7 @@ func TestOpenGivesUpAfterTheWaitItIsGiven(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "never")
 	done := make(chan error, 1)
 	go func() {
-		_, err := Open(p, "mtk-kpd", 200*time.Millisecond, map[uint16]Mode{testKey: ModeIntercept})
+		_, err := Open(p, 200*time.Millisecond, map[uint16]Mode{testKey: ModeIntercept})
 		done <- err
 	}()
 	select {
@@ -629,5 +629,57 @@ func TestTheCloneIsReadyOnlyWithTheKeypadsOwnerAndMode(t *testing.T) {
 	}()
 	if err := waitForAccess(path, like, 2*time.Second); err != nil {
 		t.Errorf("the node took the keypad's mode and still read as not ready: %v", err)
+	}
+}
+
+func TestTheNodeIsFoundByItsKeysAndAVirtualOneIsSkipped(t *testing.T) {
+	dev, class := t.TempDir(), t.TempDir()
+	layout := map[string]struct {
+		link string
+		keys []uint16
+	}{
+		"event1": {"../../devices/platform/gpio-privacy/input/input1/event1", []uint16{113}},
+		"event2": {"../../devices/virtual/input/input2/event2", []uint16{138}},
+		"event3": {"../../devices/platform/gpio-keys/input/input3/event3", []uint16{114, 115, 138}},
+	}
+	for name, n := range layout {
+		if err := os.WriteFile(filepath.Join(dev, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(n.link, filepath.Join(class, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	was := nodeKeys
+	t.Cleanup(func() { nodeKeys = was })
+	nodeKeys = func(path string) ([]uint16, error) { return layout[filepath.Base(path)].keys, nil }
+	for key, want := range map[uint16]string{138: "event3", 113: "event1", 114: "event3"} {
+		got, ok := findNode(dev, class, key, key)
+		if !ok || filepath.Base(got) != want {
+			t.Errorf("keycode %d found at %q (%v), want %s: a virtual node is a clone, ours"+
+				" or a leftover", key, got, ok, want)
+		}
+	}
+	if _, ok := findNode(dev, class, 116); ok {
+		t.Error("a keycode no node declares was found")
+	}
+	if _, ok := findNode(dev, class, 113, 138); ok {
+		t.Error("a pair no one node declares was found by its halves")
+	}
+}
+
+func TestAWatchedNodeEmitsNothing(t *testing.T) {
+	i := watching(113, ModeMonitor)
+	var reported int
+	err := i.route(bytes.NewReader(events(
+		evdev.Event{Type: evdev.EvKey, Code: 113, Value: 1},
+		evdev.Event{Type: evdev.EvKey, Code: 113, Value: 0},
+	)), func(uint16, int32) error { return nil }, noDown,
+		func(uint16, Mode, time.Duration) { reported++ })
+	if !errors.Is(err, io.EOF) || reported != 1 {
+		t.Errorf("reported %d presses with %v, want 1", reported, err)
+	}
+	if err := i.Press(113); err == nil {
+		t.Error("a watched node pressed a key; it has no clone to press it on")
 	}
 }

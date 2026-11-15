@@ -260,7 +260,7 @@ func TestBluetoothTakesTheA2DPDelayWhateverThePCMSays(t *testing.T) {
 		filepath.Join(t.TempDir(), "gone"),
 	} {
 		want := pcmStatus{State: "RUNNING", Delay: a2dpDelay, bursty: true}
-		st, err := outputStatus(sockets, pcm)
+		st, err := outputStatus(sockets, func() string { return pcm })
 		if err != nil || st != want {
 			t.Errorf("over Bluetooth the output read %+v, %v; want %+v", st, err, want)
 		}
@@ -279,11 +279,120 @@ func TestAReadingSaysWhetherItsOutputTakesAudioInBursts(t *testing.T) {
 
 func TestWithoutBluetoothThePCMStatusDecides(t *testing.T) {
 	sockets := writeFile(t, "unix", socketsIdle)
-	st, err := outputStatus(sockets, writeFile(t, "idle", idleStatus))
+	st, err := outputStatus(sockets, func() string { return writeFile(t, "idle", idleStatus) })
 	if err != nil || st.running() {
 		t.Errorf("the speaker's idle PCM read %+v, %v; want it not running", st, err)
 	}
-	if _, err := outputStatus(sockets, filepath.Join(t.TempDir(), "gone")); err == nil {
+	if _, err := outputStatus(sockets, func() string { return filepath.Join(t.TempDir(), "gone") }); err == nil {
 		t.Error("a missing status file was not reported with no speaker connected")
+	}
+}
+
+func fakeOutputs(t *testing.T, mixerPID string, statuses map[string]string) *outputFinder {
+	t.Helper()
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc")
+	for pid, exe := range map[string]string{mixerPID: "/system/bin/mixer", "99": "/system/bin/audiod"} {
+		if err := os.MkdirAll(filepath.Join(proc, pid, "task", pid), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if pid == mixerPID {
+			if err := os.MkdirAll(filepath.Join(proc, pid, "task", "782"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(exe+"\x00"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, text := range statuses {
+		dir := filepath.Join(root, "asound", "card0", name, "sub0")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &outputFinder{glob: filepath.Join(root, "asound", "card*", "pcm*p", "sub0", "status"),
+		exe: "/system/bin/mixer", proc: proc}
+}
+
+func runningAs(pid string) string {
+	return "state: RUNNING\nowner_pid   : " + pid + "\ndelay       : 1216\n"
+}
+
+func TestTheOutputIsTheMixersRunningPCMWhateverItsNumber(t *testing.T) {
+	for board, want := range map[string]string{"biscuit": "pcm23p", "donut": "pcm6p"} {
+		f := fakeOutputs(t, "409", map[string]string{
+			"pcm0p": "closed\n",
+			"pcm5p": runningAs("99"),
+			want:    runningAs("782"),
+		})
+		if got := f.find(time.Now()); !strings.Contains(got, "/"+want+"/") {
+			t.Errorf("%s: found %q, want %s: ALSA names the thread that opened the PCM,"+
+				" here 782 in the mixer's 409; one somebody else owns is not ours, and a"+
+				" fixed number is one board's", board, got, want)
+		}
+	}
+}
+
+func TestTheOutputIsRescannedAtMostEveryTenthOfASecond(t *testing.T) {
+	f := fakeOutputs(t, "409", map[string]string{"pcm6p": "closed\n"})
+	now := time.Now()
+	if got := f.find(now); got != "" {
+		t.Fatalf("found %q with nothing running", got)
+	}
+	path := strings.Replace(f.glob, "card*/pcm*p", "card0/pcm6p", 1)
+	if err := os.WriteFile(path, []byte(runningAs("782")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.find(now.Add(outputRescan / 2)); got != "" {
+		t.Errorf("rescanned within %v: the writer asks every 10 ms block", outputRescan)
+	}
+	if got := f.find(now.Add(outputRescan)); got != path {
+		t.Errorf("found %q a second later, want %s", got, path)
+	}
+}
+
+func TestOverBluetoothTheMixersPCMIsNotLookedFor(t *testing.T) {
+	sockets := writeFile(t, "unix", "Num RefCount Protocol Flags Type St Inode Path\n"+
+		"00000000: 00000003 00000000 00000000 0001 03 1 @/data/misc/bluedroid/.a2dp_data\n")
+	st, err := outputStatus(sockets, func() string {
+		t.Error("the PCM was looked for over A2DP, where no codec PCM runs and the scan is thrown away")
+		return ""
+	})
+	if err != nil || !st.bursty {
+		t.Errorf("over A2DP read %+v, %v; want the fixed A2DP delay", st, err)
+	}
+}
+
+func TestAPIDThatNoLongerRunsTheMixerIsLookedUpAgain(t *testing.T) {
+	f := fakeOutputs(t, "409", map[string]string{"pcm6p": runningAs("782")})
+	if f.find(time.Now()) == "" || f.owner != 409 {
+		t.Fatalf("found owner %d", f.owner)
+	}
+	if err := os.WriteFile(filepath.Join(f.proc, "409", "cmdline"), []byte("/system/bin/sh\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.path = ""
+	f.find(time.Now().Add(ownerRescan))
+	if f.owner == 409 {
+		t.Error("a pid that no longer runs the mixer was kept as its owner")
+	}
+}
+
+func TestAMissingMixerIsLookedForAtMostEveryFiveSeconds(t *testing.T) {
+	f := fakeOutputs(t, "409", map[string]string{"pcm6p": runningAs("782")})
+	f.exe = "/system/bin/nothing"
+	now := time.Now()
+	f.find(now)
+	f.exe = "/system/bin/mixer"
+	if got := f.find(now.Add(outputRescan)); got != "" {
+		t.Errorf("found %q within %v of a failed mixer lookup: every process's cmdline is"+
+			" read under the chime's lock", got, ownerRescan)
+	}
+	if got := f.find(now.Add(ownerRescan)); got == "" {
+		t.Error("the mixer was not looked for again after the wait")
 	}
 }

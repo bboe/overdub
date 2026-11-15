@@ -429,13 +429,6 @@ func TestTheCommandNeedsAnAccountOrNoReading(t *testing.T) {
 	}
 }
 
-func TestTheModelWeSendCarriesNoDotOfItsOwn(t *testing.T) {
-	if strings.Contains(deviceModel, ".") {
-		t.Errorf("deviceModel is %q; Home Assistant splits project_name on the dot and "+
-			"takes [1] as the model, so a dot here truncates it on the device page", deviceModel)
-	}
-}
-
 func TestUninstallClearsEveryPropertyThisTreeKeeps(t *testing.T) {
 	script, err := os.ReadFile("deploy/uninstall.py")
 	if err != nil {

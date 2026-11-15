@@ -242,7 +242,8 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 ### Whether the speaker is playing
 
 - 2 signals, both needed. ALSA says whether a PCM substream is open: `state:
-  RUNNING` in `/proc/asound/card*/pcm*p/sub*/status`, always `pcm23p` here.
+  RUNNING` in `/proc/asound/card*/pcm*p/sub*/status`, always `pcm23p` on
+  biscuit and `pcm6p` on donut.
   `dumpsys media.audio_flinger` says whether an output thread has an active
   track, true only while sound comes out.
 - ALSA alone reports a Dot quiet for 10 seconds as playing. The fork alone costs
@@ -450,9 +451,9 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   Mute 1`. It silences Music and Earcon streams alike.
 - **Holding the mute means holding the volume keys.** A key press does not lift
   audiod's mute. Muted at 33, presses moved the level to 53 and back to 40, the
-  ring showed each step, no tick played, and `Mute` stayed 1. So
-  `/dev/input/event2` is grabbed while muted. The first press lifts the mute and
-  moves nothing.
+  ring showed each step, no tick played, and `Mute` stayed 1. So the volume
+  keys are held while muted, by a grab or inside the action node's: docs/
+  hardware.md has which. The first press lifts the mute and moves nothing.
 - **Only the keys lift a mute.** A level set from Home Assistant or a server
   lands and leaves the mute on.
 - A daemon that cannot take the grab mutes anyway and logs it. The cost: Alexa's
@@ -563,7 +564,9 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 
 ## Device info
 
-- `project_name` is `Amazon.Echo Dot (2nd Generation)`. `project_version` is the
+- `project_name` is `Amazon.` and the board's model: `Echo Dot (2nd
+  Generation)` on biscuit, `Echo Dot (3rd Generation)` on donut, `Echo (2nd
+  Generation)` on radar. `project_version` is the
   build's tag, shown as `v1.0.0 (ESPHome 2026.8.0)`. An untagged build sends
   `unversioned`, because an empty field still renders.
 - The dot in `project_name` is required: Home Assistant takes manufacturer and
