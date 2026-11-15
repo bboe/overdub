@@ -209,7 +209,7 @@ func TestAMediaCommandForAnotherKeyIsIgnored(t *testing.T) {
 	f := wireFakeVolume(s, 6, 30)
 
 	c := &conn{sock: fakeAddr{}}
-	if err := s.handle(c, msgMediaPlayerCmd, volumeCommand(s.keySound, 0.5)); err != nil {
+	if err := s.handle(c, msgMediaPlayerCmd, volumeCommand(s.keyPlaying, 0.5)); err != nil {
 		t.Fatalf("a media command for another key was an error: %v", err)
 	}
 	waitVolumeIdle(t, s)
@@ -571,7 +571,7 @@ func TestAPlayCommandForAnotherKeyIsNotOurs(t *testing.T) {
 	asked, _ := wireFakePlay(s, nil)
 
 	c := &conn{sock: fakeAddr{}}
-	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keySound, "http://x.invalid/a.mp3", false)); err != nil {
+	if err := s.handle(c, msgMediaPlayerCmd, playCommand(s.keyPlaying, "http://x.invalid/a.mp3", false)); err != nil {
 		t.Fatalf("a play command for another key was an error: %v", err)
 	}
 	waitPlayIdle(t, s)

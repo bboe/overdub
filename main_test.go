@@ -199,22 +199,10 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 		t.Errorf("HeavyEvery is %d, so every tick is a heavy one and the tick buys nothing",
 			esphome.HeavyEvery)
 	}
-	if soundEvery := liveTick * esphome.SoundEvery; soundEvery <= device.SpeakerReadBudget() {
-		t.Errorf("sound is read every %v and one may take %v, so a slow read delays the "+
-			"readings behind it", soundEvery, device.SpeakerReadBudget())
-	}
 	if esphome.SoundEvery >= esphome.HeavyEvery {
-		t.Errorf("SoundEvery is %d against HeavyEvery's %d, so sound is read no oftener than "+
-			"the fork it was separated from", esphome.SoundEvery, esphome.HeavyEvery)
-	}
-	sound := liveTick * esphome.SoundEvery
-	if esphome.SoundOnDelay <= sound {
-		t.Errorf("SoundOnDelay is %v against a sample every %v, so one reading turns it on",
-			esphome.SoundOnDelay, sound)
-	}
-	if esphome.SoundOffDelay <= sound {
-		t.Errorf("SoundOffDelay is %v against a sample every %v, so one reading turns it off",
-			esphome.SoundOffDelay, sound)
+		t.Errorf("SoundEvery is %d against HeavyEvery's %d, so what plays is read no oftener "+
+			"than the rest, and a stream's end, which wakes nothing, shows late",
+			esphome.SoundEvery, esphome.HeavyEvery)
 	}
 	if liveTick >= sensorTick {
 		t.Errorf("liveTick is %v against a sensor tick of %v, so a poll of its own buys nothing",
@@ -1865,5 +1853,30 @@ func TestTheDriversKeyForTheDaemonsOwnMuteIsNotAPress(t *testing.T) {
 	if e.down(muteKey) {
 		t.Errorf("a press %v after the mute's write was taken for its echo: a real press"+
 			" while acebuttond restarts must still be reported", 2*micEcho)
+	}
+}
+
+func TestTheForegroundSoundIsTheOneNamed(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		alexa  string
+		clip   bool
+		stream bool
+		want   string
+	}{
+		{"nothing", "", false, false, ""},
+		{"a Sendspin stream", "", false, true, "sendspin"},
+		{"her music over Sendspin", "content", false, true, "content"},
+		{"a clip over her music", "content", true, false, "clip"},
+		{"her speech over a clip", "dialog", true, true, "dialog"},
+		{"an alarm", "alert", false, false, "alert"},
+		{"a call", "communications", true, true, "communications"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := nowPlaying{alexa: tt.alexa, clip: tt.clip, stream: func() bool { return tt.stream }}
+			if got := p.current(); got != tt.want {
+				t.Errorf("current() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

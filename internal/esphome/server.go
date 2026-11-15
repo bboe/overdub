@@ -157,7 +157,7 @@ type Server struct {
 	keyJackOn   uint32
 	keyOutput   uint32
 	keyBTDevice uint32
-	keySound    uint32
+	keyPlaying  uint32
 	keySpeaker  uint32
 	keyMicMute  uint32
 	keySendspin uint32
@@ -191,14 +191,7 @@ type Server struct {
 	cmdWorking bool
 	cmdQueue   []string
 
-	soundOn     bool
-	clock       func() time.Time
-	soundGap    time.Duration
-	onDelay     time.Duration
-	offDelay    time.Duration
-	soundSince  time.Time
-	soundLastOn time.Time
-	soundSeen   time.Time
+	clock func() time.Time
 
 	lastRoute string
 
@@ -213,7 +206,7 @@ type Server struct {
 	muteWorking    bool
 	jack           func() (bool, bool)
 	btRoute        func() (bool, bool)
-	sound          func() (bool, bool)
+	nowPlaying     func() string
 	micMute        func() (bool, bool)
 
 	sendspinOn  func() bool
@@ -283,7 +276,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyOutput:    entityKey("output_device"),
 		keyBTDevice:  entityKey("bluetooth_device"),
 		keyJackOn:    entityKey("audio_jack"),
-		keySound:     entityKey("speaker_playing"),
+		keyPlaying:   entityKey("playing"),
 		keySpeaker:   entityKey("speaker"),
 		keyMicMute:   entityKey("microphone_muted"),
 		keySendspin:  entityKey("sendspin"),
@@ -300,7 +293,6 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		volumes:      device.MusicVolumes,
 		jack:         device.JackOccupied,
 		btRoute:      device.BluetoothRouted,
-		sound:        device.SpeakerPlaying,
 		cpu:          device.CPUTemperature,
 		micMute:      device.MicMuted,
 		alexa:        device.AlexaRegistered,
@@ -317,8 +309,6 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		wakeGap:       minLiveReadGap,
 		micSettle:     micSettleFor,
 		clock:         time.Now,
-		onDelay:       SoundOnDelay,
-		offDelay:      SoundOffDelay,
 		conns:         map[*conn]struct{}{},
 		served:        make(chan struct{}),
 		published:     map[uint32]reading{},

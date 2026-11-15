@@ -188,7 +188,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | binary_sensor | `audio_jack` | diagnostic | on: a plug in the socket |
 | sensor | `output_device` | diagnostic | `speaker`, `jack`, `bluetooth` (5) |
 | sensor | `bluetooth_device` | diagnostic | the connected speaker (5) |
-| binary_sensor | `speaker_playing` | diagnostic | on: wired audio out (6) |
+| sensor | `playing` | diagnostic | what is playing, or empty (6) |
 | binary_sensor | `alexa_registered` | diagnostic | on: has an account (7) |
 | select | `action_button_mode` | config | starts `intercept` (8) |
 | select | `mute_button_mode` | config | starts `monitor` (8) |
@@ -205,7 +205,13 @@ Each entity id is `<domain>.<name>_<suffix>`.
 5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
    count. `bluetooth_device` is the speaker's name, or its address when the Dot
    has no name for it, and empty when no speaker is connected.
-6. Sound shorter than about 1.5 seconds is not reported. Bluetooth is not seen.
+6. The foreground one of `alert`, `communications` and `dialog` (her speech,
+   not her listening), then `clip` (from Home Assistant), `content` (her
+   music) and `sendspin`. Earcons and chimes are not counted. It changes as
+   the sound does, over the speaker, the jack or Bluetooth. Sound from
+   anything else, such as a phone playing to the Dot over Bluetooth, is not
+   seen. It replaces the `speaker_playing` binary sensor: move an automation
+   on that to this one, and delete the old entity.
 7. Off on a Dot never set up, or deregistered; everything else still works.
 8. `intercept`, `monitor` or `pass through`.
 9. Listed only while the Dot is registered.

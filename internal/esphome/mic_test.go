@@ -174,7 +174,7 @@ func TestASwitchCommandForAnotherKeyIsIgnored(t *testing.T) {
 	f := wireFakeMic(s, false)
 
 	c := &conn{sock: fakeAddr{}}
-	if err := s.handle(c, msgSwitchCommand, switchCommand(s.keySound, true)); err != nil {
+	if err := s.handle(c, msgSwitchCommand, switchCommand(s.keyPlaying, true)); err != nil {
 		t.Fatalf("a switch command for another key was an error: %v", err)
 	}
 	waitMicIdle(t, s)

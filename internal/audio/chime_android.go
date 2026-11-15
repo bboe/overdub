@@ -143,6 +143,11 @@ func (c *Chime) retune() bool {
 
 func (c *Chime) live() *Stream { return c.stream.Load() }
 
+func (c *Chime) Streaming() bool {
+	s := c.live()
+	return s != nil && !s.Spent()
+}
+
 func (c *Chime) look() {
 	s := c.live()
 	if s == nil {

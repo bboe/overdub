@@ -21,6 +21,8 @@ const (
 	tagMark     = " PuffinApp: "
 
 	musicChannel = "Content"
+	speech       = "SpeechSynthesizer"
+	interfaceKey = "interface="
 )
 
 func focusArgv(from time.Time) []string {
@@ -30,18 +32,21 @@ func focusArgv(from time.Time) []string {
 
 type focusHolder struct {
 	executor string
+	iface    string
 	until    time.Time
 }
 
 type FocusWatcher struct {
 	OnLevel func(percent int)
 	OnMusic func(playing bool)
+	OnSound func(channel string)
 
 	notify  sync.Mutex
 	mu      sync.Mutex
 	holders map[string]focusHolder
 	level   int
 	music   bool
+	sound   string
 	pid     string
 	now     func() time.Time
 	alive   func(pid string) bool
@@ -88,9 +93,11 @@ func (w *FocusWatcher) line(line string) {
 		}
 	}
 	if i := strings.Index(line, acquireMark); i >= 0 {
-		channel, _, _ := strings.Cut(line[i+len(acquireMark):], ",")
+		channel, rest, _ := strings.Cut(line[i+len(acquireMark):], ",")
+		iface, _ := strings.CutPrefix(strings.TrimSpace(rest), interfaceKey)
+		iface, _, _ = strings.Cut(iface, ",")
 		if executor, ok := executorOf(line[:i]); ok {
-			w.acquire(strings.TrimSpace(channel), executor)
+			w.acquire(strings.TrimSpace(channel), executor, strings.TrimSpace(iface))
 		}
 		return
 	}
@@ -135,7 +142,7 @@ func executorOf(prefix string) (string, bool) {
 	return executor, executor != ""
 }
 
-func (w *FocusWatcher) acquire(channel, executor string) {
+func (w *FocusWatcher) acquire(channel, executor, iface string) {
 	var until time.Time
 	switch {
 	case percentFor(channel) < fullPercent:
@@ -147,7 +154,7 @@ func (w *FocusWatcher) acquire(channel, executor string) {
 		if w.holders == nil {
 			w.holders = map[string]focusHolder{}
 		}
-		w.holders[channel] = focusHolder{executor: executor, until: until}
+		w.holders[channel] = focusHolder{executor: executor, iface: iface, until: until}
 	})
 }
 
@@ -207,11 +214,12 @@ func (w *FocusWatcher) change(mutate func()) {
 		level = min(level, percentFor(channel))
 	}
 	_, music := w.holders[musicChannel]
-	was, wasMusic := w.level, w.music
+	sound := soundOf(w.holders)
+	was, wasMusic, wasSound := w.level, w.music, w.sound
 	if was == 0 {
 		was = fullPercent
 	}
-	w.level, w.music = level, music
+	w.level, w.music, w.sound = level, music, sound
 	w.mu.Unlock()
 
 	if level != was && w.OnLevel != nil {
@@ -220,6 +228,20 @@ func (w *FocusWatcher) change(mutate func()) {
 	if music != wasMusic && w.OnMusic != nil {
 		w.OnMusic(music)
 	}
+	if sound != wasSound && w.OnSound != nil {
+		w.OnSound(sound)
+	}
+}
+
+func soundOf(holders map[string]focusHolder) string {
+	for _, channel := range []string{"Alert", "Communications", "Dialog", musicChannel} {
+		h, ok := holders[channel]
+		if !ok || channel == "Dialog" && h.iface != speech {
+			continue
+		}
+		return strings.ToLower(channel)
+	}
+	return ""
 }
 
 func percentFor(channel string) int {

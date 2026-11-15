@@ -22,6 +22,8 @@ func (c *Chime) OpenFeed(int, func()) (*Feed, error) {
 	return nil, errors.New("audio: built without the mixer")
 }
 
+func (c *Chime) Streaming() bool { return false }
+
 func (c *Chime) Duck(int) {}
 
 func (c *Chime) DuckClips(int) {}

@@ -93,6 +93,40 @@ var (
 
 func elsewhere() bool { return alexaPlaying.Load() || clipPlaying.Load() }
 
+type nowPlaying struct {
+	mu     sync.Mutex
+	alexa  string
+	clip   bool
+	stream func() bool
+}
+
+var sounding nowPlaying
+
+func (p *nowPlaying) change(mutate func()) {
+	p.mu.Lock()
+	mutate()
+	p.mu.Unlock()
+	if server := api.Load(); server != nil {
+		server.NotePlaying()
+	}
+}
+
+func (p *nowPlaying) current() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case p.alexa != "" && p.alexa != "content":
+		return p.alexa
+	case p.clip:
+		return "clip"
+	case p.alexa != "":
+		return p.alexa
+	case p.stream != nil && p.stream():
+		return "sendspin"
+	}
+	return ""
+}
+
 func noteElsewhere() {
 	if s := switched.Load(); s != nil {
 		s.noteElsewhere()
@@ -143,6 +177,7 @@ func (d *ducker) apply() {
 
 func noteClip(d *ducker, playing, announcement bool) {
 	d.announce(playing && announcement)
+	sounding.change(func() { sounding.clip = playing })
 	if clipPlaying.Swap(playing && !announcement) != (playing && !announcement) {
 		noteElsewhere()
 	}
@@ -269,6 +304,7 @@ func serve(flags config) error {
 	var clips *clip.Player
 	if chime != nil {
 		player = chimePlayer{chime: chime}
+		sounding.change(func() { sounding.stream = chime.Streaming })
 		d := &ducker{set: chime.Duck, clip: chime.DuckClips}
 		clips = newClips(chime, d)
 		go (&alexa.FocusWatcher{OnLevel: d.alexaAt, OnMusic: func(playing bool) {
@@ -276,6 +312,8 @@ func serve(flags config) error {
 			if playing {
 				clips.Yield()
 			}
+		}, OnSound: func(channel string) {
+			sounding.change(func() { sounding.alexa = channel })
 		}}).Run()
 	}
 
@@ -575,6 +613,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 
 	if clips != nil {
 		server.UsePlay(clips.Play, clips.Stop)
+		server.UsePlaying(sounding.current)
 	}
 
 	if commandReady(device.AlexaRegistered()) {
@@ -732,6 +771,7 @@ func (p chimePlayer) OpenStream(rate int, say func(string, ...any)) (sendspin.St
 	if err != nil {
 		return nil, err
 	}
+	sounding.change(func() {})
 	return stream, nil
 }
 
