@@ -2,7 +2,6 @@ package esphome
 
 import (
 	"github.com/bboe/overdub/internal/clip"
-	"github.com/bboe/overdub/internal/device"
 )
 
 const (
@@ -27,12 +26,11 @@ const (
 
 	delayIcon = "mdi:timer-outline"
 
-	adbIcon = "mdi:console-network"
-
 	commandIcon = "mdi:microphone-message"
 
 	alexaIcon = "mdi:account-check"
 
+	adbKeysIcon   = "mdi:key-chain"
 	bluetoothIcon = "mdi:bluetooth"
 )
 
@@ -250,22 +248,6 @@ func (s *Server) listEntities(conn *conn) error {
 		}
 	}
 
-	var adb pb
-	adb.str(1, "network_adb")
-	adb.fixed32(2, s.keyADB)
-	adb.str(3, "Network ADB")
-	adb.str(5, adbIcon)
-	adb.str(6, device.ADBOff.String()) // options
-	adb.str(6, device.ADBInsecure.String())
-	if s.adbSecureOK() {
-		adb.str(6, device.ADBSecure.String())
-	}
-	adb.boolean(7, false) // disabled_by_default
-	adb.u32(8, entityCategoryConfig)
-	if err := s.send(conn, msgListSelect, adb.b); err != nil {
-		return err
-	}
-
 	var route pb
 	route.str(1, "output_device")
 	route.fixed32(2, s.keyOutput)
@@ -285,6 +267,17 @@ func (s *Server) listEntities(conn *conn) error {
 	connected.boolean(6, false) // disabled_by_default
 	connected.u32(7, entityCategoryDiagnostic)
 	if err := s.send(conn, msgListTextSensor, connected.b); err != nil {
+		return err
+	}
+
+	var keyList pb
+	keyList.str(1, "adb_keys")
+	keyList.fixed32(2, s.keyKeyList)
+	keyList.str(3, "adb keys")
+	keyList.str(5, adbKeysIcon)
+	keyList.boolean(6, false) // disabled_by_default
+	keyList.u32(7, entityCategoryDiagnostic)
+	if err := s.send(conn, msgListTextSensor, keyList.b); err != nil {
 		return err
 	}
 
@@ -314,6 +307,17 @@ func (s *Server) listEntities(conn *conn) error {
 		if err := s.send(conn, msgListService, service.b); err != nil {
 			return err
 		}
+	}
+
+	var keysArg pb
+	keysArg.str(1, "keys")
+	keysArg.u32(2, serviceArgString)
+	var keys pb
+	keys.str(1, "set_adb_keys")
+	keys.fixed32(2, s.keyADBKeys)
+	keys.sub(3, keysArg.b)
+	if err := s.send(conn, msgListService, keys.b); err != nil {
+		return err
 	}
 
 	if s.updateCheck != nil {

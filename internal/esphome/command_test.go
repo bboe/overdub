@@ -193,7 +193,8 @@ func TestACommandThatFailedIsLoggedThroughThePeerLimit(t *testing.T) {
 func TestTheCommandEntityIsListedOnlyWhenThereIsACredential(t *testing.T) {
 	quiet := NewServer("dot-test", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for _, entity := range listed(t, quiet) {
-		if entity[0].num == uint64(msgListText) || entity[0].num == uint64(msgListService) {
+		if entity[0].num == uint64(msgListText) ||
+			entity[0].num == uint64(msgListService) && string(entity[1].data) == "send_command" {
 			t.Error("a server with no way to run a command still offers one, so Home Assistant " +
 				"shows a box that cannot work")
 		}
@@ -218,9 +219,8 @@ func TestTheCommandEntityIsListedOnlyWhenThereIsACredential(t *testing.T) {
 				t.Error("the command box is not a config entity")
 			}
 		case uint64(msgListService):
-			service++
-			if got := string(entity[1].data); got != "send_command" {
-				t.Errorf("the service is %q", got)
+			if string(entity[1].data) == "send_command" {
+				service++
 			}
 		}
 	}

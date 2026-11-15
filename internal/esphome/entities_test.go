@@ -42,7 +42,7 @@ func listedWithState(t *testing.T, s *Server) []map[int]pbField {
 	t.Helper()
 	var out []map[int]pbField
 	for _, entity := range listed(t, s) {
-		if entity[0].num == uint64(msgListEvent) {
+		if entity[0].num == uint64(msgListEvent) || entity[0].num == uint64(msgListService) {
 			continue
 		}
 		out = append(out, entity)
@@ -72,7 +72,8 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	for _, entity := range listed(t, s) {
 		switch entity[0].num {
 		case uint64(msgListBinarySensor), uint64(msgListSelect), uint64(msgListEvent),
-			uint64(msgListSwitch), uint64(msgListMediaPlayer), uint64(msgListTextSensor):
+			uint64(msgListSwitch), uint64(msgListMediaPlayer), uint64(msgListTextSensor),
+			uint64(msgListService):
 			continue
 		}
 		if entity[0].num != uint64(msgListSensor) {
@@ -219,6 +220,7 @@ func TestTheTextSensorsAreListedTheWayHomeAssistantReadsThem(t *testing.T) {
 	}{
 		"output_device":    {s.keyOutput, "Output device", speakerIcon},
 		"bluetooth_device": {s.keyBTDevice, "Bluetooth device", bluetoothIcon},
+		"adb_keys":         {s.keyKeyList, "adb keys", adbKeysIcon},
 	}
 
 	for _, entity := range listed(t, s) {

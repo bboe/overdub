@@ -25,7 +25,7 @@ import textwrap
 import time
 from typing import Callable, NoReturn, TextIO
 
-ADB_STAGE = "/data/local/tmp/overdub-adbkey"
+ADB_COPY = "/data/misc/adb/adb_keys"
 BIN_DIR = "/data/local/bin"
 ADB_KEYS = BIN_DIR + "/adb_keys"
 APPLIED = BIN_DIR + "/.overdub-applied"
@@ -36,7 +36,6 @@ DNS_LABEL = 63
 FAILED = "/data/local/bin/.overdub-failed"
 INIT = "/system/etc/init/overdub.rc"
 KEY = "/data/local/bin/.overdub-noise-key"
-KEY_LINE = re.compile(r"ssh-|[A-Za-z0-9+/]{32,}")
 KEY_SHAPE = re.compile(r"[A-Za-z0-9+/]{43}=")
 LABEL = 14
 INDENT = " " * (LABEL + 4)
@@ -47,8 +46,6 @@ SENDKEY = "/data/local/bin/.overdub-sendspin-key"
 SENDKEY_BYTES = 64
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(
-    adb_key_landed=False,
-    adb_staged=False,
     binary_changed=False,
     boot_changed=False,
     changed=False,
@@ -79,21 +76,6 @@ def adb(*args: str) -> tuple[int, str]:
     return result.returncode, result.stdout.decode("utf-8", "replace").replace("\r", "")
 
 
-def adb_key_lines() -> tuple[pathlib.Path, list[str] | None]:
-    path = pathlib.Path(
-        os.environ.get("ADBKEY") or pathlib.Path.home() / ".android/adbkey.pub"
-    )
-    if not path.is_file():
-        return path, None
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if "PRIVATE KEY" in text:
-        usage(f"{path} looks like a PRIVATE key; ADBKEY wants the .pub")
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    if not any(KEY_LINE.match(line) for line in lines):
-        usage(f"{path} is empty or does not look like an adb public key")
-    return path, lines
-
-
 def adb_ok(*args: str) -> str:
     code, out = adb(*args)
     if code != 0:
@@ -102,7 +84,7 @@ def adb_ok(*args: str) -> str:
 
 
 def applied(pid: str) -> str:
-    listing = shell(f"md5sum {BINARY} {KEY} {ADB_KEYS} 2>/dev/null")[1]
+    listing = shell(f"md5sum {BINARY} {KEY} 2>/dev/null")[1]
     found = {
         path: digest
         for digest, path in re.findall(
@@ -110,7 +92,7 @@ def applied(pid: str) -> str:
         )
     }
     return " ".join(
-        [f"pid={pid}"] + [found.get(path, "none") for path in (BINARY, KEY, ADB_KEYS)]
+        [f"pid={pid}"] + [found.get(path, "none") for path in (BINARY, KEY)]
     )
 
 
@@ -204,14 +186,6 @@ def cleanup() -> None:
     if STATE.key_landed:
         warn("API key", "Stopped after the key was written and before it was shown.")
         attempt(action=discard_new_key, fix=f"rm -f {KEY}", label="API key")
-    if STATE.adb_key_landed:
-        attempt(action=discard_adb_key, fix=f"rm -f {ADB_KEYS}", label="adb key")
-    if STATE.adb_staged:
-        attempt(
-            action=lambda: shell(f"rm -rf {ADB_STAGE}"),
-            fix=f"rm -rf {ADB_STAGE}",
-            label="adb key",
-        )
     if STATE.staged:
         attempt(action=remove_stage, fix=f"rm -rf {STAGE}", label="API key")
 
@@ -227,18 +201,6 @@ def device_key() -> str | None:
         return found[0]
     joined = "".join("".join(body).split())
     return joined if KEY_SHAPE.fullmatch(joined) else ""
-
-
-def discard_adb_key() -> None:
-    STATE.adb_key_landed = False
-    shell(f"rm -f {ADB_KEYS}")
-    if probe(f"-f {ADB_KEYS}") != "no":
-        warn(
-            "adb key",
-            f"An unverified adb public key may still be at {ADB_KEYS}, and"
-            " Network ADB would offer Secure against it. Remove it:",
-            f"  adb shell 'rm -f {ADB_KEYS}'",
-        )
 
 
 def discard_new_key() -> None:
@@ -265,54 +227,6 @@ def first_field(*, start: str, text: str) -> str:
         if line.startswith(start):
             return line.split()[0]
     return ""
-
-
-def install_adb_key(*, lines: list[str] | None, path: pathlib.Path) -> None:
-    if lines is None:
-        if probe(f"-f {ADB_KEYS}") != "no":
-            STATE.changed = True
-        shell(f"rm -f {ADB_KEYS}")
-        if probe(f"-f {ADB_KEYS}") != "no":
-            fail(
-                "adb key",
-                "An old adb public key is still on the device, or the device did"
-                " not answer. Network ADB would offer Secure against a key you did"
-                " not install.",
-            )
-        warn(
-            "adb key",
-            f"No {path}, so Network ADB will offer Off and Insecure only. A Dot"
-            " already in Secure keeps honouring the key it was given until it"
-            " reboots.",
-        )
-        return
-    code, answer = shell(f"cat {ADB_KEYS}; echo; echo --read-ok--")
-    on_device = [line.strip() for line in answer.split("\n")]
-    keys = [line for line in on_device if KEY_LINE.match(line)]
-    wanted = [line for line in lines if KEY_LINE.match(line)]
-    if code == 0 and "--read-ok--" in on_device and keys == wanted:
-        ok("adb key", "unchanged; Network ADB will offer Secure")
-        return
-    STATE.changed = True
-    stage(directory=ADB_STAGE, flag="adb_staged", label="adb key")
-    adb_ok("push", str(path), ADB_STAGE + "/k.pub")
-    STATE.adb_key_landed = True
-    shell_ok(
-        f"cp {ADB_STAGE}/k.pub {ADB_KEYS}\nchmod 644 {ADB_KEYS}\nrm -rf {ADB_STAGE}"
-    )
-    STATE.adb_staged = False
-    code, answer = shell(f"cat {ADB_KEYS}; echo; echo --read-ok--")
-    on_device = answer.split("\n")
-    if code != 0 or "--read-ok--" not in on_device:
-        discard_adb_key()
-        fail("adb key", "Could not read the adb public key back from the device.")
-    if not all(line in on_device for line in lines):
-        discard_adb_key()
-        fail("adb key", "The adb public key on the device is not the one pushed.")
-    STATE.adb_key_landed = False
-    if probe(f"-d {ADB_STAGE}") != "no":
-        fail("adb key", "The adb key staging directory is still on the device.")
-    ok("adb key", f"{path}; Network ADB will offer Secure")
 
 
 def install_api_key() -> None:
@@ -526,7 +440,6 @@ def main() -> None:
     if not shutil.which("adb"):
         usage("adb not found: install Android platform-tools")
 
-    adb_key_path, adb_key = adb_key_lines()
     serial = serial_number()
     print(f"Installing overdub as {name} on {serial}.")
     print()
@@ -540,7 +453,7 @@ def main() -> None:
         )
     ok("root", "adb runs as root")
     install_api_key()
-    install_adb_key(lines=adb_key, path=adb_key_path)
+    remove_old_adb_key()
     install_binary(boot_script)
     install_boot_script(boot_script)
     install_init()
@@ -643,6 +556,31 @@ def probe(expression: str) -> str | None:
 def remote_md5(path: str) -> str:
     found = MD5_SHAPE.search(shell(f"md5sum {path}")[1])
     return found.group() if found else ""
+
+
+def remove_old_adb_key() -> None:
+    if shell("getprop ro.adb.secure")[1].strip() != "1":
+        warn(
+            "adb",
+            "ro.adb.secure is not 1, so tcp/5555 may be a root shell with no key."
+            " Reboot the Dot to restore it.",
+        )
+    if probe(f"-f {ADB_KEYS}") == "no":
+        return
+    old = remote_md5(ADB_KEYS)
+    removed = ADB_KEYS
+    if old and remote_md5(ADB_COPY) == old:
+        shell(f"rm -f {ADB_COPY}")
+        removed += f" and its copy at {ADB_COPY}"
+    shell(f"rm -f {ADB_KEYS}")
+    if probe(f"-f {ADB_KEYS}") != "no":
+        warn("adb key", f"Could not remove the old key file at {ADB_KEYS}.")
+        return
+    STATE.changed = True
+    ok(
+        "adb key",
+        f"removed {removed}; set keys with the set_adb_keys action in Home Assistant",
+    )
 
 
 def remove_stage() -> None:

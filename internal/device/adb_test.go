@@ -1,14 +1,16 @@
 package device
 
 import (
+	"encoding/base64"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const procNetTCP = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -45,93 +47,6 @@ func TestHasListenerDoesNotMatchPartialPort(t *testing.T) {
 	if hasListener(other, ":5B3") {
 		t.Error("hasListener matched a partial port")
 	}
-}
-
-func TestADBModeNames(t *testing.T) {
-	for mode, want := range map[ADBMode]string{
-		ADBOff:      "Off",
-		ADBInsecure: "Insecure",
-		ADBSecure:   "Secure",
-	} {
-		if got := mode.String(); got != want {
-			t.Errorf("ADBMode(%d).String() = %q, want %q", mode, got, want)
-		}
-	}
-}
-
-func TestParseADBModeRoundTrips(t *testing.T) {
-	for _, mode := range []ADBMode{ADBOff, ADBInsecure, ADBSecure} {
-		got, ok := ParseADBMode(mode.String())
-		if !ok || got != mode {
-			t.Errorf("ParseADBMode(%q) = %v, %v; want %v, true", mode.String(), got, ok, mode)
-		}
-	}
-}
-
-func TestParseADBModeRejectsAnythingElse(t *testing.T) {
-	for _, s := range []string{"", "off", "OFF", "secure", "on", "true", "Disabled"} {
-		if got, ok := ParseADBMode(s); ok {
-			t.Errorf("ParseADBMode(%q) = %v, true; want refused", s, got)
-		}
-	}
-}
-
-func TestInstallADBKeyLandsReadableByAdbd(t *testing.T) {
-	old := syscall.Umask(0o077)
-	defer syscall.Umask(old)
-
-	dir := t.TempDir()
-	src, keyDir := filepath.Join(dir, "src"), filepath.Join(dir, "misc", "adb")
-	if err := os.WriteFile(src, []byte("ssh-rsa AAAA... user@host\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer swapADBKeyPaths(src, keyDir, filepath.Join(keyDir, "adb_keys"))()
-
-	_ = installADBKey()
-
-	for path, want := range map[string]os.FileMode{
-		keyDir:                            0o750,
-		filepath.Join(keyDir, "adb_keys"): 0o640,
-	} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		if got := info.Mode().Perm(); got != want {
-			t.Errorf("%s is %04o, want %04o (adbd runs as shell and must read it)", path, got, want)
-		}
-	}
-}
-
-func TestInstallADBKeyFixesAnExistingTree(t *testing.T) {
-	dir := t.TempDir()
-	src, keyDir := filepath.Join(dir, "src"), filepath.Join(dir, "misc", "adb")
-	if err := os.WriteFile(src, []byte("ssh-rsa AAAA... user@host\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	keyFile := filepath.Join(keyDir, "adb_keys")
-	if err := os.MkdirAll(keyDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyFile, []byte("stale\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	defer swapADBKeyPaths(src, keyDir, keyFile)()
-
-	_ = installADBKey()
-
-	if info, _ := os.Stat(keyFile); info.Mode().Perm() != 0o640 {
-		t.Errorf("existing key left at %04o, want 0640", info.Mode().Perm())
-	}
-	if info, _ := os.Stat(keyDir); info.Mode().Perm() != 0o750 {
-		t.Errorf("existing directory left at %04o, want 0750", info.Mode().Perm())
-	}
-}
-
-func swapADBKeyPaths(src, dir, file string) func() {
-	oldSrc, oldDir, oldFile := ADBKeySource, adbKeyDir, adbKeyFile
-	ADBKeySource, adbKeyDir, adbKeyFile = src, dir, file
-	return func() { ADBKeySource, adbKeyDir, adbKeyFile = oldSrc, oldDir, oldFile }
 }
 
 func TestHoldADBOpenAsksWhetherADBDIsListening(t *testing.T) {
@@ -203,76 +118,128 @@ func TestDenyTCPGivesUpRatherThanSpinning(t *testing.T) {
 	}
 }
 
-func TestAFailedSecureReadIsNoReading(t *testing.T) {
-	defer func(r func(string) (string, error), l func() bool, i func(...string) ([]byte, error)) {
-		readProp, adbListens, iptablesRun = r, l, i
-	}(readProp, adbListens, iptablesRun)
-
-	adbListens = func() bool { return true }
-	iptablesRun = func(...string) ([]byte, error) { return nil, nil }
-	readProp = func(string) (string, error) { return "", errors.New("getprop: killed") }
-
-	if mode, known := CurrentADBMode(); known {
-		t.Errorf("CurrentADBMode() = %v, true; want a reading nobody took", mode)
+func adbKeyLine(t *testing.T, seed byte, name string) string {
+	t.Helper()
+	b := make([]byte, adbKeyRSALen)
+	for i := range b {
+		b[i] = seed + byte(i)
 	}
-
-	readProp = func(string) (string, error) { return "1", nil }
-	if mode, known := CurrentADBMode(); !known || mode != ADBSecure {
-		t.Errorf("CurrentADBMode() = %v, %v; want Secure, true", mode, known)
-	}
+	return base64.StdEncoding.EncodeToString(b) + " " + name
 }
 
-func TestACloseThatFailedLeavesTheRuleAlone(t *testing.T) {
-	defer func(s func(string, string) error, i func(...string) ([]byte, error)) {
-		setProp, iptablesRun = s, i
-	}(setProp, iptablesRun)
+func fakeKeyDir(t *testing.T) {
+	t.Helper()
+	wasDir, wasFile, wasSystem := adbKeyDir, adbKeyFile, adbSystemKey
+	t.Cleanup(func() { adbKeyDir, adbKeyFile, adbSystemKey = wasDir, wasFile, wasSystem })
+	root := t.TempDir()
+	adbKeyDir = filepath.Join(root, "adb")
+	adbKeyFile = filepath.Join(adbKeyDir, "adb_keys")
+	adbSystemKey = filepath.Join(root, "adb_keys")
+}
 
-	var mu sync.Mutex
-	var ran [][]string
-	iptablesRun = func(args ...string) ([]byte, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		ran = append(ran, args)
-		return nil, nil
+func TestSettingTheKeysReplacesThemWhole(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the key file is owned by system:shell, so writing it needs root")
 	}
-	setProp = func(key, _ string) error { return fmt.Errorf("setprop %s: killed", key) }
-
-	if err := SetADBMode(ADBOff); err == nil {
-		t.Fatal("SetADBMode(Off) reported success with every property write failing")
+	fakeKeyDir(t)
+	defer syscall.Umask(syscall.Umask(0o077))
+	one, two := adbKeyLine(t, 1, "one@host"), adbKeyLine(t, 2, "two@host")
+	if n, err := SetADBKeys(one + "\r\n\n" + two + "\n"); err != nil || n != 2 {
+		t.Fatalf("SetADBKeys = %d, %v; want 2 keys", n, err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, args := range ran {
-		for _, a := range args {
-			if a == "-D" {
-				t.Fatalf("the rule was deleted by a close that failed: %v", ran)
-			}
+	if n, err := SetADBKeys(two); err != nil || n != 1 {
+		t.Fatalf("SetADBKeys = %d, %v; want 1 key", n, err)
+	}
+	b, err := os.ReadFile(adbKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != two+"\n" {
+		t.Errorf("the file holds %q, want the second call's key alone: a call states the"+
+			" whole set, so a key taken out of it stops working", b)
+	}
+	st, _ := os.Stat(adbKeyFile)
+	if st.Mode().Perm() != 0o640 {
+		t.Errorf("the file is %v under the daemon's 077 umask, want 0640: adbd reads it by"+
+			" group, and on overdub-test a bare write landed 0600", st.Mode().Perm())
+	}
+	if err := os.WriteFile(adbSystemKey, []byte(adbKeyLine(t, 9, "rooter@mac")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rooting, set, ok := ADBKeyNames(); !ok || !slices.Equal(rooting, []string{"rooter@mac"}) ||
+		!slices.Equal(set, []string{"two@host"}) {
+		t.Errorf("ADBKeyNames = %v, %v, %v; want [rooter@mac], [two@host]: the rooting"+
+			" computer always gets in, so the sensor must show it", rooting, set, ok)
+	}
+	st, _ = os.Stat(adbKeyDir)
+	if st.Mode()&os.ModeSetgid == 0 || st.Mode().Perm() != 0o750 {
+		t.Errorf("the directory is %v, want 02750 as init makes it: a write that clears"+
+			" setgid leaves later files out of group shell", st.Mode())
+	}
+	for _, empty := range []string{"", " \n\t\n"} {
+		if _, err := SetADBKeys(empty); !errors.Is(err, ErrNoADBKeys) {
+			t.Errorf("SetADBKeys(%q) gave %v, want ErrNoADBKeys: a form run before the"+
+				" paste would revoke every machine added", empty, err)
 		}
 	}
+	if b, _ := os.ReadFile(adbKeyFile); string(b) != two+"\n" {
+		t.Error("an empty call changed the keys")
+	}
+	if n, err := SetADBKeys(" none \n"); err != nil || n != 0 {
+		t.Fatalf("none gave %d, %v", n, err)
+	}
+	if _, err := os.Stat(adbKeyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Error("none left the file, so its keys still let a host in")
+	}
+	if rooting, set, ok := ADBKeyNames(); !ok || len(set) != 0 || len(rooting) != 1 {
+		t.Errorf("after none, ADBKeyNames = %v, %v, %v; want the rooting key alone", rooting, set, ok)
+	}
 }
 
-func TestDenyADBWaitsForTheModeLock(t *testing.T) {
-	defer func(i func(...string) ([]byte, error)) { iptablesRun = i }(iptablesRun)
-	iptablesRun = func(...string) ([]byte, error) { return nil, nil }
-
-	adbMu.Lock()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = DenyADB()
-	}()
-
-	select {
-	case <-done:
-		adbMu.Unlock()
-		t.Fatal("DenyADB closed the port while the mode lock was held")
-	case <-time.After(50 * time.Millisecond):
+func TestARefusalNamesTheLineAsPasted(t *testing.T) {
+	fakeKeyDir(t)
+	key := adbKeyLine(t, 4, "a@host")
+	_, err := SetADBKeys(key + "\n\n" + key + "\r\n\nnot a key\n")
+	if err == nil || !strings.Contains(err.Error(), "line 5") {
+		t.Errorf("got %v, want line 5: blank lines count, or the user fixes the wrong key", err)
 	}
+}
 
-	adbMu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("DenyADB never ran once the mode lock was free")
+func TestATabBeforeTheNameIsAccepted(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the key file is owned by system:shell, so writing it needs root")
+	}
+	fakeKeyDir(t)
+	key := strings.Replace(adbKeyLine(t, 5, "tab@host"), " ", "\t", 1)
+	if n, err := SetADBKeys(key); err != nil || n != 1 {
+		t.Errorf("a key with a tab before its name gave %d, %v", n, err)
+	}
+}
+
+func TestAnythingButAKeyIsRefusedAndChangesNothing(t *testing.T) {
+	fakeKeyDir(t)
+	for _, text := range []string{
+		"ssh-rsa AAAAB3NzaC1yc2E whoever",
+		"not base64 at all",
+		base64.StdEncoding.EncodeToString(make([]byte, 100)) + " short@key",
+		strings.Repeat(adbKeyLine(t, 3, "x")+"\n", maxADBKeys+1),
+	} {
+		if _, err := SetADBKeys(text); err == nil {
+			t.Errorf("SetADBKeys(%.40q...) was accepted", text)
+		}
+	}
+	if _, err := os.Stat(adbKeyDir); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a refused set touched the key directory")
+	}
+}
+
+func TestKeyNamesAreValidUTF8(t *testing.T) {
+	fakeKeyDir(t)
+	if err := os.WriteFile(adbSystemKey, []byte(adbKeyLine(t, 9, "caf\xe9@mac")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rooting, _, _ := ADBKeyNames()
+	if len(rooting) != 1 || !utf8.ValidString(rooting[0]) {
+		t.Errorf("ADBKeyNames = %q; Home Assistant refuses a state that is not UTF-8", rooting)
 	}
 }

@@ -15,7 +15,6 @@ Installing overdub as kitchen on <serial>.
 ✅ build          prebuilt build/overdub, md5 63f1e442a0522439eea42570d30db241
 ✅ root           adb runs as root
 ✅ API key        kept the one already on the device
-✅ adb key        /home/you/.android/adbkey.pub; Network ADB will offer Secure
 ✅ binary         md5 63f1e442a0522439eea42570d30db241
 ✅ key directory  /data/local/bin is drwx------
 ✅ boot script    /data/local/bin/overdub.sh
@@ -103,8 +102,6 @@ What goes where:
 - `overdub.rc`: `/system/etc/init/`, the init service that runs the boot
   script at boot
 - `.overdub-noise-key`: `/data/local/bin/`, mode 600, generated if absent
-- `adb_keys`: `/data/local/bin/`, from `~/.android/adbkey.pub` or `$ADBKEY`.
-  It enables [`Secure`](#network-adb). Removed if there is no key to push.
 
 The name:
 
@@ -165,9 +162,9 @@ deploy/uninstall.py
   derives from it, so a copy left behind stays valid. A server that paired
   keeps its record; remove the player there too.
 - Amazon's stack is untouched. Delete the device in Home Assistant when done.
-- A later install generates a new API key. `/data/misc/adb/adb_keys` stays:
-  adbd reads it only while `ro.adb.secure` is 1, which nothing sets after an
-  uninstall.
+- A later install generates a new API key. The adb keys set from Home
+  Assistant go too; the key of the computer that rooted the Dot, which
+  firebreak wrote to `/adb_keys`, still opens adb.
 - Running it again is safe. With nothing left it ends `Already uninstalled;
   nothing to remove.`
 
@@ -195,11 +192,10 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | binary_sensor | `alexa_registered` | diagnostic | on: has an account (7) |
 | select | `action_button_mode` | config | starts `intercept` (8) |
 | select | `mute_button_mode` | config | starts `monitor` (8) |
-| select | `network_adb` | config | `Off`, `Insecure`, `Secure` (9) |
-| text | `alexa_command` | config | run as though spoken (10) |
-| switch | `sendspin` | config | on: Sendspin is up (11) |
-| number | `sendspin_output_delay` | config | 0 to 5,000 ms (12) |
-| update | `firmware` | config | the latest release (13) |
+| text | `alexa_command` | config | run as though spoken (9) |
+| switch | `sendspin` | config | on: Sendspin is up (10) |
+| number | `sendspin_output_delay` | config | 0 to 5,000 ms (11) |
+| update | `firmware` | config | the latest release (12) |
 
 1. See [The action button](#the-action-button).
 2. Volume and mute, and playback of any URL Home Assistant can transcode.
@@ -212,14 +208,13 @@ Each entity id is `<domain>.<name>_<suffix>`.
 6. Sound shorter than about 1.5 seconds is not reported. Bluetooth is not seen.
 7. Off on a Dot never set up, or deregistered; everything else still works.
 8. `intercept`, `monitor` or `pass through`.
-9. `Secure` only when a key was installed.
-10. Listed only while the Dot is registered.
-11. Off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule
+9. Listed only while the Dot is registered.
+10. Off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule
     and ends any session. Survives a reboot.
-12. How far ahead of a chunk's timestamp the Dot plays. A music server can set
+11. How far ahead of a chunk's timestamp the Dot plays. A music server can set
     it too; the last write wins, and the number shows what is applied.
     Survives a reboot and works with the switch off.
-13. Listed only for a release build. See [Updating](#updating).
+12. Listed only for a release build. See [Updating](#updating).
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.
@@ -399,36 +394,31 @@ To register a Dot:
 > deregister the Dot in the Alexa app or under Manage Your Content and Devices.
 > Uninstalling revokes nothing already extracted.
 
-### Network ADB
+### Network adb
 
-`Network ADB` turns on adb over tcp/5555. A reboot returns it to `Off`.
-
-| Position | What it does |
-|---|---|
-| `Off` | adbd stops listening on the network; tcp/5555 closes |
-| `Insecure` | open to the network: **anyone on it may connect** |
-| `Secure` | open only to a client holding the installed key |
+adb over tcp/5555 is always on, and always asks for a key: firebreak's unlock
+sets it up that way at every boot, and overdub keeps the port open in the
+firewall. There is nothing to switch.
 
 - Connect with `adb connect <address>:5555`. `ANDROID_SERIAL` then picks it for
   `install.py`.
-- **`Off` and `Insecure` affect the network only.** Neither touches USB.
-- **`Secure` covers USB too.** `ro.adb.secure` applies to every transport, so
-  a machine without the installed key gets `unauthorized` over USB, and the Dot
-  has no screen to approve it.
-- `Secure` is offered only if `install.py` found a public key
-  (`~/.android/adbkey.pub` or `$ADBKEY`). That key becomes the *only* one adbd
-  accepts.
-- A position change restarts adbd, which drops every adb session. Do not change
-  it from an install that runs over adb.
-- If a key locks you out, set `Off` or `Insecure` from Home Assistant; that path
-  does not use adb. Failing that, power-cycle the Dot.
-- Uninstalling does not turn it off. A reboot does.
-- Installing with no key while in `Secure` leaves the select showing a position
-  it no longer offers, which Home Assistant marks invalid. A reboot clears it.
+- The computer that rooted the Dot always gets in: firebreak wrote its public
+  key to `/adb_keys` on the system partition, which nothing here changes, so
+  no call can lock you out, and none can revoke that key.
+- To let another machine in, give the Dot its public key from Home Assistant:
+  **Developer Tools → Actions → `ESPHome: <name>_set_adb_keys`**, and paste
+  the contents of that machine's `~/.android/adbkey.pub` into `keys`, one key
+  per line.
+- The call replaces the whole list. Send every key you want kept; send `none`
+  to remove them all. An empty `keys` is refused. No restart is needed.
+- The `adb keys` diagnostic sensor shows who can connect: the rooting
+  computer's key, then the keys set here, by the names at the end of each
+  line. After a refused call it starts with the reason and the line it
+  stopped at.
 
-> **Secure is authentication, not a sandbox.** `ro.secure=1` on this build, so
-> adbd runs as `shell` and root comes from `su`. A client with the key still
-> reaches root. Do not expose tcp/5555 beyond your own network.
+> **A key is a root shell.** adbd runs as root on this build. Anyone with the
+> Dot's Home Assistant API key can install an adb key. Do not expose tcp/5555
+> beyond your own network.
 
 ### Pairing with Music Assistant
 
