@@ -416,6 +416,48 @@ firewall. There is nothing to switch.
   line. After a refused call it starts with the reason and the line it
   stopped at.
 
+#### A Dot rooted before firebreak v1.2.0
+
+If `install.py` warns `ro.adb.secure is not 1`, firebreak did not lock adb on
+this Dot. **Any host on its network gets a root shell,** and keys set from Home
+Assistant do nothing. Lock it like this, from the computer that rooted it,
+whose `~/.android/adbkey.pub` becomes the one key. docs/device.md says why
+each step is shaped this way.
+
+```sh
+adb push ~/.android/adbkey.pub /data/local/tmp/adbkey.pub
+adb shell
+```
+
+Then, on the Dot:
+
+```sh
+k=/data/local/tmp/adbkey.pub; t=/data/local/tmp/default.prop.new
+lock() {  # $1: the slot's root, empty for the running one
+  sed 's|^ro.adb.secure=.*|ro.adb.secure=1|' $1/default.prop > $t
+  grep -qx ro.adb.secure=1 $t || echo ro.adb.secure=1 >> $t
+  cat $t > $1/default.prop
+  cat $k > $1/system/adb_keys.new
+  chmod 0644 $1/system/adb_keys.new
+  chcon u:object_r:adb_keys_file:s0 $1/system/adb_keys.new
+  mv $1/system/adb_keys.new $1/adb_keys
+  sync
+  grep -x ro.adb.secure=1 $1/default.prop
+  cmp $k $1/adb_keys && ls -lZ $1/adb_keys
+}
+mount -o rw,remount / && lock ""; mount -o ro,remount /
+o=b; [ "$(getprop ro.boot.slot_suffix)" = _b ] && o=a
+m=/data/local/tmp/other; mkdir -p $m
+mount -t ext4 /dev/block/by-name/system_$o $m && lock $m; umount $m; rmdir $m
+rm -f $k $t
+```
+
+Each slot must print `ro.adb.secure=1` and
+`-rw-r--r-- ... u:object_r:adb_keys_file:s0 ... adb_keys`. **Do not reboot
+otherwise:** with the property set and no key adbd can read, adb is shut, and
+the way back is firebreak's gesture into TWRP. After `adb reboot`, this
+computer gets back in and any other gets `unauthorized`.
+
 > **A key is a root shell.** adbd runs as root on this build. Anyone with the
 > Dot's Home Assistant API key can install an adb key. Do not expose tcp/5555
 > beyond your own network.

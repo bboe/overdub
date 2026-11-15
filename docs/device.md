@@ -9,7 +9,8 @@ docs/api.md, with the polls that drive it.
 `internal/device/adb.go`: adb over tcp/5555, so a Dot on a shelf can be worked
 on without a cable.
 
-- firebreak's Fire OS 6 unlock leaves adb always on and always authenticated.
+- firebreak's Fire OS 6 unlock leaves adb always on, and from v1.2.0 always
+  authenticated.
   `/init.mt8163.usb.rc` sets `service.adb.tcp.port 5555` at every boot,
   `/system/bin/firewall.sh` opens tcp/5555 while `persist.sys.usb.config`
   holds `adb`, and the system partition carries `ro.adb.secure=1` and, in
@@ -66,9 +67,38 @@ on without a cable.
 - `install.py` pushes no key. It removes `/data/local/bin/adb_keys`, where
   an earlier install put one, and the copy in `/data/misc/adb/adb_keys` when
   the md5s match: that copy still opened adb. It warns when `ro.adb.secure`
-  is not 1, because the old Insecure mode left it that way until a reboot.
-  `uninstall.py` removes the keys set from Home Assistant; `/adb_keys` still
-  opens adb.
+  is not 1. `uninstall.py` removes the keys set from Home Assistant;
+  `/adb_keys` still opens adb.
+
+### A Dot rooted before the lock
+
+- firebreak locks adb from v1.2.0. A Dot rooted earlier has
+  `ro.adb.secure=0` in `/default.prop` and no `/adb_keys`, so any host on its
+  network gets a root shell, and keys set from Home Assistant are not
+  consulted. A reboot does not change it: the file is on the system
+  partition. Seen on main-bedroom, a radar on 8149.
+- `install.py` asks whether `getprop ro.adb.secure` is 1 with a word of its
+  own, so a failed `adb shell` or a stray stderr line does not raise the
+  warning.
+- The fix is firebreak's lock, done on the running Dot to both slots:
+  `ro.adb.secure=1` in `default.prop`, and the rooting computer's
+  `adbkey.pub` as `/adb_keys`, `0644`, labelled `adb_keys_file`. It takes
+  effect at the next boot. docs/usage.md has the commands.
+- firebreak writes these from TWRP, where SELinux is permissive. On the
+  running Dot it enforces, and `/` is labelled `rootfs`, so every file
+  created there is refused: `avc: denied { associate } ... scontext=
+  u:object_r:rootfs:s0 tcontext=u:object_r:labeledfs:s0`. `sed -i` fails
+  too, because it writes a temporary file. Setting `fscreate` from the shell
+  did not take.
+- So `default.prop` is rewritten in place, `cat new > /default.prop`, which
+  creates nothing. The key is created in `/system`, on the same partition,
+  labelled with `chcon`, and moved to `/adb_keys`: a rename makes no new
+  inode. The other slot, mounted read-write under `/data/local/tmp`, carries
+  the same labels and takes the same steps.
+- With `ro.adb.secure=1` and no key adbd can read, adb is shut after the
+  reboot, and the way back is firebreak's gesture into TWRP. So both slots
+  are read back first: the property, the key byte for byte, the mode and the
+  label.
 
 ## A setting that survives a reboot
 
