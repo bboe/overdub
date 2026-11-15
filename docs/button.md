@@ -65,6 +65,24 @@
 - None of this holds up the daemon. It runs beside the API, and a failure is a
   logged warning: the button works without it, and only keys passed on are
   lost.
+- Any node can go, not only the clone. `btmanagerd` makes an `AVRCP` node
+  while a Bluetooth speaker is connected and destroys it at the disconnect. A
+  reader restarted while a speaker was connected opens it, and after the
+  disconnect spins on it: `acebuttond` held `/dev/input/event5 (deleted)` at
+  25% of a CPU on donut, with the load average at 10. A reader started at boot
+  usually never sees it.
+- So a reader is settled only when it holds the clone and no destroyed
+  `/dev/input` node. The daemon watches `/dev/input` with inotify and, on any
+  deletion, runs the same restart. A reader that is settled is left alone, so
+  most deletions restart nothing. On donut the disconnect restarted
+  `acebuttond` in 818 ms; `ace_usagestat_protod` never held the node.
+- The watch starts before the first restart, which can take a minute. A
+  node destroyed during it waits in the queue and starts another pass, so a
+  speaker that leaves while a reader settles is not missed.
+- The clone's own deletion is skipped. It goes when the daemon stops, and the
+  next daemon restarts the readers anyway.
+- A watch that fails, or that the kernel removes, is logged once and not
+  retried. A queue overflow counts as a deletion.
 - Uninstalling restarts both again, after the daemon stops, so they let go of
   the clone it removed.
 - A restart can fail once. init kills with SIGKILL, and a new `acebuttond`

@@ -94,6 +94,9 @@ covering whatever you are about to touch.
   descriptor, burn CPU, and never open the new clone, so an action press
   passed on reaches nothing. The daemon restarts both after making its clone.
   docs/button.md has the measurements.
+- Any destroyed node does it, not only the clone. A Bluetooth speaker's
+  `AVRCP` node goes at the disconnect, so the daemon restarts a reader holding
+  any destroyed `/dev/input` node, on an inotify watch of the directory.
 
 ## The firewall
 
