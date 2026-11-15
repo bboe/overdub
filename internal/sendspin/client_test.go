@@ -114,7 +114,11 @@ func bringUp(t *testing.T, c *Client, ln net.Listener) (*wsPeer, *serverSide, cl
 	if err := json.Unmarshal(payload, &cs); err != nil {
 		t.Fatalf("decoding client/state: %v", err)
 	}
-	if kind, _ := readJSON(t, peer, server); kind != typeClientTime {
+	kind, _ = readJSON(t, peer, server)
+	for kind == typeClientState {
+		kind, _ = readJSON(t, peer, server)
+	}
+	if kind != typeClientTime {
 		t.Fatalf("wanted %s once the player role is active, got %s", typeClientTime, kind)
 	}
 	return peer, server, cs
