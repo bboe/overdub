@@ -150,47 +150,6 @@ func parseWifiLevel(table, iface string) (float32, bool) {
 	return 0, false
 }
 
-var routeDump = newDumpsys("audio", 1000*time.Millisecond, 500*time.Millisecond)
-
-func RouteReadBudget() time.Duration { return routeDump.budget() }
-
-func BluetoothRouted() (connected, known bool) {
-	out, err := routeDump.read()
-	if err != nil {
-		return false, false
-	}
-	return parseBluetoothRoute(string(out))
-}
-
-func parseBluetoothRoute(dump string) (connected, known bool) {
-	inRoutes := false
-	for _, line := range strings.Split(dump, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "Audio routes:" {
-			inRoutes = true
-			continue
-		}
-		if !inRoutes {
-			continue
-		}
-		value, ok := strings.CutPrefix(trimmed, "mBluetoothName=")
-		if !ok {
-			if trimmed != "" && line == strings.TrimLeft(line, " \t") {
-				return false, false
-			}
-			continue
-		}
-		switch strings.TrimSpace(value) {
-		case "Device Connected":
-			return true, true
-		case "Device NOT Connected":
-			return false, true
-		}
-		return false, false
-	}
-	return false, false
-}
-
 var jackSwitchPath = "/sys/class/switch/h2w/state"
 
 func JackOccupied() (bool, bool) {

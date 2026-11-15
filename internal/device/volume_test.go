@@ -15,11 +15,13 @@ func resetVolume(t *testing.T) {
 	wasCommand, wasSettle, wasWatch := lipcCommand, volumeSettle, volumeWatchArgv
 	volume.mu.Lock()
 	volume.level, volume.levelOK, volume.muted, volume.muteOK = 0, false, false, false
+	volume.output, volume.outputOK = "", false
 	volume.mu.Unlock()
 	t.Cleanup(func() {
 		lipcCommand, volumeSettle, volumeWatchArgv = wasCommand, wasSettle, wasWatch
 		volume.mu.Lock()
 		volume.level, volume.levelOK, volume.muted, volume.muteOK = 0, false, false, false
+		volume.output, volume.outputOK = "", false
 		volume.mu.Unlock()
 	})
 }
@@ -250,6 +252,7 @@ func TestAReadSeedsWhatNoEventHasSaid(t *testing.T) {
 	want := []string{
 		"/system/bin/lipc-get-prop -i -q com.doppler.audiod MainVolume",
 		"/system/bin/lipc-get-prop -i -q com.doppler.audiod Mute",
+		"/system/bin/lipc-get-prop -s -q com.doppler.audiod OutputDevice",
 	}
 	if got := calls.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("the reads were %q, want %q: the events come from audiod, so the seed"+

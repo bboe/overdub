@@ -23,7 +23,7 @@ const (
 var (
 	lipcGetPath     = "/system/bin/lipc-get-prop"
 	lipcSetPath     = "/system/bin/lipc-set-prop"
-	volumeWatchArgv = []string{"/system/bin/lipc-wait-event", "-m", audiod, "MainVolumeChanged,MuteChanged"}
+	volumeWatchArgv = []string{"/system/bin/lipc-wait-event", "-m", audiod, "MainVolumeChanged,MuteChanged,OutputDeviceChanged"}
 
 	lipcTimeout   = time.Second
 	lipcWaitDelay = 100 * time.Millisecond
@@ -54,6 +54,9 @@ var volume struct {
 	muteOK   bool
 	levelGen uint64
 	muteGen  uint64
+	output   string
+	outputOK bool
+	outGen   uint64
 	changed  chan struct{}
 }
 
@@ -193,9 +196,10 @@ func followVolume() error {
 func forgetVolume() {
 	volume.mu.Lock()
 	defer volume.mu.Unlock()
-	volume.levelOK, volume.muteOK = false, false
+	volume.levelOK, volume.muteOK, volume.outputOK = false, false, false
 	volume.levelGen++
 	volume.muteGen++
+	volume.outGen++
 	notifyLocked()
 }
 
@@ -219,11 +223,12 @@ func rereadVolume(stop <-chan struct{}) {
 
 func readVolume() {
 	volume.mu.Lock()
-	levelGen, muteGen := volume.levelGen, volume.muteGen
+	levelGen, muteGen, outGen := volume.levelGen, volume.muteGen, volume.outGen
 	volume.mu.Unlock()
 
 	level, levelErr := lipcGet(audiod, "MainVolume")
 	mute, muteErr := lipcGet(audiod, "Mute")
+	output, outputErr := lipcGetString(audiod, "OutputDevice")
 
 	volume.mu.Lock()
 	defer volume.mu.Unlock()
@@ -233,10 +238,17 @@ func readVolume() {
 	if muteErr == nil && volume.muteGen == muteGen {
 		volume.muted, volume.muteOK = mute != 0, true
 	}
+	if outputErr == nil && volume.outGen == outGen {
+		volume.output, volume.outputOK = output, true
+	}
 	notifyLocked()
 }
 
 func volumeEvent(line string) {
+	if value, ok := strings.CutPrefix(strings.TrimSpace(line), "OutputDeviceChanged "); ok {
+		outputEvent(value)
+		return
+	}
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
 		return
@@ -267,13 +279,43 @@ func volumeEvent(line string) {
 }
 
 func lipcGet(service, property string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), lipcTimeout)
-	defer cancel()
-	out, err := lipcCommand(ctx, []string{lipcGetPath, "-i", "-q", service, property})
+	out, err := lipcRead("-i", service, property)
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(out)))
+	return strconv.Atoi(strings.TrimSpace(out))
+}
+
+func lipcRead(kind, service, property string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), lipcTimeout)
+	defer cancel()
+	out, err := lipcCommand(ctx, []string{lipcGetPath, kind, "-q", service, property})
+	return string(out), err
+}
+
+func outputEvent(value string) {
+	quoted, ok := strings.CutPrefix(strings.TrimSpace(value), `"`)
+	if !ok {
+		return
+	}
+	kind, _, ok := strings.Cut(quoted, "##")
+	if !ok {
+		return
+	}
+	output := kind + "##"
+	volume.mu.Lock()
+	defer volume.mu.Unlock()
+	volume.output, volume.outputOK = output, true
+	volume.outGen++
+	notifyLocked()
+}
+
+func lipcGetString(service, property string) (string, error) {
+	out, err := lipcRead("-s", service, property)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(out, "\r\n"), nil
 }
 
 func lipcSet(service, property string, value int) error {
