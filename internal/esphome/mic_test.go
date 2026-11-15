@@ -23,14 +23,14 @@ func wireFakeMic(s *Server, muted bool) *fakeMic {
 		defer f.mu.Unlock()
 		return f.muted, f.known
 	}
-	s.micPress = func() error {
+	s.micSet = func(muted bool) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.presses++
 		if f.pressErr != nil {
 			return f.pressErr
 		}
-		f.muted = !f.muted
+		f.muted = muted
 		return nil
 	}
 	return f

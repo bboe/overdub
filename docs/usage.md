@@ -203,7 +203,8 @@ Each entity id is `<domain>.<name>_<suffix>`.
 
 1. See [The action button](#the-action-button).
 2. Volume and mute, and playback of any URL Home Assistant can transcode.
-3. Setting it presses the mute key, ring included.
+3. Turning it on mutes the microphones as the button does, ring included.
+   Turning it off is refused: only the button turns them back on.
 4. A reading that is not a signal is missing, not zero.
 5. Bluetooth that carries no audio, such as the Alexa app over BLE, does not
    count. `bluetooth_device` is the speaker's name, or its address when the Dot

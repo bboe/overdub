@@ -77,6 +77,10 @@
   lost.
 - Uninstalling restarts both again, after the daemon stops, so they let go of
   the clone it removed.
+- A restart can fail once. init kills with SIGKILL, and a new `acebuttond`
+  that starts before D-Bus has released the old one's name exits with
+  `initFailed: reason=lipcOpenFailed`; init starts it again 5 seconds later.
+  The 30-second read-back covers that.
 
 ### What is fatal, and why
 

@@ -200,7 +200,7 @@ func TestTheLiveTickIsPositiveAndBeatsTheSensorTick(t *testing.T) {
 		t.Errorf("the expensive readings run every %v and one may take %v, so a slow read "+
 			"delays the readings behind it", heavy, device.RouteReadBudget())
 	}
-	stacked := device.RouteReadBudget() + device.MicReadBudget() + device.SpeakerReadBudget()
+	stacked := device.RouteReadBudget() + device.SpeakerReadBudget()
 	if stacked >= heavy {
 		t.Errorf("one heavy tick can spend %v on its forks against an interval of %v, so a "+
 			"device that answers slowly pushes the next tick out", stacked, heavy)
@@ -1852,5 +1852,28 @@ func TestAMediaClipTakesTheDotFromSendspinAndAnAnnouncementDoesNot(t *testing.T)
 	if elsewhere() || client.noted.Load() != 2 {
 		t.Errorf("the clip ended and elsewhere=%v after %d nudges, want false after 2",
 			elsewhere(), client.noted.Load())
+	}
+}
+
+func TestTheDriversKeyForTheDaemonsOwnMuteIsNotAPress(t *testing.T) {
+	e := &muteEchoes{}
+	if e.down(muteKey) || e.up(muteKey) {
+		t.Fatal("a press with no mute under way was taken for an echo")
+	}
+	e.arm(time.Now())
+	if !e.down(muteKey) {
+		t.Error("the key the driver sends as the daemon mutes was reported as a press;" +
+			" an automation on the mute button fires on a mute from Home Assistant")
+	}
+	if !e.up(muteKey) {
+		t.Error("the up of a swallowed down reached the gesture, which saw half a press")
+	}
+	if e.down(actionKey) {
+		t.Error("the action button was swallowed by a mute")
+	}
+	e.arm(time.Now().Add(-2 * micEcho))
+	if e.down(muteKey) {
+		t.Errorf("a press %v after the mute's write was taken for its echo: a real press"+
+			" while acebuttond restarts must still be reported", 2*micEcho)
 	}
 }
