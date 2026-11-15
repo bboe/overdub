@@ -128,15 +128,11 @@ Binary size, measured on a linux/arm build of the daemon:
   file. `/data/local/tmp` is `drwxrwx--x` and `overdub.log` is `-rw-r--r--`,
   so every uid can read the log, and it travels in any `adb pull`.
 - The daemon logs the `client_id` only. `install.py` reads the key file with
-  `/system/bin/busybox od` through `su`, builds the token on the host, and
-  prints it to the terminal. The daemon sends the token only inside the
-  ESPHome API's encrypted session, and only when asked.
-- `su -c`'s `PATH` holds no `od`, `hexdump`, `xxd` or `base64`: the toolbox
-  has none, and Magisk's busybox in `/sbin/.core/busybox` is not on it. So a
-  bare `od` is not found, and the read comes back empty. Fire OS 5 ships
-  busybox 1.22.1 at `/system/bin/busybox`, whatever Magisk is installed.
-- busybox `od` prints `*` in place of a repeated 16-byte row, so the read
-  passes `-v`.
+  toybox `od`, builds the token on the host, and prints it to the terminal.
+  The daemon sends the token only inside the ESPHome API's encrypted session,
+  and only when asked.
+- `od` prints `*` in place of a repeated 16-byte row, so the read passes
+  `-v`.
 - There is no flag to print it: a flag run by the supervisor would print into
   the log.
 - **A token that reached a log is disclosed.** Rotate by deleting the key file

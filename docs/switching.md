@@ -10,7 +10,8 @@ takes the same flags, and its targets have new names:
 | `v2` | `amonet-biscuit-v2.0.0` | rooted Fire OS 6 8146 |
 | `stock BUILD` | `stock BUILD` | stock Fire OS 6 at that build |
 
-overdub runs only on Fire OS 5, so only the first two can host it.
+overdub runs only on rooted Fire OS 6. Of these, only `v2` can host it, and
+firebreak's current Fire OS 6 targets are its README's to list.
 
 ## Getting the script
 

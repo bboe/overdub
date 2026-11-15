@@ -1,9 +1,10 @@
 # CLAUDE.md
 
-A single Go binary that takes over the action button on a rooted **Echo Dot (2nd
-Generation)** (model RS03QR, codename biscuit, FireOS 5.5.5.4) and presents the
-Dot to Home Assistant as an ESPHome device. It runs on the Dot itself, under
-Magisk, alongside stock Alexa.
+A single Go binary that takes over the action button on an Echo rooted to Fire
+OS 6 by firebreak -- the Echo Dot (2nd Generation), biscuit; the Echo (2nd
+Generation), radar; the Echo Dot (3rd Generation), donut -- and presents it to
+Home Assistant as an ESPHome device. It runs on the Echo itself, as root,
+alongside stock Alexa.
 
 `README.md` has the basics, the install steps and the videos; `docs/usage.md`
 says how to use it. This file and the rest of `docs/` say why, and most of it
