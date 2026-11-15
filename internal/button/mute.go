@@ -1,6 +1,7 @@
 package button
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -76,4 +77,76 @@ func (g *VolumeGuard) Close() {
 		_ = evdev.Grab(g.node, false)
 		_ = g.node.Close()
 	})
+}
+
+var ErrReleased = errors.New("the volume keys were released")
+
+type HeldVolume struct {
+	i        *Interceptor
+	presses  chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func (i *Interceptor) HoldVolume() (*HeldVolume, error) {
+	if !i.CarriesVolume() {
+		return nil, errors.New("this node does not carry both volume keys under a grab")
+	}
+	h := &HeldVolume{i: i, presses: make(chan struct{}, 1), released: make(chan struct{})}
+	i.volMu.Lock()
+	defer i.volMu.Unlock()
+	if i.held != nil {
+		return nil, errors.New("the volume keys are already held")
+	}
+	i.held = h
+	return h, nil
+}
+
+func (h *HeldVolume) Wait() error {
+	select {
+	case <-h.presses:
+		return nil
+	case <-h.released:
+		return ErrReleased
+	}
+}
+
+func (h *HeldVolume) Close() {
+	h.once.Do(func() {
+		h.i.volMu.Lock()
+		if h.i.held == h {
+			h.i.held = nil
+		}
+		h.i.volMu.Unlock()
+		close(h.released)
+	})
+}
+
+func (i *Interceptor) swallowVolume(e evdev.Event) bool {
+	if e.Type != evdev.EvKey || e.Code != KeyVolumeUp && e.Code != KeyVolumeDown {
+		return false
+	}
+	i.volMu.Lock()
+	defer i.volMu.Unlock()
+	if i.held != nil && e.Value == evdev.KeyPress {
+		if i.swallowing == nil {
+			i.swallowing = map[uint16]bool{}
+		}
+		i.swallowing[e.Code] = true
+		select {
+		case i.held.presses <- struct{}{}:
+		default:
+		}
+		return true
+	}
+	if i.held != nil && e.Value == evdev.KeyRepeat {
+		return true
+	}
+	if !i.swallowing[e.Code] {
+		return false
+	}
+	if e.Value == evdev.KeyRelease {
+		delete(i.swallowing, e.Code)
+	}
+	return true
 }

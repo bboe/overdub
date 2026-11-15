@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,11 +24,16 @@ import (
 type Interceptor struct {
 	node  *os.File
 	clone *evdev.Uinput
+	keys  []uint16
 	once  sync.Once
 
 	emitMu sync.Mutex
 
 	watched map[uint16]*watch
+
+	volMu      sync.Mutex
+	held       *HeldVolume
+	swallowing map[uint16]bool
 }
 
 type watch struct {
@@ -39,8 +45,10 @@ type watch struct {
 
 const (
 	virtualInputDir = "/sys/devices/virtual/input"
+	sysClassInput   = "/sys/class/input"
 	inputDevDir     = "/dev/input"
 	accessPoll      = 50 * time.Millisecond
+	findPoll        = time.Second
 )
 
 type Mode int32
@@ -63,7 +71,7 @@ func (m Mode) String() string {
 	return ""
 }
 
-func Open(path, uiName string, wait time.Duration, start map[uint16]Mode) (*Interceptor, error) {
+func Open(path string, wait time.Duration, start map[uint16]Mode) (*Interceptor, error) {
 	if len(start) == 0 {
 		return nil, fmt.Errorf("%s: no keycodes to act on", path)
 	}
@@ -98,10 +106,14 @@ func Open(path, uiName string, wait time.Duration, start map[uint16]Mode) (*Inte
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("cloning %d keycodes from %s (bus %#04x vendor %#04x product %#04x version %#04x)",
-		len(keys), path, id.Bus, id.Vendor, id.Product, id.Version)
+	name, err := evdev.DeviceName(file)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("cloning %d keycodes from %s as %q (bus %#04x vendor %#04x product %#04x"+
+		" version %#04x)", len(keys), path, name, id.Bus, id.Vendor, id.Product, id.Version)
 
-	uinput, err = evdev.NewUinput(uiName, id, keys)
+	uinput, err = evdev.NewUinput(name, id, keys)
 	if err != nil {
 		return nil, fmt.Errorf("uinput: %w (is CONFIG_UINPUT present, and are you root?)", err)
 	}
@@ -111,13 +123,70 @@ func Open(path, uiName string, wait time.Duration, start map[uint16]Mode) (*Inte
 	}
 
 	started = true
-	i := &Interceptor{node: file, clone: uinput, watched: map[uint16]*watch{}}
+	return newInterceptor(file, uinput, keys, start), nil
+}
+
+func newInterceptor(file *os.File, clone *evdev.Uinput, keys []uint16,
+	start map[uint16]Mode) *Interceptor {
+	i := &Interceptor{node: file, clone: clone, keys: keys, watched: map[uint16]*watch{}}
 	for code, mode := range start {
+		if !slices.Contains(keys, code) {
+			continue
+		}
 		w := &watch{}
 		w.mode.Store(int32(mode))
 		i.watched[code] = w
 	}
-	return i, nil
+	return i
+}
+
+func Watch(path string, start map[uint16]Mode) (*Interceptor, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := evdev.DeviceKeys(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return newInterceptor(file, nil, keys, start), nil
+}
+
+var nodeKeys = func(path string) ([]uint16, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return evdev.DeviceKeys(f)
+}
+
+func FindNode(wait time.Duration, keys ...uint16) (string, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		if path, ok := findNode(inputDevDir, sysClassInput, keys...); ok {
+			return path, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("no input node declares keycodes %v", keys)
+		}
+		time.Sleep(findPoll)
+	}
+}
+
+func findNode(devDir, classDir string, want ...uint16) (string, bool) {
+	paths, _ := filepath.Glob(filepath.Join(devDir, "event*"))
+	for _, path := range paths {
+		link, err := os.Readlink(filepath.Join(classDir, filepath.Base(path)))
+		if err != nil || strings.Contains(link, "/virtual/") {
+			continue
+		}
+		if keys, err := nodeKeys(path); err == nil && containsAll(keys, want) {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 func (i *Interceptor) CloneNode(wait time.Duration) (string, error) {
@@ -187,14 +256,37 @@ func (i *Interceptor) SetMode(code uint16, m Mode) {
 
 func (i *Interceptor) Close() {
 	i.once.Do(func() {
-		_ = i.clone.Close()
-		_ = evdev.Grab(i.node, false)
+		if i.clone != nil {
+			_ = i.clone.Close()
+			_ = evdev.Grab(i.node, false)
+		}
 		_ = i.node.Close()
 	})
 }
 
+func (i *Interceptor) Path() string { return i.node.Name() }
+
+func (i *Interceptor) Declares(code uint16) bool { return slices.Contains(i.keys, code) }
+
+func (i *Interceptor) CarriesVolume() bool {
+	return i.clone != nil && containsAll(i.keys, []uint16{KeyVolumeUp, KeyVolumeDown})
+}
+
+func containsAll(have, want []uint16) bool {
+	for _, k := range want {
+		if !slices.Contains(have, k) {
+			return false
+		}
+	}
+	return true
+}
+
 func (i *Interceptor) Run(onDown func(uint16, Mode), onPress func(uint16, Mode, time.Duration)) error {
-	return i.route(i.node, i.emit, onDown, onPress)
+	emit := i.emit
+	if i.clone == nil {
+		emit = func(uint16, int32) error { return nil }
+	}
+	return i.route(i.node, emit, onDown, onPress)
 }
 
 func (i *Interceptor) emit(code uint16, value int32) error {
@@ -205,6 +297,9 @@ func (i *Interceptor) emit(code uint16, value int32) error {
 }
 
 func (i *Interceptor) Press(code uint16) error {
+	if i.clone == nil {
+		return errors.New("a watched node has no clone, so nothing can press its keys")
+	}
 	i.emitMu.Lock()
 	defer i.emitMu.Unlock()
 
@@ -230,6 +325,9 @@ func (i *Interceptor) route(r io.Reader, emit func(uint16, int32) error, onDown 
 			return err
 		}
 		event := evdev.Unmarshal(buf)
+		if i.swallowVolume(event) {
+			continue
+		}
 
 		if w, ours := i.watched[event.Code]; ours && event.Type == evdev.EvKey {
 			switch event.Value {

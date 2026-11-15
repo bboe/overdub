@@ -110,6 +110,7 @@ type physicalButton struct {
 
 	mode    func() string
 	setMode func(string)
+	options []string
 }
 
 func shipped(mode string) func() string { return func() string { return mode } }
@@ -344,6 +345,7 @@ func newButtons() []*physicalButton {
 			keyEvent: entityKey(b.objectID),
 			keyMode:  entityKey(b.objectID + "_mode"),
 			mode:     shipped(buttonModes[0]),
+			options:  buttonModes,
 		})
 	}
 	return out
@@ -371,6 +373,12 @@ func (s *Server) button(objectID string) *physicalButton {
 func (s *Server) UseButton(objectID string, mode func() string, setMode func(string)) {
 	if b := s.button(objectID); b != nil {
 		b.mode, b.setMode = mode, setMode
+	}
+}
+
+func (s *Server) OfferModes(objectID string, options []string) {
+	if b := s.button(objectID); b != nil {
+		b.options = slices.Clone(options)
 	}
 }
 
@@ -870,7 +878,7 @@ func (s *Server) setDelayLocked(conn *conn, want float32) {
 }
 
 func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
-	if !slices.Contains(buttonModes, choice) {
+	if !slices.Contains(b.options, choice) {
 		conn.noted = fmt.Sprintf("esphome api: %s asked %s for mode %q, which was not offered",
 			conn.sock.RemoteAddr(), b.objectID, untrustedlog.Cut(choice))
 		return

@@ -29,15 +29,10 @@ import (
 )
 
 const (
-	inputNode  = "/dev/input/event1"
-	volumeNode = "/dev/input/event2"
-	actionKey  = 138
-	muteKey    = 113
-	uinputName = "mtk-kpd"
-	wifiIface  = device.WifiInterface
-	apiPort    = 6053
-
-	deviceModel = "Echo Dot (2nd Generation)"
+	actionKey = 138
+	muteKey   = 113
+	wifiIface = device.WifiInterface
+	apiPort   = 6053
 
 	noiseKeyPath      = "/data/local/bin/.overdub-noise-key"
 	sendspinKeyPath   = "/data/local/bin/.overdub-sendspin-key"
@@ -214,17 +209,31 @@ func restartReaders(i *button.Interceptor) {
 	}
 }
 
+var deviceBoard, deviceModel string
+
 func serve(flags config) error {
 	psk, err := loadPSK(noiseKeyPath)
 	if err != nil {
 		return err
 	}
+	deviceBoard = device.Board()
+	deviceModel = device.ModelName(deviceBoard)
 
-	i, err := button.Open(inputNode, uinputName, nodeWait, buttonStart())
+	if deviceBoard == "" {
+		log.Print("warning: ro.product.device reads empty, so the model is shown as Echo")
+	}
+
+	actionNode, err := button.FindNode(nodeWait, actionKey)
+	if err != nil {
+		return err
+	}
+	i, err := button.Open(actionNode, nodeWait, buttonStart())
 	if err != nil {
 		return err
 	}
 	defer i.Close()
+	keys := keyOwners(i)
+	muteGuard = volumeGuardFor(i)
 	go restartReaders(i)
 
 	sig := make(chan os.Signal, 1)
@@ -258,15 +267,16 @@ func serve(flags config) error {
 		}}).Run()
 	}
 
-	go serveAPI(flags.Name, psk, i, player, clips)
+	go serveAPI(flags.Name, psk, i, keys, player, clips)
 
 	var held []string
 	for code, b := range buttons {
-		held = append(held, fmt.Sprintf("%d %s (%v)", code, b.objectID, b.start))
+		if owner := keys[code]; owner != nil {
+			held = append(held, fmt.Sprintf("%d %s (%v) on %s", code, b.objectID, b.start, owner.Path()))
+		}
 	}
 	sort.Strings(held)
-	log.Printf("watching %s: %s, passing the rest to %q",
-		inputNode, strings.Join(held, ", "), uinputName)
+	log.Printf("watching %s", strings.Join(held, ", "))
 
 	chains := map[uint16]*button.MultiPress{}
 	for code, b := range buttons {
@@ -292,19 +302,67 @@ func serve(flags config) error {
 			})
 	}
 
-	return i.Run(
-		func(code uint16, mode button.Mode) {
-			chains[code].Down()
-			if chime == nil || !chimes(code, mode) {
-				return
+	down := func(code uint16, mode button.Mode) {
+		chains[code].Down()
+		if chime == nil || !chimes(code, mode) {
+			return
+		}
+		go func() {
+			if err := chime.Play(); err != nil {
+				log.Printf("chime: %v", err)
 			}
-			go func() {
-				if err := chime.Play(); err != nil {
-					log.Printf("chime: %v", err)
-				}
-			}()
-		},
-		func(code uint16, _ button.Mode, held time.Duration) { chains[code].Up(held) })
+		}()
+	}
+	up := func(code uint16, _ button.Mode, held time.Duration) { chains[code].Up(held) }
+	if w := keys[muteKey]; w != nil && w != i {
+		defer w.Close()
+		go func() {
+			err := w.Run(down, up)
+			log.Printf("mute_button: watching %s stopped: %v; its presses go unreported until"+
+				" the daemon restarts", w.Path(), err)
+		}()
+	}
+	return i.Run(down, up)
+}
+
+func keyOwners(i *button.Interceptor) map[uint16]*button.Interceptor {
+	owners := map[uint16]*button.Interceptor{}
+	for code, b := range buttons {
+		if i.Declares(code) {
+			owners[code] = i
+			continue
+		}
+		path, err := button.FindNode(0, code)
+		if err == nil {
+			owners[code], err = button.Watch(path, map[uint16]button.Mode{code: b.start})
+		}
+		if err != nil {
+			log.Printf("%s: %v; it is not reported", b.objectID, err)
+			delete(owners, code)
+		}
+	}
+	return owners
+}
+
+func volumeGuardFor(i *button.Interceptor) func() (volumeGuard, error) {
+	var path string
+	return func() (volumeGuard, error) {
+		if path == "" {
+			found, err := button.FindNode(0, button.KeyVolumeUp, button.KeyVolumeDown)
+			if err != nil {
+				return nil, err
+			}
+			path = found
+		}
+		if path != i.Path() {
+			return button.GuardVolume(path, guardWait)
+		}
+		h, err := i.HoldVolume()
+		if err != nil {
+			return nil, err
+		}
+		return h, nil
+	}
 }
 
 type trial struct {
@@ -360,6 +418,8 @@ func buttonStart() map[uint16]button.Mode {
 	return out
 }
 
+var watchedModes = []string{button.ModeMonitor.String(), button.ModePassThrough.String()}
+
 func chimes(code uint16, mode button.Mode) bool {
 	return mode == button.ModeIntercept && buttons[code].chime
 }
@@ -387,7 +447,8 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 	return "", false
 }
 
-func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Player,
+func serveAPI(name string, psk []byte, i *button.Interceptor,
+	owners map[uint16]*button.Interceptor, player sendspin.Player,
 	clips *clip.Player) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
@@ -402,24 +463,33 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 	go trial{marker: trialPath, prev: prevPath, failed: failedPath}.
 		settle(version, server.Served(), trialWait)
 	for code, b := range buttons {
+		owner := owners[code]
+		if owner == nil {
+			continue
+		}
 		server.UseButton(b.objectID,
-			func() string { return i.Mode(code).String() },
+			func() string { return owner.Mode(code).String() },
 			func(choice string) {
 				if m, ok := parseButtonMode(choice); ok {
-					i.SetMode(code, m)
+					owner.SetMode(code, m)
 				}
 			})
-	}
-	server.UseMicMute(func() error {
-		err := i.Press(muteKey)
-		if errors.Is(err, button.ErrKeyStuck) {
-			log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
-			stopping()
-			i.Close()
-			os.Exit(1)
+		if owner != i {
+			server.OfferModes(b.objectID, watchedModes)
 		}
-		return err
-	})
+	}
+	if i.Declares(muteKey) {
+		server.UseMicMute(func() error {
+			err := i.Press(muteKey)
+			if errors.Is(err, button.ErrKeyStuck) {
+				log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
+				stopping()
+				i.Close()
+				os.Exit(1)
+			}
+			return err
+		})
+	}
 
 	go device.FollowVolume()
 	server.UseVolumeSetter(device.SetMusicVolume)
@@ -451,7 +521,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor, player sendspin.Pl
 
 	api.Store(server)
 
-	base := []mdns.Advert{esphome.Advert(name, mac, apiPort)}
+	base := []mdns.Advert{esphome.Advert(name, mac, deviceBoard, apiPort)}
 	keys, records, haveKeys := sendspinKeys()
 	last, err := sendspin.LoadLastPlayback(sendspinLastPath)
 	if err != nil {
@@ -1077,7 +1147,7 @@ var (
 	muteSetter = device.SetMusicMute
 	muteLevel  func() (percent int, muted, ok bool)
 
-	muteGuard = func() (volumeGuard, error) { return button.GuardVolume(volumeNode, guardWait) }
+	muteGuard func() (volumeGuard, error)
 )
 
 func useMuteLevel(level func() (percent int, muted, ok bool)) {

@@ -157,8 +157,24 @@ Press to sound, timed to the codec substream going `RUNNING`, 5 trials each:
 
 ## The clock
 
-- Take the DAC clock from `/proc/asound/card0/pcm23p/sub0/status`: `hw_ptr`
-  with `tstamp`, from period interrupts on CLOCK_MONOTONIC, Go's `time` base.
+- Take the DAC clock from the mixer's playback status: `hw_ptr` with
+  `tstamp`, from period interrupts on CLOCK_MONOTONIC, Go's `time` base.
+- The mixer's PCM is `pcm23p` on biscuit and `pcm6p` (`DL1_Playback`) on
+  donut. So it is found, not named: the `RUNNING` status under
+  `/proc/asound/card*/pcm*p/sub0/` whose `owner_pid` is a thread of
+  `/system/bin/mixer`. `owner_pid` names the thread that opened the PCM, not
+  the process: 782 on both boards, in a mixer of pid 433 and 409. The one found
+  is kept while it runs. While none is found, the glob is read again every
+  100 ms: a stream asks every 10 ms block, and a one-second wait at its start
+  came close to the 100 readings after which it calls itself silent.
+- The mixer's pid is kept while `/proc/<pid>/cmdline` still names it, so a
+  rescan reads the PCM statuses, about 30 small files, and not every process.
+  A mixer that cannot be found is looked for at most every 5 seconds, because
+  that reads every process's cmdline under the chime's lock. Over A2DP nothing is
+  looked for: no codec PCM runs, and the delay is a fixed one.
+- With the path fixed at `pcm23p`, a Sendspin stream on donut never learned
+  where the speaker was and played silence for its whole length. The log read
+  `the player has not said where its audio has reached for 100 readings`.
 - Over 292 seconds it fits a line at **48000.19 Hz** (+3.9 ppm), residual
   0.136 ms mean and 0.485 ms worst.
 - Do not trust `AudioTrack.getTimestamp`. Three runs gave 48000.000, 48028.07

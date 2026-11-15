@@ -8,7 +8,7 @@ import (
 
 const Service = "_esphomelib._tcp.local."
 
-func Advert(instance, mac string, port uint16) mdns.Advert {
+func Advert(instance, mac, board string, port uint16) mdns.Advert {
 	return mdns.Advert{
 		Service: Service,
 		Port:    port,
@@ -18,7 +18,7 @@ func Advert(instance, mac string, port uint16) mdns.Advert {
 			"version=" + esphomeVersion,
 			"friendly_name=" + instance,
 			"platform=overdub",
-			"board=biscuit",
+			"board=" + board,
 			"network=wifi",
 		},
 	}

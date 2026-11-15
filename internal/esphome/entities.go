@@ -240,7 +240,7 @@ func (s *Server) listEntities(conn *conn) error {
 		mode.fixed32(2, b.keyMode)
 		mode.str(3, b.name+" mode")
 		mode.str(5, buttonModeIcon)
-		for _, option := range buttonModes {
+		for _, option := range b.options {
 			mode.str(6, option)
 		}
 		mode.boolean(7, false) // disabled_by_default

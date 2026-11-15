@@ -28,6 +28,7 @@ type Chime struct {
 	stop   chan struct{}
 	done   chan struct{}
 	closed bool
+	output *outputFinder
 	cut    float64
 	clip   atomic.Uint64
 	opened bool
@@ -49,11 +50,12 @@ func NewChime() (*Chime, error) {
 		clips[rate] = &clip{pcm: decode(chimePCM(rate))}
 	}
 	c := &Chime{
-		mix:   newMixer(),
-		rate:  ChimeRate,
-		clips: clips,
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
+		mix:    newMixer(),
+		rate:   ChimeRate,
+		clips:  clips,
+		output: newOutputFinder(),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 	go c.write()
 	return c, nil
@@ -284,7 +286,7 @@ func (c *Chime) ahead() (Point, error) {
 		return Point{}, errors.New("audio: nothing of ours is playing, so the queue the" +
 			" output reports is somebody else's")
 	}
-	st, err := outputStatus(socketsPath, statusPath)
+	st, err := outputStatus(socketsPath, func() string { return c.output.find(time.Now()) })
 	if err != nil {
 		return Point{}, err
 	}

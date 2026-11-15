@@ -48,6 +48,7 @@ func TestIoctlRequestsMatchTheKernelMacros(t *testing.T) {
 		{"_IOC(_IOC_READ, 'E', 0x20+EV_KEY, keyBytes)", eviocgbitKey,
 			ioc(iocRead, keyBytes, 'E', 0x20+EvKey)},
 		{"_IOR('E', 0x02, struct input_id)", eviocgid, ioc(iocRead, idBytes, 'E', 0x02)},
+		{"_IOC(_IOC_READ, 'E', 0x06, nameBytes)", eviocgname, ioc(iocRead, nameBytes, 'E', 0x06)},
 		{"_IOW('U', 100, int)", uiSetEvbit, ioc(iocWrite, sizeofInt, 'U', 100)},
 		{"_IOW('U', 101, int)", uiSetKeybit, ioc(iocWrite, sizeofInt, 'U', 101)},
 		{"_IO('U', 1)", uiDevCreate, ioc(iocNone, 0, 'U', 1)},

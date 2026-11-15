@@ -21,6 +21,7 @@ const (
 	// EV_KEY values; 2 is autorepeat.
 	KeyRelease = 0
 	KeyPress   = 1
+	KeyRepeat  = 2
 
 	// _IOW('E', 0x90, int)
 	eviocgrab = 0x40044590
@@ -34,6 +35,11 @@ const (
 
 	// struct input_id is four u16: bustype, vendor, product, version.
 	idBytes = 8
+
+	nameBytes = 80
+	// EVIOCGNAME(len) = _IOC(_IOC_READ, 'E', 0x06, len)
+	//   (2<<30) | (80<<16) | ('E'<<8) | 0x06
+	eviocgname = 0x80504506
 
 	// EVIOCGID = _IOR('E', 0x02, struct input_id)
 	//   (2<<30) | (8<<16) | ('E'<<8) | 0x02
@@ -133,6 +139,17 @@ func idFromBytes(buf []byte) InputID {
 		Product: binary.LittleEndian.Uint16(buf[4:]),
 		Version: binary.LittleEndian.Uint16(buf[6:]),
 	}
+}
+
+func DeviceName(f *os.File) (string, error) {
+	var buf [nameBytes]byte
+	if err := control(f, func(fd uintptr) error {
+		return ioctlPtr(fd, eviocgname, unsafe.Pointer(&buf[0]))
+	}); err != nil {
+		return "", fmt.Errorf("EVIOCGNAME: %w", err)
+	}
+	name, _, _ := bytes.Cut(buf[:], []byte{0})
+	return string(name), nil
 }
 
 func DeviceKeys(f *os.File) ([]uint16, error) {

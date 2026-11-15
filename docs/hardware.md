@@ -2,15 +2,56 @@
 
 ## How the device is wired
 
+biscuit, the Echo Dot (2nd Generation), `ro.product.model` `AEOBC`:
+
 | Node | Name | Keycodes |
 |---|---|---|
 | `/dev/input/event1` | `mtk-kpd` | **138 = action ("dot")**, 113 = mute |
 | `/dev/input/event2` | `keys` (gpio-keys) | 115 volume up, 114 volume down |
 
-- The daemon acts on 138 and 113. It grabs `event2` only while the Dot is
-  muted, so a volume press then lifts the mute rather than moving a level
-  nobody can hear.
-- The clone advertises every keycode `event1` declares, because the input core
+radar, the Echo (2nd Generation), `ro.product.model` `AEORD`, has biscuit's
+layout and its `pcm23p`: main-bedroom is one.
+
+donut, the Echo Dot (3rd Generation), `ro.product.model` `AEODN`:
+
+| Node | Name | Keycodes |
+|---|---|---|
+| `/dev/input/event1` | `gpio-privacy` | 113 = mute |
+| `/dev/input/event3` | `gpio-keys` | **138 = action**, 115 volume up, 114 volume down |
+
+- The numbers differ and so does the grouping, so no node is named in the
+  binary. The daemon finds each by the keycode it declares, reading
+  `EVIOCGBIT`, and skips a node whose `/sys/class/input` link runs through
+  `/devices/virtual/`: a clone, the daemon's or a leftover, and `hwmdata`.
+- The daemon acts on 138 and 113. It grabs the node carrying 138, and clones it
+  under the node's own name, read with `EVIOCGNAME`.
+- While the Dot is muted the volume keys are held, so a press lifts the mute
+  rather than moving a level nobody can hear. The node is the one declaring
+  both 114 and 115. On biscuit that is `event2`, grabbed only while muted.
+  On donut it is the action node, which is grabbed already, and a second grab
+  of a node fails; so the read loop swallows them while muted.
+- Both keys, and the node they come from, decide it, not what the action node
+  declares. biscuit's `mtk-kpd` declares 114 as well as 113 and 138, and no
+  key arrives on it but those two.
+- The node is looked for at the first mute, and again at each mute until it
+  is found, without a wait: the lookup runs under the mute's lock.
+- A swallowed key-down has its key-up swallowed too, even after the mute
+  lifts, so the clone never sees a stray up.
+- Every auto-repeat is swallowed while the keys are held, a key already down
+  when the mute began included: a repeat moves the level. That key's release
+  passes, because the clone saw its down. A grab of its own node gives the
+  same result on biscuit.
+- donut's 113 is on a node of its own, `gpio-privacy`, the hardware privacy
+  switch. The daemon reads it without a grab, so the mute button there offers
+  `monitor` and `pass through` only: nothing can keep a key from a node no one
+  holds.
+- A read that fails there stops that watch and is logged; the daemon runs on.
+  Exiting would make a lasting error a restart loop, and each restart drops
+  the action button's grab.
+- The board is `ro.product.device` up to its `_`: `biscuit_puffin` is
+  `biscuit`. It names the model Home Assistant shows, and `board=` in the mDNS
+  record: `Echo (2nd Generation)` for radar. An unknown board is shown as `Echo (<board>)`.
+- The clone advertises every keycode the action node declares, because the input core
   drops events for a keycode the device has not claimed. It declares `EV_KEY`
   alone, so other event types are dropped rather than re-emitted.
 - `system_server`'s `EventHub` reads `event1`, and
