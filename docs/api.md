@@ -91,7 +91,8 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | registration | `map.db`, read twice | 2 reads, 50 ms apart | minute, subscribed |
 | Bluetooth name | `dumpsys bluetooth_manager` | 11.5 ms | minute, subscribed |
 | button modes | held in memory | -- | minute |
-| adb mode | `/proc/net/tcp`, `iptables -C` | 2 forks if open | minute |
+| adb rule | `/proc/net/tcp`, then `iptables -C` | 1 fork if open | minute |
+| adb keys | `/adb_keys` and `/data/misc/adb/adb_keys` | 2 reads | minute, subscribed |
 | temperature | a thermal zone's `temp` | 118 µs | heavy |
 | memory | `/proc/meminfo` | 111 µs | heavy |
 | volume, mute | held from `lipc-wait-event` | -- | heavy |
@@ -321,7 +322,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   the package is in `/system/priv-app` on a Dot never set up.
 - It is read only while somebody is subscribed, as the fork it replaced was.
   `PollSensors` itself is not gated and must not be: it re-asserts the adb
-  firewall rule and reads the adb mode.
+  firewall rule.
 - So the first subscriber after a restart gets no registration state at all.
   The entity shows unknown, not unavailable, until the next minute tick.
 
@@ -583,8 +584,8 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - `switch.<name>_sendspin` changes something outside the API: it takes the whole
   Sendspin surface down.
 - `UseSendspin` creates it, so a Dot that could not read its Sendspin identity
-  lists no switch. The Alexa command box is gated the same way. The adb select
-  is not: only its `Secure` option is conditional.
+  lists no switch. The Alexa command box is gated the same way. The
+  `set_adb_keys` action is not: every Dot has adb.
 - Its setter must not block. Turning Sendspin off calls `iptables`, which waits
   on netd's xtables lock, and the goroutine answering a `SwitchCommandRequest`
   reads every frame on that connection. So the setter hands a `func(bool)` to a

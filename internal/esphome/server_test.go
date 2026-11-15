@@ -565,15 +565,15 @@ func stubSensors(s *Server) map[uint32]float32 {
 	s.jack = func() (bool, bool) { return true, true }
 	s.sound = func() (bool, bool) { return false, true }
 	s.micMute = func() (bool, bool) { return false, true }
-	s.adbMode = func() (device.ADBMode, bool) { return device.ADBOff, true }
 	s.alexa = func() (bool, bool) { return true, true }
 	s.btDevice = func() (string, bool) { return "JBL Go 3", true }
+	s.adbNames = func() ([]string, []string, bool) { return nil, nil, true }
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJackOn: 1,
 		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.4,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
-		s.keyADB: 0, s.keyAlexa: 1, s.keyOutput: 0, s.keyBTDevice: 0,
+		s.keyAlexa: 1, s.keyOutput: 0, s.keyBTDevice: 0, s.keyKeyList: 0,
 	}
 }
 
@@ -1611,10 +1611,10 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.keySpeaker:                      {"speaker", msgMediaPlayerState},
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
 				s.button("mute_button").keyMode:   {"mute_button_mode", msgSelectState},
-				s.keyADB:                          {"network_adb", msgSelectState},
 				s.keyAlexa:                        {"alexa_registered", msgBinarySensorState},
 				s.keyOutput:                       {"output_device", msgTextSensorState},
 				s.keyBTDevice:                     {"bluetooth_device", msgTextSensorState},
+				s.keyKeyList:                      {"adb_keys", msgTextSensorState},
 			}
 
 			s.sound = tt.sound
@@ -2424,11 +2424,6 @@ func TestAPeerSuppliedStringIsBoundedBeforeItIsNoted(t *testing.T) {
 		name string
 		note func(t *testing.T, s *Server, conn *conn)
 	}{
-		{"a network adb choice", func(_ *testing.T, s *Server, conn *conn) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.setADBLocked(conn, long)
-		}},
 		{"a button mode choice", func(t *testing.T, s *Server, conn *conn) {
 			s.mu.Lock()
 			defer s.mu.Unlock()

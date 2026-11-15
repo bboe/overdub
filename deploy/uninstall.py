@@ -51,6 +51,7 @@ SWEPT = [
     SENDPAIRS,
     SENDLAST,
     ADBKEY,
+    ADBKEYS,
     APPLIED,
     STAGE,
     LOG,
@@ -117,7 +118,7 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
     shell(
         f"rm -f {BOOT} {BOOT}.new {BIN} {BIN}.new {BIN}.prev {TRIAL} {FAILED} {KEY}"
         f" {SENDKEY} {SENDKEY}.new-* {SENDPAIRS} {SENDPAIRS}.new-* {SENDLAST}"
-        f" {SENDLAST}.new-* {ADBKEY} {APPLIED}\n"
+        f" {SENDLAST}.new-* {ADBKEY} {ADBKEYS} {APPLIED}\n"
         f"rm -rf {STAGE}\n"
         "rm -f /data/local/tmp/overdub /data/local/tmp/s.sh /data/local/tmp/overdub.rc"
     )
@@ -310,16 +311,10 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
             " it when the handshake fails."
         ),
         (
-            "Reboot to finish. Whatever Network ADB was last set to is still in"
-            " force: it lives in the property store and the firewall chain rather"
-            " than on disk. If it was Insecure, tcp/5555 is an unauthenticated root"
-            " shell until you reboot."
-        ),
-        (
-            f"One file is left on purpose: the public key at {ADBKEYS}. adbd"
-            " consults it only while ro.adb.secure is 1, and nothing sets that once"
-            " this is gone, so it grants nothing. Removing it would take away the"
-            " half that grants access and leave the half that denies it."
+            f"The adb keys set from Home Assistant are gone with {ADBKEYS}, so adb"
+            " falls back to the system's own: it stays on, as firebreak left it, and"
+            " only the computer that rooted the Dot gets in, by its key in"
+            " /adb_keys."
         ),
     ):
         print()

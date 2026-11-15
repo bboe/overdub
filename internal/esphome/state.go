@@ -58,13 +58,11 @@ func (s *Server) readTicked() []reading {
 		out = append(out, reading{
 			key: s.keyBTDevice, text: connected, ok: connectedOK, kind: kindTextSensor,
 		})
+		keys, keysOK := s.keyList()
+		out = append(out, reading{key: s.keyKeyList, text: keys, ok: keysOK, kind: kindTextSensor})
 	}
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
-	}
-	if mode, known := s.adbMode(); known {
-		s.adbObserved(mode)
-		out = append(out, reading{key: s.keyADB, text: mode.String(), ok: true, kind: kindSelect})
 	}
 	return out
 }
@@ -359,9 +357,7 @@ func (s *Server) PollSensors(every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
-		if !s.adbBusy() {
-			_ = s.adbHold()
-		}
+		_ = s.adbHold()
 		s.publish("sensors", s.readTicked())
 		read := time.Now()
 		select {

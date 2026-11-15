@@ -2,6 +2,8 @@ package device
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,48 +14,142 @@ import (
 
 const ADBPort = 5555
 
-const resetprop = "/sbin/resetprop"
-
 var (
-	ADBKeySource = "/data/local/bin/adb_keys"
 	adbKeyDir    = "/data/misc/adb"
 	adbKeyFile   = "/data/misc/adb/adb_keys"
+	adbSystemKey = "/adb_keys"
 )
 
 const (
 	aidSystem = 1000
 	aidShell  = 2000
+
+	maxADBKeys   = 16
+	adbKeyRSALen = 524
 )
 
-type ADBMode int
+const ADBKeysClear = "none"
 
-const (
-	ADBOff ADBMode = iota
-	ADBInsecure
-	ADBSecure
+var (
+	adbKeysMu    sync.Mutex
+	ErrNoADBKeys = fmt.Errorf("no keys given; send %q to remove them all", ADBKeysClear)
 )
 
-var adbModeName = [...]string{ADBOff: "Off", ADBInsecure: "Insecure", ADBSecure: "Secure"}
-
-func (m ADBMode) String() string {
-	if m < 0 || int(m) >= len(adbModeName) {
-		return "Off"
+func SetADBKeys(text string) (int, error) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return 0, ErrNoADBKeys
 	}
-	return adbModeName[m]
-}
-
-func ParseADBMode(s string) (ADBMode, bool) {
-	for i, name := range adbModeName {
-		if name == s {
-			return ADBMode(i), true
+	var keys []string
+	if trimmed != ADBKeysClear {
+		for i, line := range strings.Split(text, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			if b, err := base64.StdEncoding.DecodeString(fields[0]); err != nil || len(b) != adbKeyRSALen {
+				return 0, fmt.Errorf("line %d is not an adb public key: want the %d-byte RSA"+
+					" key adbkey.pub holds, base64, then an optional name", i+1, adbKeyRSALen)
+			}
+			keys = append(keys, strings.Join(fields, " "))
+		}
+		if len(keys) == 0 {
+			return 0, ErrNoADBKeys
+		}
+		if len(keys) > maxADBKeys {
+			return 0, fmt.Errorf("%d keys, over the %d allowed", len(keys), maxADBKeys)
 		}
 	}
-	return ADBOff, false
+	adbKeysMu.Lock()
+	defer adbKeysMu.Unlock()
+	if len(keys) == 0 {
+		if err := os.Remove(adbKeyFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		}
+		return 0, nil
+	}
+	if err := writeADBKeys(strings.Join(keys, "\n") + "\n"); err != nil {
+		return 0, err
+	}
+	return len(keys), nil
 }
 
-func ADBSecureAvailable() bool {
-	_, err := os.Stat(ADBKeySource)
-	return err == nil
+func writeADBKeys(body string) error {
+	if err := os.MkdirAll(adbKeyDir, 0o750); err != nil {
+		return err
+	}
+	if err := os.Chmod(adbKeyDir, 0o750|os.ModeSetgid); err != nil {
+		return err
+	}
+	if err := os.Chown(adbKeyDir, aidSystem, aidShell); err != nil {
+		return err
+	}
+	tmp := adbKeyFile + ".new"
+	err := writeSynced(tmp, body)
+	if err == nil {
+		err = os.Rename(tmp, adbKeyFile)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	dir, err := os.Open(adbKeyDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func writeSynced(path, body string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o640); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chown(aidSystem, aidShell); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func ADBKeyNames() (rooting, set []string, ok bool) {
+	rooting, rootingOK := keyNames(adbSystemKey)
+	set, setOK := keyNames(adbKeyFile)
+	return rooting, set, rootingOK && setOK
+}
+
+func keyNames(path string) ([]string, bool) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, true
+	}
+	if err != nil {
+		return nil, false
+	}
+	var names []string
+	for _, line := range strings.Split(strings.ToValidUTF8(string(b), "?"), "\n") {
+		fields := strings.Fields(line)
+		switch {
+		case len(fields) > 1:
+			names = append(names, strings.Join(fields[1:], " "))
+		case len(fields) == 1:
+			names = append(names, "unnamed")
+		}
+	}
+	return names, true
 }
 
 var propBudget = 2 * time.Second
@@ -82,17 +178,6 @@ func ADBListening() bool {
 	return false
 }
 
-func adbReachable() (open, known bool) {
-	if !adbListens() {
-		return false, true
-	}
-	permitted, err := present(inputRule(ADBPort))
-	if err != nil {
-		return false, false
-	}
-	return permitted, true
-}
-
 func hasListener(table, portHex string) bool {
 	for _, line := range strings.Split(table, "\n") {
 		f := strings.Fields(line)
@@ -111,24 +196,6 @@ func hasListener(table, portHex string) bool {
 	return false
 }
 
-func CurrentADBMode() (ADBMode, bool) {
-	open, known := adbReachable()
-	if !known {
-		return ADBOff, false
-	}
-	if !open {
-		return ADBOff, true
-	}
-	secure, known := adbSecureEnforced()
-	if !known {
-		return ADBOff, false
-	}
-	if secure {
-		return ADBSecure, true
-	}
-	return ADBInsecure, true
-}
-
 var readProp = func(name string) (string, error) {
 	cmd, cancel := propCmd("/system/bin/getprop", name)
 	defer cancel()
@@ -136,120 +203,13 @@ var readProp = func(name string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func adbSecureEnforced() (secure, known bool) {
-	out, err := readProp("ro.adb.secure")
-	if err != nil {
-		return false, false
-	}
-	return out == "1", true
-}
-
 var adbListens = ADBListening
 
 func HoldADBOpen() error {
-	adbMu.Lock()
-	defer adbMu.Unlock()
-
 	if !adbListens() {
 		return nil
 	}
 	return AllowTCP(ADBPort)
-}
-
-var adbMu sync.Mutex
-
-func SetADBMode(mode ADBMode) error {
-	adbMu.Lock()
-	defer adbMu.Unlock()
-
-	if mode == ADBOff {
-		if err := setProp("service.adb.tcp.port", "-1"); err != nil {
-			return err
-		}
-		if err := restartADBD(); err != nil {
-			return err
-		}
-		if err := DenyTCP(ADBPort); err != nil {
-			return err
-		}
-		return clearADBSecure()
-	}
-
-	if mode == ADBSecure {
-		if err := installADBKey(); err != nil {
-			return err
-		}
-		if err := setResetprop("ro.adb.secure", "1"); err != nil {
-			return err
-		}
-		secure, known := adbSecureEnforced()
-		if !known {
-			return fmt.Errorf("ro.adb.secure could not be read after resetprop")
-		}
-		if !secure {
-			return fmt.Errorf("ro.adb.secure is not 1 after resetprop")
-		}
-	} else if err := clearADBSecure(); err != nil {
-		return err
-	}
-
-	if err := setProp("service.adb.tcp.port", fmt.Sprint(ADBPort)); err != nil {
-		return err
-	}
-	if err := restartADBD(); err != nil {
-		return err
-	}
-	return AllowTCP(ADBPort)
-}
-
-func installADBKey() error {
-	key, err := os.ReadFile(ADBKeySource)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", ADBKeySource, err)
-	}
-	if err := os.MkdirAll(adbKeyDir, 0o750); err != nil {
-		return fmt.Errorf("creating %s: %w", adbKeyDir, err)
-	}
-	if err := os.WriteFile(adbKeyFile, key, 0o640); err != nil {
-		return fmt.Errorf("writing %s: %w", adbKeyFile, err)
-	}
-	if err := os.Chmod(adbKeyDir, 0o750); err != nil {
-		return fmt.Errorf("mode on %s: %w", adbKeyDir, err)
-	}
-	if err := os.Chmod(adbKeyFile, 0o640); err != nil {
-		return fmt.Errorf("mode on %s: %w", adbKeyFile, err)
-	}
-	if err := os.Chown(adbKeyDir, aidSystem, aidShell); err != nil {
-		return fmt.Errorf("owning %s: %w", adbKeyDir, err)
-	}
-	if err := os.Chown(adbKeyFile, aidSystem, aidShell); err != nil {
-		return fmt.Errorf("owning %s: %w", adbKeyFile, err)
-	}
-	return nil
-}
-
-func clearADBSecure() error {
-	clear, cancel := propCmd(resetprop, "--delete", "ro.adb.secure")
-	_ = clear.Run()
-	cancel()
-	secure, known := adbSecureEnforced()
-	if !known {
-		return fmt.Errorf("ro.adb.secure could not be read after resetprop --delete")
-	}
-	if secure {
-		return fmt.Errorf("ro.adb.secure is still 1 after resetprop --delete")
-	}
-	return nil
-}
-
-func setResetprop(key, value string) error {
-	cmd, cancel := propCmd(resetprop, key, value)
-	defer cancel()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("resetprop %s: %w: %s", key, err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 var setProp = func(key, value string) error {
@@ -259,13 +219,4 @@ var setProp = func(key, value string) error {
 		return fmt.Errorf("setprop %s: %w: %s", key, err, strings.TrimSpace(string(out)))
 	}
 	return nil
-}
-
-func restartADBD() error { return setProp("ctl.restart", "adbd") }
-
-func DenyADB() error {
-	adbMu.Lock()
-	defer adbMu.Unlock()
-
-	return DenyTCP(ADBPort)
 }

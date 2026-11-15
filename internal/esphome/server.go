@@ -15,8 +15,10 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/untrustedlog"
@@ -160,21 +162,14 @@ type Server struct {
 	keyMicMute  uint32
 	keySendspin uint32
 	keyDelay    uint32
-	keyADB      uint32
+	keyADBKeys  uint32
+	keyKeyList  uint32
 	keyAlexa    uint32
 	keyText     uint32
 	keyCommand  uint32
 	keyUpdate   uint32
 
 	buttons []*physicalButton
-
-	adbWorking    bool
-	adbHasPending bool
-	adbPending    device.ADBMode
-
-	adbSettled bool
-
-	adbLive device.ADBMode
 
 	micWorking    bool
 	micHasPending bool
@@ -239,20 +234,21 @@ type Server struct {
 	updateCheck   func()
 	updateInstall func()
 
-	play        func(url string, announcement bool) error
-	stopPlay    func()
-	command     func(text string) error
-	micSet      func(muted bool) error
-	adbMode     func() (device.ADBMode, bool)
-	adbSet      func(device.ADBMode) error
-	adbSecureOK func() bool
-	adbHold     func() error
-	adbDeny     func() error
+	play     func(url string, announcement bool) error
+	stopPlay func()
+	command  func(text string) error
+	micSet   func(muted bool) error
+	adbHold  func() error
+	adbKeys  func(text string) (int, error)
+	adbNames func() (rooting, set []string, ok bool)
+
+	adbRefused string
+	adbGen     uint64
+	adbSetMu   sync.Mutex
 
 	handshakeWait time.Duration
 	pingWait      time.Duration
 	wakeGap       time.Duration
-	adbSettle     time.Duration
 	micSettle     time.Duration
 
 	mu        sync.Mutex
@@ -292,7 +288,8 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyMicMute:   entityKey("microphone_muted"),
 		keySendspin:  entityKey("sendspin"),
 		keyDelay:     entityKey("sendspin_output_delay"),
-		keyADB:       entityKey("network_adb"),
+		keyADBKeys:   entityKey("set_adb_keys"),
+		keyKeyList:   entityKey("adb_keys"),
 		keyAlexa:     entityKey("alexa_registered"),
 		keyText:      entityKey("alexa_command"),
 		keyCommand:   entityKey("send_command"),
@@ -311,16 +308,13 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		micSet: func(bool) error {
 			return fmt.Errorf("nothing sets the microphone: the switch is not wired")
 		},
-		adbMode:       device.CurrentADBMode,
-		adbSet:        device.SetADBMode,
-		adbSecureOK:   device.ADBSecureAvailable,
 		adbHold:       device.HoldADBOpen,
-		adbDeny:       device.DenyADB,
+		adbKeys:       device.SetADBKeys,
+		adbNames:      device.ADBKeyNames,
 		memory:        device.AvailableMemory,
 		handshakeWait: 10 * time.Second,
 		pingWait:      pingAfter,
 		wakeGap:       minLiveReadGap,
-		adbSettle:     adbSettleFor,
 		micSettle:     micSettleFor,
 		clock:         time.Now,
 		onDelay:       SoundOnDelay,
@@ -691,8 +685,11 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 		if argErr != nil {
 			return fmt.Errorf("ExecuteServiceArgument: %w", argErr)
 		}
-		if key == s.keyCommand {
+		switch key {
+		case s.keyCommand:
 			s.commandLocked(conn, text)
+		case s.keyADBKeys:
+			s.setADBKeysLocked(conn, text)
 		}
 		return nil
 
@@ -712,10 +709,6 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			}
 		}); err != nil {
 			return err
-		}
-		if key == s.keyADB {
-			s.setADBLocked(conn, choice)
-			return nil
 		}
 		for _, b := range s.buttons {
 			if key == b.keyMode {
@@ -895,104 +888,76 @@ func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
 	}
 }
 
-func (s *Server) setADBLocked(conn *conn, choice string) {
-	want, ok := device.ParseADBMode(choice)
-	if !ok || (want == device.ADBSecure && !s.adbSecureOK()) {
-		conn.noted = fmt.Sprintf("esphome api: %s asked network adb for %q, which was not offered",
-			conn.sock.RemoteAddr(), untrustedlog.Cut(choice))
-		return
-	}
-	if s.adbHasPending || s.adbWorking {
-		if s.adbPending == want {
-			return
-		}
-	} else if s.adbSettled && s.adbLive == want {
-		return
-	}
-	conn.noted = fmt.Sprintf("esphome api: %s set network adb to %s", conn.sock.RemoteAddr(), want)
-	s.adbPending, s.adbHasPending = want, true
-	if s.adbWorking {
-		return
-	}
-	s.adbWorking = true
-	go s.adbWorker()
-}
-
-func (s *Server) adbWorker() {
-	for {
+func (s *Server) setADBKeysLocked(conn *conn, text string) {
+	from := conn.sock.RemoteAddr()
+	s.adbGen++
+	gen := s.adbGen
+	go func() {
+		s.adbSetMu.Lock()
+		defer s.adbSetMu.Unlock()
 		s.mu.Lock()
-		if !s.adbHasPending {
-			s.adbWorking = false
-			s.mu.Unlock()
+		stale := gen != s.adbGen
+		s.mu.Unlock()
+		if stale {
+			s.untrustedLog.Printf("esphome api: %s sent adb keys a later call replaced", from)
 			return
 		}
-		want := s.adbPending
-		s.adbHasPending = false
+		n, err := s.adbKeys(text)
+		s.mu.Lock()
+		s.adbRefused = ""
+		if err != nil {
+			s.adbRefused = err.Error()
+		}
 		s.mu.Unlock()
-
-		s.setADBMode(want)
-	}
+		if err != nil {
+			s.untrustedLog.Printf("esphome api: %s sent adb keys that were refused: %v", from, err)
+		} else {
+			s.untrustedLog.Printf("esphome api: %s set %d adb key(s)", from, n)
+		}
+		select {
+		case s.sensorWake <- struct{}{}:
+		default:
+		}
+	}()
 }
 
-const adbSettleFor = 2 * time.Second
+const keyListMax = 255
 
-func (s *Server) setADBMode(want device.ADBMode) {
-	err := s.adbSet(want)
-	if err != nil {
-		s.untrustedLog.Printf("network adb: %v", err)
-	}
-	time.Sleep(s.adbSettle)
-
-	live, known := s.adbMode()
-	switch {
-	case !known:
-		s.untrustedLog.Printf("network adb: asked for %v, and the device could not be read", want)
-	case live != want:
-		s.untrustedLog.Printf("network adb: asked for %v, device is %v", want, live)
-		if want == device.ADBSecure && live == device.ADBInsecure {
-			if err := s.adbSet(device.ADBOff); err != nil {
-				s.untrustedLog.Printf("network adb: %v", err)
-			}
-			time.Sleep(s.adbSettle)
-			live, known = s.adbMode()
-			if known {
-				s.untrustedLog.Printf("network adb: closed instead; device is %v", live)
-			} else {
-				s.untrustedLog.Printf("network adb: closed instead, and the device could not be read")
-			}
-		}
-	case live == device.ADBSecure && err == nil:
-		s.untrustedLog.Printf("network adb: LISTENING on tcp/%d, key required; root is still one su away", device.ADBPort)
-	case live == device.ADBInsecure:
-		s.untrustedLog.Printf("network adb: LISTENING on tcp/%d with no authentication; this is a root-capable shell", device.ADBPort)
-	}
-
-	if known && live == device.ADBOff {
-		if err := s.adbDeny(); err != nil {
-			s.untrustedLog.Printf("network adb: %v", err)
-		}
-	}
-
+func (s *Server) keyList() (string, bool) {
 	s.mu.Lock()
-	s.adbSettled = known && err == nil && live == want
-	if s.adbSettled {
-		s.adbLive = live
-	}
+	refused := s.adbRefused
 	s.mu.Unlock()
-
-	select {
-	case s.sensorWake <- struct{}{}:
-	default:
+	rooting, set, ok := s.adbNames()
+	if !ok {
+		return "", false
 	}
+	have := "set: none"
+	if len(set) > 0 {
+		have = fmt.Sprintf("set %d: %s", len(set), strings.Join(set, ", "))
+	}
+	list := "rooting: " + namesOrNone(rooting) + "; " + have
+	if refused != "" {
+		list = "refused: " + refused + "; " + list
+	}
+	return cutText(list, keyListMax), true
 }
 
-func (s *Server) adbObserved(mode device.ADBMode) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.adbSettled && s.adbLive != mode {
-		s.adbSettled = false
+func namesOrNone(names []string) string {
+	if len(names) == 0 {
+		return "none"
 	}
+	return strings.Join(names, ", ")
+}
+
+func cutText(text string, most int) string {
+	if len(text) <= most {
+		return text
+	}
+	text = text[:most-3]
+	for !utf8.ValidString(text) {
+		text = text[:len(text)-1]
+	}
+	return text + "..."
 }
 
 func (s *Server) UseMicMute(set func(muted bool) error) {
@@ -1100,10 +1065,4 @@ func (s *Server) micObserved(muted bool) {
 	if s.micSettled && s.micLive != muted {
 		s.micSettled = false
 	}
-}
-
-func (s *Server) adbBusy() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.adbWorking || s.adbHasPending
 }

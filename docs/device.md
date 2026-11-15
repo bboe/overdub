@@ -4,92 +4,71 @@ What Home Assistant can switch on the Dot itself. What it reads -- the signal,
 the temperature, the memory, the jack, the speaker, the volume -- is in
 docs/api.md, with the polls that drive it.
 
-## Network ADB
+## Network adb, and its keys
 
-`internal/device/adb.go`: a select for adbd on tcp/5555, so a Dot on a shelf
-can be worked on without a cable.
+`internal/device/adb.go`: adb over tcp/5555, so a Dot on a shelf can be worked
+on without a cable.
 
-### The positions
+- firebreak's Fire OS 6 unlock leaves adb always on and always authenticated.
+  `/init.mt8163.usb.rc` sets `service.adb.tcp.port 5555` at every boot,
+  `/system/bin/firewall.sh` opens tcp/5555 while `persist.sys.usb.config`
+  holds `adb`, and the system partition carries `ro.adb.secure=1` and, in
+  `/adb_keys`, the public key of the computer that ran firebreak.
+- So there is no switch for it. Fire OS 5's select had Off, Insecure and
+  Secure, through Magisk's `resetprop` on `ro.adb.secure`. Fire OS 6 has no
+  `resetprop`, the boot image fixes the property, and Off would take away the
+  one way into a Dot with no cable.
+- netd rebuilds the INPUT chain and can discard the rule. The sensor poll
+  re-asserts it through `HoldADBOpen` while adbd listens, so a Dot whose adb
+  is down runs no iptables. The stock rule has no interface; the daemon's is
+  `-i wlan0`, so the two do not collide.
 
-| position | tcp/5555 | `ro.adb.secure` | who can connect | offered |
-|---|---|---|---|---|
-| Off | closed, no rule | deleted | nobody | always |
-| Insecure | open | deleted | anyone who routes to the Dot | always |
-| Secure | open | 1 | a client holding the key | with a key |
+### Keys from Home Assistant
 
-- The rule changes only after the properties take. A step that fails earlier
-  leaves the chain alone, so the device stays where it was and the reading
-  reports that truthfully.
-- init freezes `ro.adb.secure`: `setprop` cannot move it and Magisk's
-  `resetprop` can. That is the one step here that needs Magisk rather than root.
-- The key is `/data/local/bin/adb_keys`. `setADBLocked` refuses Secure without
-  it, in case a peer sends it anyway. Without a key,
-  Secure gives a listening adbd that authenticates nobody.
-- The icon is `mdi:console-network`; `mdi:android-debug-bridge` does not exist.
-  An unknown icon name fails nowhere: the frontend draws no icon. No test here
-  can check an icon name.
-
-### Reading it back
-
-- adbd restarts through a property, so nothing returns a result. The worker
-  waits `adbSettleFor`, then reads the mode.
-- A read that fails is not an answer. Taken as "not secure", it would publish
-  Insecure for a Dot in Secure and close adb on a Dot already in place.
-- Secure fails closed: a Dot that reads Insecure after a Secure request is set
-  Off. The property did not take while adbd came up anyway, so the Dot is open
-  to the subnet with no authentication.
-- A mode that cannot be read is not published. The rule check waits on the
-  iptables lock that netd holds constantly, so it fails on a working device. A
-  select has no `missing_state`.
-- `CurrentADBMode` runs on the 60-second sensor tick. A closed port costs one
-  read of `/proc/net/tcp`. An open one costs 2 forks, one of them an
-  `iptables -C` waiting on netd's lock.
-
-### The rule, and who re-asserts it
-
-- netd rebuilds the INPUT chain and discards the rule. The sensor poll
-  re-asserts it through `HoldADBOpen`, only while adbd listens, so a Dot with
-  adb off runs no iptables.
-- The gate is `ADBListening`, not `CurrentADBMode`. `CurrentADBMode` includes
-  the rule, so after netd wipes it the Dot reads Off while adbd still listens.
-- Nothing remembers the position across a daemon restart. The supervisor
-  respawns on any fatal exit while adbd may still listen, so the device is
-  asked instead.
-- The poll does not re-assert while an apply is in progress. `ctl.restart` is
-  asynchronous, so the old adbd is still up when `SetADBMode` returns. A
-  re-assert then would restore the rule the close removed, and nothing removes
-  it again: the mode reads Off, a repeated Off is dropped, and `uninstall.py`
-  leaves this port alone.
-- So a close that reads Off after the settle deletes the rule a second time,
-  through `DenyADB`. `AllowTCP` can wait up to 10 seconds on netd's lock, longer
-  than the settle, so a re-assert released at the end of an apply can still
-  land after the close.
-- `HoldADBOpen` and `SetADBMode` share `adbMu`, so the listening check and the
-  `AllowTCP` are one step. It is not the server lock, because this waits on
-  iptables, which waits on netd.
-
-### Commands
-
-- Home Assistant can move a dropdown faster than adbd restarts. The command
-  hands the mode to a worker and returns, because `handle` holds the server lock
-  and `SetADBMode` takes seconds.
-- The worker keeps one pending mode, not a queue: three positions in quick
-  succession restart adbd once, on the last.
-- A command for the position the last apply reached is dropped. Each restart
-  drops every live adb session, and repeats are not bounded by the 8 slots.
-- The guard compares against the last apply, not the device: reading the device
-  forks, and this runs under the server lock. The published state trails an
-  apply by the settle, an iptables pair and the tick's reads.
-- The apply must have succeeded. The properties can land while the rule does
-  not, and the device then reads Off; without the condition every later Off
-  would be dropped.
-- A poll reading that differs from the guard clears it, because adbd can stop
-  for reasons nothing here asked for.
-- The worker wakes the poll instead of publishing. Two readers can read either
-  side of a change and publish out of order.
-- Uninstall does not reset the position. It lives in the property store and the
-  INPUT chain, and deleting the rule could cut the connection the uninstall runs
-  over.
+- An action, `set_adb_keys`, with one string, `keys`: one or more adb public
+  keys, one per line, as `adbkey.pub` holds them. Home Assistant offers it as
+  `esphome.<name>_set_adb_keys`; its Developer Tools action form gives a text
+  box, so no YAML is needed.
+- It replaces `/data/misc/adb/adb_keys` whole. A key left out stops working.
+  `none` removes them all. An empty `keys` is refused, not taken as none: a
+  form run before the paste, or a template that renders empty, would
+  otherwise revoke every machine added. adbd reads the file at each connection, so
+  no restart is needed. `/adb_keys` keeps working whatever is sent, so no call
+  locks out the computer that rooted the Dot, and none can revoke it.
+- Not a text entity: Home Assistant caps a state at 255 characters, and one
+  key is about 700.
+- Each line must be the 524-byte RSA key adb writes, base64, then an optional
+  name after any whitespace. One line that is not, or more than 16 keys,
+  refuses the whole call and touches nothing. The refusal names the line as
+  pasted, blank lines counted.
+- An action returns nothing to Home Assistant, so a diagnostic text sensor,
+  `adb_keys`, shows who can connect: the names in `/adb_keys`, then the ones
+  set from Home Assistant, as `rooting: you@mac; set 2: a@b, c@d` or
+  `rooting: you@mac; set: none`. A bare "none" would read as nobody can get
+  in, and the rooting computer always can. A refused call puts `refused:
+  <why>; ` in front until a call succeeds. It is cut to 255 characters, Home
+  Assistant's limit for a state.
+- The file is `0640` `system:shell` in a `02750` `system:shell` directory, as
+  init makes it, set explicitly because the daemon's umask is 077: a bare
+  write landed `0600`. It is written to `adb_keys.new`, synced, and renamed
+  over, then the directory is synced, so neither a reader nor a power cut
+  sees half of it. A failed write removes the `.new`.
+- The write runs off the server lock, under a lock of its own, and wakes the
+  sensor poll when it is done. Each call is numbered, and a call that a later
+  one has overtaken does nothing. Two calls close together could otherwise
+  write in either order, and a "none" sent to revoke keys could lose to the
+  keys it revoked.
+- Key names are read as UTF-8, a bad byte becomes `?`, and the cut backs off
+  to a whole character. Home Assistant refuses a state that is not UTF-8.
+- The API key is enough to install a key, and an adb key is a root shell. The
+  API key can already install a firmware update, so this asks no more trust of
+  it than that does.
+- `install.py` pushes no key. It removes `/data/local/bin/adb_keys`, where
+  an earlier install put one, and the copy in `/data/misc/adb/adb_keys` when
+  the md5s match: that copy still opened adb. It warns when `ro.adb.secure`
+  is not 1, because the old Insecure mode left it that way until a reboot.
+  `uninstall.py` removes the keys set from Home Assistant; `/adb_keys` still
+  opens adb.
 
 ## A setting that survives a reboot
 

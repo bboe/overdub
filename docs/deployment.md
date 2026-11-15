@@ -160,7 +160,6 @@
 | boot script | `bin/overdub.sh` | root, `0755` | `tmp` | md5, `-x` |
 | init service | `/system/etc/init/overdub.rc` | root, `0644` | `tmp` | md5 |
 | API key | `bin/.overdub-noise-key` | root, `0600` | `0700` dir | text, mode |
-| adb public key | `bin/adb_keys` | root, `0644` | `0700` dir | text |
 
 `bin` is `/data/local/bin`, `0700`. `tmp` is `/data/local/tmp`. Every
 command runs through root adb: firebreak's Fire OS 6 unlock leaves an adbd
@@ -178,7 +177,7 @@ that runs as root, and no `su`.
   before the binary is pushed, so a Dot whose key cannot be settled keeps the
   binary it had.
 - `adb push` does not carry the local mode, and `/data/local/tmp` is
-  world-traversable, so both keys go through a `0700` directory. The API key's
+  world-traversable, so the API key goes through a `0700` directory. It
   is read back to confirm it is gone, and `install.py` removes it on any exit
   it can catch: an error, Ctrl-C, SIGTERM or SIGHUP, and Ctrl-Break on Windows.
 - The first of those signals turns all of them off before cleanup starts. A
@@ -194,29 +193,23 @@ that runs as root, and no `su`.
   and the next install keeps it. Delete it and install again.
 - `uninstall.py` removes the staging directory too, because a copy left there
   is the live key.
-- The adb public key is not a secret. Pushed straight to `tmp` it lands `0666`
-  under an `o+x` directory, so another uid could swap in its own key between
-  the push and the copy. The read-back would catch that only after the
-  stranger's key was in place.
-- An empty or malformed adb key is refused before anything touches the Dot,
-  so a refusal cannot follow a freshly printed API key. An empty key would pass
-  every read-back, because every one of no lines is on the device. Installed, it would set `ro.adb.secure` against a key that
-  authenticates nobody, which applies to USB too and locks the operator out.
-- Each file is compared with the Dot's copy before it is pushed: by md5, and
-  the adb key by its text. A match skips the push, not the read-back after it.
+- No adb key is pushed: Home Assistant sets them, through the `set_adb_keys`
+  action (docs/device.md). An install removes `bin/adb_keys`, where an
+  earlier install put one, and the copy of it adbd read.
+- Each file is compared with the Dot's copy before it is pushed, by md5. A
+  match skips the push, not the read-back after it.
 - The daemon restarts only when the running one may not match what is
   installed. After each verified restart, `install.py` writes
-  `bin/.overdub-applied`: the new pid and the md5s of the binary, the API key
-  and the adb key. A later run skips the restart only when the running pid and
-  all three md5s match it.
+  `bin/.overdub-applied`: the new pid and the md5s of the binary and the API
+  key. A later run skips the restart only when the running pid and both md5s
+  match it.
 - A stamp is written only after a restart, so a run stopped before its restart
   leaves an old one, and the next run restarts. A reboot changes the pid, so
   the first install after one restarts once.
 - File times cannot decide this. The mtime of `/proc/<pid>` is set when the
   kernel creates its inode, which can happen again under memory pressure, and
   the Dot's clock is wrong until network time.
-- The daemon reads the API key once, at start, and Home Assistant learns the
-  Network ADB options only when it connects, so a change to either key needs a
+- The daemon reads the API key once, at start, so a change to it needs a
   restart to reach it.
 - A restart drops Home Assistant and Music Assistant and hands the button to
   Alexa for about 5 seconds. A changed boot script restarts the init service
@@ -227,10 +220,6 @@ that runs as root, and no `su`.
 - A run that changed nothing but warned, such as a daemon not running or a
   rename awaiting a reboot, ends `Nothing changed; see the warning above.`
   instead, so the last line does not read as success.
-- An install cannot revoke. adbd authenticates against
-  `/data/misc/adb/adb_keys`, which the daemon writes only on Secure, and
-  `ro.adb.secure` is not persistent. An install with no key stops Secure being
-  offered, and a Dot already in Secure keeps the old key until it reboots.
 
 ## Uninstall
 
