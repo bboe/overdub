@@ -97,7 +97,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | volume, mute | held from `lipc-wait-event` | -- | heavy |
 | route | `dumpsys audio`, absent on Fire OS 6 | 11.7 ms | heavy |
 | jack | `/sys/class/switch/h2w/state` | -- | heavy |
-| microphone mute | binder `GET_MIC_MUTE` | 12 ms | heavy |
+| microphone mute | the privacy driver's `state` | -- | heavy |
 | speaker playing | ALSA, then a `dumpsys` | 2.0 / 18.7 ms | live |
 
 - The minute tick is `sensorTick`, 60 seconds. `PollLive` wakes every
@@ -106,8 +106,9 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   reading run oftener without dragging a fork along.
 - The uptime changes on every read. The signal costs 16 times `/proc/meminfo`
   and moves slowly. The registration changes only at setup or deregistration.
-- The heavy tick costs about 24 ms of a core every 2.5 seconds, 1%. Almost all
-  of it is the 2 forks for the route and the microphone.
+- The heavy tick cost about 24 ms of a core every 2.5 seconds, 1%, on Fire OS
+  5, almost all of it the forks for the route and the microphone. On Fire OS 6
+  the microphone is a sysfs read, not a fork.
 - `dumpsys account` and `dumpsys audio` were timed in the same loop, because
   the absolute figure moves with device load: 300 calls took 4.66 and 5.23
   seconds.

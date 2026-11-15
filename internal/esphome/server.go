@@ -242,7 +242,7 @@ type Server struct {
 	play        func(url string, announcement bool) error
 	stopPlay    func()
 	command     func(text string) error
-	micPress    func() error
+	micSet      func(muted bool) error
 	adbMode     func() (device.ADBMode, bool)
 	adbSet      func(device.ADBMode) error
 	adbSecureOK func() bool
@@ -308,8 +308,8 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		micMute:      device.MicMuted,
 		alexa:        device.AlexaRegistered,
 		btDevice:     device.BluetoothDevice,
-		micPress: func() error {
-			return fmt.Errorf("no button to press: the switch is not wired to one")
+		micSet: func(bool) error {
+			return fmt.Errorf("nothing sets the microphone: the switch is not wired")
 		},
 		adbMode:       device.CurrentADBMode,
 		adbSet:        device.SetADBMode,
@@ -995,8 +995,8 @@ func (s *Server) adbObserved(mode device.ADBMode) {
 	}
 }
 
-func (s *Server) UseMicMute(press func() error) {
-	s.micPress = press
+func (s *Server) UseMicMute(set func(muted bool) error) {
+	s.micSet = set
 }
 
 func micWord(muted bool) string {
@@ -1074,7 +1074,7 @@ func (s *Server) applyMic(want bool) (muted, settled bool) {
 	if muted == want {
 		return muted, true
 	}
-	if err := s.micPress(); err != nil {
+	if err := s.micSet(want); err != nil {
 		s.untrustedLog.Printf("microphone: %v", err)
 		return false, false
 	}

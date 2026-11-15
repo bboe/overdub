@@ -60,6 +60,24 @@ donut, the Echo Dot (3rd Generation), `ro.product.model` `AEODN`:
   consume `KEYCODE_BUTTON_MODE` with no root. The evdev route needs no APK and
   no accessibility grant.
 
+## The privacy driver
+
+- biscuit's and radar's is `/sys/devices/soc/10010000.keypad/amz_privacy/`.
+  `enable` is writable by `ace_button_mgr`, and `acebuttond` writes it at its
+  start to restore the state it saved. `state` and `privacy_state` read 1 on
+  main-bedroom, whose microphone was off.
+- **Never read `power_button_state` there.** It is world-readable, and a read
+  panics the kernel: biscuit has no power-button GPIO, and the handler
+  dereferences NULL. A `for f in */; do cat` over the directory rebooted
+  overdub-test.
+
+```
+Unable to handle kernel NULL pointer dereference at virtual address 0000004c
+PC is at gpiod_get_raw_value+0x10/0x44
+LR is at get_power_button_state+0x20/0x3c
+Kernel panic - not syncing: Fatal exception
+```
+
 ## Testing on hardware
 
 A live Echo in someone's home: audio makes noise, and a press may drive real

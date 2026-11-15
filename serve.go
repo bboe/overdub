@@ -316,8 +316,20 @@ func serve(flags config) error {
 	up := func(code uint16, _ button.Mode, held time.Duration) { chains[code].Up(held) }
 	if w := keys[muteKey]; w != nil && w != i {
 		defer w.Close()
+		watchedDown := func(code uint16, mode button.Mode) {
+			if echoes.down(code) {
+				log.Printf("mute_button %d: the driver's key for the daemon's own mute; not reported", code)
+				return
+			}
+			down(code, mode)
+		}
+		watchedUp := func(code uint16, mode button.Mode, held time.Duration) {
+			if !echoes.up(code) {
+				up(code, mode, held)
+			}
+		}
 		go func() {
-			err := w.Run(down, up)
+			err := w.Run(watchedDown, watchedUp)
 			log.Printf("mute_button: watching %s stopped: %v; its presses go unreported until"+
 				" the daemon restarts", w.Path(), err)
 		}()
@@ -418,6 +430,66 @@ func buttonStart() map[uint16]button.Mode {
 	return out
 }
 
+const micEcho = 1500 * time.Millisecond
+
+var echoes = &muteEchoes{}
+
+type muteEchoes struct {
+	mu    sync.Mutex
+	until time.Time
+	held  bool
+}
+
+func (e *muteEchoes) arm(now time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.until = now.Add(micEcho)
+}
+
+func (e *muteEchoes) down(code uint16) bool {
+	if code != muteKey {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.held = time.Now().Before(e.until)
+	return e.held
+}
+
+func (e *muteEchoes) up(code uint16) bool {
+	if code != muteKey {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	was := e.held
+	e.held = false
+	return was
+}
+
+func micSetter(i *button.Interceptor) func(muted bool) error {
+	var nudge func() error
+	if i.Declares(muteKey) {
+		nudge = func() error {
+			err := i.Press(muteKey)
+			if errors.Is(err, button.ErrKeyStuck) {
+				log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
+				stopping()
+				i.Close()
+				os.Exit(1)
+			}
+			return err
+		}
+	}
+	return func(muted bool) error {
+		if !muted {
+			return device.ErrMicButtonOnly
+		}
+		echoes.arm(time.Now())
+		return device.SetMicMute(true, nudge)
+	}
+}
+
 var watchedModes = []string{button.ModeMonitor.String(), button.ModePassThrough.String()}
 
 func chimes(code uint16, mode button.Mode) bool {
@@ -478,18 +550,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 			server.OfferModes(b.objectID, watchedModes)
 		}
 	}
-	if i.Declares(muteKey) {
-		server.UseMicMute(func() error {
-			err := i.Press(muteKey)
-			if errors.Is(err, button.ErrKeyStuck) {
-				log.Printf("microphone: %v; exiting so the clone is rebuilt", err)
-				stopping()
-				i.Close()
-				os.Exit(1)
-			}
-			return err
-		})
-	}
+	server.UseMicMute(micSetter(i))
 
 	go device.FollowVolume()
 	server.UseVolumeSetter(device.SetMusicVolume)

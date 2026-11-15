@@ -121,28 +121,66 @@ can be worked on without a cable.
 `internal/device/mic.go`: a switch, because Home Assistant both reads the
 microphone and mutes it.
 
-- The state is AudioFlinger's `mMicMute`. The mute key and "Alexa, mute" both
-  reach it through `AudioManager.setMicrophoneMute`.
-- No dumpsys prints it. `dumpsys audio`'s `Mute count` is the per-stream output
-  mute, 0 whatever the microphone does. The read is `GET_MIC_MUTE` on
-  `IAudioFlinger`, called by number; docs/hardware.md has the transaction.
-- The reply is one int32, `0` or `1`. Anything else is no reading, and so is a
-  failed call even when its output parses, because a child killed at its
-  deadline can return bytes. No reading publishes nothing: a switch has no
+- The state is the privacy driver's own: its `state` file, 1 with the
+  microphones off and 0 with them on. A sysfs read, no fork.
+- `acebuttond` publishes the same as LIPC `com.doppler.buttond muteState`, 8
+  on and 9 off (`8-enable mic, 9-disable mic`), a 70 ms fork. It lags the
+  driver after a write, and can miss one entirely, so it is read only to
+  learn that `acebuttond` has caught up, never as the state.
+- `acebuttond` takes it from the privacy driver, not the key:
+  `/sys/devices/soc/10010000.keypad/amz_privacy` on biscuit and radar, the
+  `gpio-privacy` device on donut. An injected 113 left it unchanged on both
+  layouts. At its start it restores the state it saved, `write gpio privacy to
+  1` on main-bedroom, whose microphone was off.
+- Fire OS 5 read AudioFlinger's `mMicMute` through `GET_MIC_MUTE`, by number.
+  Fire OS 6 has no AudioFlinger, so every read failed and Home Assistant drew
+  the switch as unknown.
+- `state` is 0 or 1. Anything else, or no driver, is no reading. No reading publishes nothing: a switch has no
   `missing_state`, and "not muted" would claim the Dot is listening.
-- Setting it presses the mute key through the clone with `Interceptor.Press`,
-  down then up. The switch does what the button does, ring included, and Alexa
-  stays the only writer of her own state. A direct write to `mMicMute` would
-  leave her believing the microphone is live, and she would overwrite it.
-- The down mutes; the up only releases. A lost up leaves Android holding the
-  key, which runs a reset gesture unattended (docs/hardware.md). `Emit` writes
-  the key and its SYN under one error, so a failure cannot say which half
-  landed. Both halves fail as `button.ErrKeyStuck`, and serve.go exits on it so
-  the clone goes with the process.
-- The key toggles, so the worker reads before it presses and presses only when
-  the state differs. An unreadable device is not pressed, and a press that did
-  not take is not repeated. The settle is 250 ms, which is slack: the mute shows
-  in the first read after the press.
+- **Muting is one way.** Writing `1` to the driver's `enable` latches the
+  microphones off and lights the button's red light; nothing in userspace
+  leaves privacy. On overdub-test, `0` to `enable` and `1` to `privacy_trigger`
+  each left it latched, and a press cleared it every time. LibreEcho's port of
+  the driver says why: privacy_trigger "deliberately refuses to let userspace
+  leave privacy, so that no program can silently un-mute a microphone".
+- So an unmute from Home Assistant is refused and logged, and the switch
+  springs back. Only the button turns the microphones on.
+- The driver is `/sys/devices/soc/10010000.keypad/amz_privacy/` on biscuit and
+  radar and `/sys/devices/platform/gpio-privacy/` on donut, each with
+  `enable` and `state`. The first that exists is used.
+- `acebuttond` reads the driver only at its start and on a press, so after the
+  write the ring stays dark and `muteState` still reads 8. A press is enough:
+  on a 113 it reads the driver, not the key, then plays the mic-off tone,
+  draws the ring and sets 9, as for the button. A key that fails falls
+  through to the restart below: the driver is latched either way.
+- So the daemon presses 113 through the clone where the clone carries it,
+  biscuit and radar. On donut the driver sends its own 113 on the
+  `gpio-privacy` node, which `acebuttond` reads. The mute is done when
+  `muteState` reads 9, within 2 seconds.
+- Failing that, `acebuttond` is restarted, and its start finds
+  `currMuteState(disabled)`; then 15 seconds. 5 were too few: init kills it
+  with SIGKILL, and a new one that starts before D-Bus has let go of the old
+  one's name exits with `initFailed: reason=lipcOpenFailed`, and init starts
+  it again 5 seconds later. On donut that put 9 at 5.5 seconds.
+- The restart is the fallback, not the way, because it loses the tone. Killed
+  as Alexa starts the mic-off tone, `acebuttond` takes its power registration
+  with it; the tone's player logged `createRawPowerResourceFailed`, and the
+  tone went into the mixer and out of no speaker. With the key, `acebuttond`
+  kept its pid and the tone was heard.
+- donut's driver sends that 113 on the watched mute node; biscuit's sends
+  none. For 1.5 seconds after the daemon's write, a 113 on the watched node
+  is that echo and is not reported: an automation on the mute button would
+  otherwise fire on a mute from Home Assistant. It came 0.15 to 0.66 seconds
+  after the write. The window is the write's, not the whole mute's, so a real
+  press during a restart's 15 seconds is still reported. The echo is decided
+  at the key-down and held to its key-up.
+- The daemon's own press through the clone never reaches the read loop, so
+  it is not reported, and biscuit's real presses are never filtered.
+- Fire OS 5 pressed the mute key through the clone, and Android's mute
+  followed it both ways. On Fire OS 6 an injected 113 reaches `acebuttond`
+  but never the driver, which takes only the button's interrupt.
+- The worker reads before it sets and sets only when the state differs. An
+  unreadable device is not set, and a set that did not take is not repeated.
 - A command is dropped only when the last apply reached the same state. The
   published state trails an apply by the settle and a poll turn, so a different
   command in that window is a change of mind. A poll reading that disagrees
@@ -153,11 +191,8 @@ microphone and mutes it.
   which Home Assistant draws as a toggle that springs back and flips again.
 - It reads on the heavy tick beside the volume, under the volume's rule in
   docs/api.md: somebody mutes the Dot, then looks to see whether it took. A read
-  costs 12 ms; the volume's costs 11.7 ms.
-- Unmuting needs only the API key, so a misfiring automation can turn the
-  microphone on. With `mute_button_mode` at `intercept`, the physical button
-  does not mute but this switch still does: the mode governs keys from the real
-  node, and this press does not come from it.
+  is one sysfs file.
+- Muting needs only the API key; unmuting needs a hand on the Dot.
 - No `entity_category`. The selects are `config` because they change what the
   daemon does with a key; this is the microphone, and a categorised entity is
   filed away from the controls.
