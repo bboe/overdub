@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -198,15 +199,26 @@ func restartReaders(i *button.Interceptor) {
 			" reach nothing until a reboot", err)
 		return
 	}
-	began := time.Now()
-	restarted, err := device.RestartInputReaders(clone)
-	if err != nil {
-		log.Printf("warning: %v; keys passed on may reach nothing until a reboot", err)
+	restart := func(why string) {
+		began := time.Now()
+		restarted, err := device.RestartInputReaders(clone)
+		if err != nil {
+			log.Printf("warning: %v; keys passed on may reach nothing until a reboot", err)
+		}
+		if len(restarted) > 0 {
+			log.Printf("restarted %s %s, onto the clone at %s, read back in %v",
+				strings.Join(restarted, " and "), why, clone, time.Since(began).Round(time.Millisecond))
+		}
 	}
-	if len(restarted) > 0 {
-		log.Printf("restarted %s onto the clone at %s, read back in %v",
-			strings.Join(restarted, " and "), clone, time.Since(began).Round(time.Millisecond))
-	}
+	err = device.WatchInputNodes(func() { restart("at start") }, func(names []string) {
+		for _, name := range names {
+			if name != filepath.Base(clone) {
+				restart("off a destroyed input node")
+				return
+			}
+		}
+	})
+	log.Printf("warning: %v; a key reader left holding a destroyed node is not restarted", err)
 }
 
 var deviceBoard, deviceModel string

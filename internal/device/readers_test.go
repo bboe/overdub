@@ -129,3 +129,82 @@ func TestOneReaderFailingDoesNotStrandTheOther(t *testing.T) {
 			restarted, err)
 	}
 }
+
+func TestAReaderOnTheCloneAndADestroyedNodeIsRestarted(t *testing.T) {
+	fakeProc(t)
+	fakeProcess(t, "2399", "/system/bin/acebuttond", clone, "/dev/input/event5 (deleted)")
+	fakeProcess(t, "246", "/system/bin/ace_usagestat_protod", clone)
+	readProp = func(string) (string, error) { return "running", nil }
+	var set []string
+	setProp = func(key, value string) error {
+		set = append(set, key+"="+value)
+		os.RemoveAll(filepath.Join(procDir, "2399"))
+		fakeProcess(t, "5501", "/system/bin/acebuttond", clone)
+		return nil
+	}
+	restarted, err := RestartInputReaders(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(restarted, []string{"acebuttond"}) ||
+		!slices.Equal(set, []string{"ctl.restart=acebuttond"}) {
+		t.Errorf("restarted %v by %v, want acebuttond alone: it polls the speaker's AVRCP"+
+			" node after the speaker left, and the other holds nothing dead", restarted, set)
+	}
+}
+
+func TestADeletedFileOutsideTheInputsIsNotADeadNode(t *testing.T) {
+	fakeProc(t)
+	fakeProcess(t, "2399", "/system/bin/acebuttond", clone, "/data/local/tmp/log (deleted)")
+	if live, dead := held("/system/bin/acebuttond", clone); !live || dead {
+		t.Errorf("held = %v, %v; want the clone and nothing dead", live, dead)
+	}
+}
+
+func TestAnInputNodeGoneIsSeenByName(t *testing.T) {
+	was := inputDir
+	t.Cleanup(func() { inputDir = was })
+	inputDir = filepath.Join(t.TempDir(), "input")
+	if err := os.Mkdir(inputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(inputDir, "event5")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	gone := make(chan []string, 4)
+	ended := make(chan error, 1)
+	go func() {
+		ended <- WatchInputNodes(func() { close(ready) }, func(names []string) { gone <- names })
+	}()
+	select {
+	case <-ready:
+	case err := <-ended:
+		t.Fatalf("the watch never started: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch never said it was ready")
+	}
+	if err := os.Remove(node); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case names := <-gone:
+		if !slices.Equal(names, []string{"event5"}) {
+			t.Errorf("the deletion named %q, want event5", names)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a node removed after the watch was ready was never seen")
+	}
+	if err := os.Remove(inputDir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Error("a watch whose directory went away ended with no error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a watch whose directory went away kept waiting, and nothing says so")
+	}
+}
