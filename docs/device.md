@@ -44,10 +44,11 @@ on without a cable.
   pasted, blank lines counted.
 - An action returns nothing to Home Assistant, so a diagnostic text sensor,
   `adb_keys`, shows who can connect: the names in `/adb_keys`, then the ones
-  set from Home Assistant, as `rooting: you@mac; set 2: a@b, c@d` or
-  `rooting: you@mac; set: none`. A bare "none" would read as nobody can get
-  in, and the rooting computer always can. A refused call puts `refused:
-  <why>; ` in front until a call succeeds. It is cut to 255 characters, Home
+  set from Home Assistant, separated by commas, as
+  `you@mac 🔒, a@b, c@d`. 🔒 marks a key from `/adb_keys`, the rooting
+  computer's: no call removes it. With no key anywhere it reads
+  `none`. A refused call puts `refused: <why>; ` in front until a call
+  succeeds. It is cut to 255 characters, Home
   Assistant's limit for a state.
 - The file is `0640` `system:shell` in a `02750` `system:shell` directory, as
   init makes it, set explicitly because the daemon's umask is 077: a bare
