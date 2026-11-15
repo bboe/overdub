@@ -83,6 +83,33 @@
   next daemon restarts the readers anyway.
 - A watch that fails, or that the kernel removes, is logged once and not
   retried. A queue overflow counts as a deletion.
+- Every restart of `acebuttond` plays Alexa's privacy earcon,
+  `state_privacy_mode_off.wav`, or `_on` with the microphones muted. A new
+  `acebuttond` sends LIPC `muteStateChanged` 0, then the driver's state. On
+  biscuit PuffinApp logged the 0 as `muteState invalid value`, took the 8 as a
+  privacy change, and `uxeventd` played the earcon 1.5 seconds later. At boot
+  PuffinApp is not running yet, so a stock Echo never plays it.
+- Both events come from `acebuttond` itself, so the earcon cannot be stopped
+  for a restart, only the restart avoided. So a restart moves every `AVRCP`
+  node out of `/dev/input`, to `/dev/.overdub-input-<node>`, until the
+  readers settle, then renames it back. The readers never open it, as at
+  boot, and a disconnect restarts nothing. On biscuit, with a uinput node
+  named `AVRCP` in place as `event4`, `acebuttond` came back holding `event0`
+  to `event3`; removing `event4` then restarted nothing and played nothing.
+  On donut with a JBL Go 3 connected, `acebuttond` came back without its
+  `event5`, and the disconnect restarted nothing.
+- Holding the clone does not mean a reader has opened every node, so the node
+  goes back only when the reader's count of open `/dev/input` nodes is
+  unchanged for 500 ms.
+- The node goes back by rename, not by link. A reader not restarted that holds
+  the node then still sees it as `/dev/input/<node>`, and as a destroyed
+  `/dev/input` node after the disconnect. Linked back, it would read
+  `/dev/.overdub-input-<node> (deleted)`, which the daemon does not see.
+- A node whose device went while it was moved does not open, and is removed
+  rather than put back. One that ueventd made again under the same name
+  is kept. A node left moved by a daemon that stopped mid-restart is put back
+  at the next pass.
+- The restart at start, onto a new clone, still plays the earcon.
 - Uninstalling restarts both again, after the daemon stops, so they let go of
   the clone it removed.
 - A restart can fail once. init kills with SIGKILL, and a new `acebuttond`

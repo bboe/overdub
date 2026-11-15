@@ -97,6 +97,9 @@ covering whatever you are about to touch.
 - Any destroyed node does it, not only the clone. A Bluetooth speaker's
   `AVRCP` node goes at the disconnect, so the daemon restarts a reader holding
   any destroyed `/dev/input` node, on an inotify watch of the directory.
+- Every `acebuttond` restart plays the privacy earcon, so a restart moves the
+  speaker's `AVRCP` node out of `/dev/input` until the readers settle, and
+  they never hold it. docs/button.md has the chain.
 
 ## The firewall
 
