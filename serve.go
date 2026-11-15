@@ -23,6 +23,7 @@ import (
 	"github.com/bboe/overdub/internal/clip"
 	"github.com/bboe/overdub/internal/device"
 	"github.com/bboe/overdub/internal/esphome"
+	"github.com/bboe/overdub/internal/evdev"
 	"github.com/bboe/overdub/internal/mdns"
 	"github.com/bboe/overdub/internal/sendspin"
 	"github.com/bboe/overdub/internal/untrustedlog"
@@ -236,7 +237,7 @@ func restartReaders(i *button.Interceptor) {
 	}
 	restart := func(why string) {
 		began := time.Now()
-		restarted, err := device.RestartInputReaders(clone)
+		restarted, err := device.RestartInputReaders(clone, inputName)
 		if err != nil {
 			log.Printf("warning: %v; keys passed on may reach nothing until a reboot", err)
 		}
@@ -254,6 +255,15 @@ func restartReaders(i *button.Interceptor) {
 		}
 	})
 	log.Printf("warning: %v; a key reader left holding a destroyed node is not restarted", err)
+}
+
+func inputName(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return evdev.DeviceName(f)
 }
 
 var deviceBoard, deviceModel string

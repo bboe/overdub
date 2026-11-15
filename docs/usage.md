@@ -123,6 +123,11 @@ boot. After that, `install.py` starts or restarts the daemon itself. It is
 supervised. If it dies, the grab is released and the action button goes back
 to Alexa.
 
+A daemon start usually plays Alexa's microphone-on sound once, or
+microphone-off when the microphones are muted. The daemon restarts Alexa's key
+reader, and the reader announces the microphone state as it starts.
+docs/button.md says why.
+
 ## Running it by hand
 
 The boot script runs the daemon. To run it by hand, as root, by full path:
