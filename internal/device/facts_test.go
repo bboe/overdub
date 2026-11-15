@@ -1,9 +1,7 @@
 package device
 
 import (
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -120,57 +118,6 @@ func TestJackOccupiedWithNoSwitch(t *testing.T) {
 
 	if _, ok := JackOccupied(); ok {
 		t.Error("JackOccupied() reported a state with no switch to read")
-	}
-}
-
-func TestTheRouteReadGivesUpRatherThanHanging(t *testing.T) {
-	defer func(was dumpsys) { *routeDump = was }(*routeDump)
-
-	routeDump.timeout = 100 * time.Millisecond
-	started := make(chan struct{})
-	routeDump.command = func(ctx context.Context) ([]byte, error) {
-		close(started)
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}
-
-	done := make(chan struct{})
-	var known bool
-	go func() { _, known = BluetoothRouted(); close(done) }()
-
-	<-started
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the read never gave up, so a wedged binder stops the route for the rest of the boot")
-	}
-	if known {
-		t.Error("a read that never answered reported a route")
-	}
-}
-
-func TestOneReadCannotOutlastItsBudget(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skipf("no shell to fork with: %v", err)
-	}
-	defer func(was dumpsys) { *routeDump = was }(*routeDump)
-
-	routeDump.timeout, routeDump.wait = 100*time.Millisecond, 400*time.Millisecond
-	routeDump.argv = []string{"sh", "-c", "sleep 30 & sleep 30"}
-
-	start := time.Now()
-	_, known := BluetoothRouted()
-	elapsed := time.Since(start)
-
-	if known {
-		t.Error("a read that never answered reported a route")
-	}
-	if elapsed < routeDump.timeout {
-		t.Fatalf("the read failed in %v, before the deadline it was supposed to hit; the command never ran", elapsed)
-	}
-	if limit := RouteReadBudget() + 100*time.Millisecond; elapsed > limit {
-		t.Errorf("one read took %v against a budget of %v; the budget has to bound the whole call",
-			elapsed, RouteReadBudget())
 	}
 }
 
@@ -384,42 +331,5 @@ func TestWaitForIPv4StopsAtItsDeadlineAndOnItsChannel(t *testing.T) {
 	if took := time.Since(start); took > 2*time.Second {
 		t.Errorf("waited %v with the stop channel already closed, so a teardown would"+
 			" sit behind the whole address wait", took)
-	}
-}
-
-const routesDump = `Audio routes:
-  mMainType=0x0
-  mBluetoothName=Device Connected
-
-Other state:
-  mVolumeController=VolumeController(android.os.BinderProxy@3a1fcea0,mVisible=false)
-`
-
-func TestParseBluetoothRoute(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		dump      string
-		connected bool
-		ok        bool
-	}{
-		{"a speaker is connected", routesDump, true, true},
-		{"nothing is connected",
-			"Audio routes:\n  mMainType=0x0\n  mBluetoothName=Device NOT Connected\n", false, true},
-		{"a build that names the device instead",
-			"Audio routes:\n  mMainType=0x0\n  mBluetoothName=JBL Go 3\n", false, false},
-		{"no routes block at all",
-			"- STREAM_MUSIC:\n   Max: 30\n   Current: 2 (speaker): 12\n", false, false},
-		{"the block carries no bluetooth line",
-			"Audio routes:\n  mMainType=0x0\n\nOther state:\n  mMcc=0\n", false, false},
-		{"a later block carries one instead",
-			"Audio routes:\n  mMainType=0x0\nOther state:\n  mBluetoothName=Device Connected\n",
-			false, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			connected, ok := parseBluetoothRoute(tt.dump)
-			if connected != tt.connected || ok != tt.ok {
-				t.Errorf("route = %v, %v; want %v, %v", connected, ok, tt.connected, tt.ok)
-			}
-		})
 	}
 }

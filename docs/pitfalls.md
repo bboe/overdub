@@ -273,6 +273,24 @@ transfer added any other way breaks on Windows and says nothing.
   then `svc wifi enable` joined the near one in 14 seconds, and connects with
   the speaker on then took 34 ms at the median.
 
+## A2DP on Fire OS 6
+
+- The 2 sections after this one were measured on Fire OS 5, whose stack was
+  Android's. Fire OS 6's is Amazon's `btmanagerd`, and neither tell appears in
+  its log: no `sbc rate` line, no `Audiopath start failed`, no AVRCP dump.
+- A good connect logs `a2dp_src_co:: set_conn_state:: state:2, str:1:<address>`
+  from `ACEBT-HAL`, then `PuffinApp` sends `Bluetooth:StreamingStarted`.
+- Alexa can drop a speaker herself. One disconnected 10 seconds after its
+  first connect, with `btm_sec_disconnected ... reason:22`, the local host's
+  own disconnect, and Alexa then sent `Bluetooth:DisconnectDevicesSucceeded`.
+  The cause is not known.
+- A live capture on Fire OS 6:
+
+```
+adb logcat -v time -s ACEBT-HAL:V ACEBT-Manager:V ACEBT-A2DP-SM:V bt_btif:V \
+  bt_btm_sec:V > bt.log
+```
+
 ## A2DP with a zero SBC configuration
 
 - A speaker can pair, read `Device Connected`, follow the volume keys, show

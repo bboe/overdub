@@ -89,14 +89,14 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | uptime | `/proc/uptime` | 67 µs | minute |
 | signal | `/proc/net/wireless` | 1.8 ms | minute |
 | registration | `map.db`, read twice | 2 reads, 50 ms apart | minute, subscribed |
-| Bluetooth name | `dumpsys bluetooth_manager` | 11.5 ms | minute, subscribed |
+| Bluetooth name | `btclient`, then `bt_config.conf`, only over Bluetooth | 340 to 350 ms | minute, subscribed |
 | button modes | held in memory | -- | minute |
 | adb rule | `/proc/net/tcp`, then `iptables -C` | 1 fork if open | minute |
 | adb keys | `/adb_keys` and `/data/misc/adb/adb_keys` | 2 reads | minute, subscribed |
 | temperature | a thermal zone's `temp` | 118 µs | heavy |
 | memory | `/proc/meminfo` | 111 µs | heavy |
 | volume, mute | held from `lipc-wait-event` | -- | heavy |
-| route | `dumpsys audio`, absent on Fire OS 6 | 11.7 ms | heavy |
+| route | held from `lipc-wait-event` | -- | heavy |
 | jack | `/sys/class/switch/h2w/state` | -- | heavy |
 | microphone mute | the privacy driver's `state` | -- | heavy |
 | speaker playing | ALSA, then a `dumpsys` | 2.0 / 18.7 ms | live |
@@ -109,12 +109,11 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   and moves slowly. The registration changes only at setup or deregistration.
 - The heavy tick cost about 24 ms of a core every 2.5 seconds, 1%, on Fire OS
   5, almost all of it the forks for the route and the microphone. On Fire OS 6
-  the microphone is a sysfs read, not a fork.
+  it forks nothing: the microphone is a sysfs read, and the route is held from
+  audiod's events.
 - `dumpsys account` and `dumpsys audio` were timed in the same loop, because
   the absolute figure moves with device load: 300 calls took 4.66 and 5.23
   seconds.
-- `dumpsys bluetooth_manager` costs what `dumpsys audio` does: 100 calls took
-  1.43 to 1.54 seconds against 1.30 to 1.47.
 - Zero is a valid reading for the signal, the uptime and the volume. So a
   reading that could not be taken is never published as zero.
 
@@ -133,11 +132,15 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   panics on it.
 - `dumpsys` talks to binder, which can wedge, so the read carries a deadline.
   `exec.CommandContext` kills the child, but `Output` then waits for EOF, which
-  a grandchild can hold open. `cmd.WaitDelay` bounds that wait. So a route read
-  is 1 second plus 500 ms, exported as `RouteReadBudget`.
-- The poll is serial, so a heavy tick spends its forks in sequence. 2 came to
-  2.4 seconds against 2.5. `main_test.go` holds the sum of the route, mic and
-  speaker budgets, not each apart.
+  a grandchild can hold open. `cmd.WaitDelay` bounds that wait.
+- `btclient` gets the same, 1 second plus 500 ms, exported as
+  `BluetoothReadBudget`. Its output is scanned before `Wait`, where
+  `WaitDelay` does not reach, so the pipe is also closed at the deadline. A
+  client whose grandchild held the pipe took 30 seconds without that.
+- The poll is serial, so a tick spends its forks in sequence. On Fire OS 5 the
+  heavy tick's 2 came to 2.4 seconds against 2.5. `main_test.go` holds the
+  speaker's budget against the sound tick, and the registration's and
+  Bluetooth's sum against the minute.
 - The budget and the command are variables so a test can shrink the wait and
   substitute a command that never answers.
 - `PollLive` reads nothing while nobody is subscribed, because it forks.
@@ -159,7 +162,7 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   waits out the rest and then serves it, or the value stays wrong until the
   minute tick.
 - The polls are the only device readers. A wedged poll leaves every subscriber
-  on stale values, so the route read carries a deadline and procfs reads do
+  on stale values, so every fork carries a deadline and procfs reads do
   not.
 - A failed reading is sent with `missing_state` set. Leaving it out is right
   only before the first reading: after that Home Assistant keeps drawing the
@@ -326,6 +329,31 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - So the first subscriber after a restart gets no registration state at all.
   The entity shows unknown, not unavailable, until the next minute tick.
 
+### The route
+
+- Whether `output_device` is `bluetooth` is audiod's `OutputDevice`:
+  `SPEAKER##`, `AUX##` for the jack, or `BT##` for a Bluetooth speaker.
+  Anything else is no reading. The jack against the speaker is still the
+  jack's switch, "The jack" above.
+- It is held from `OutputDeviceChanged`, on the volume's child process, so a
+  reading costs no fork. "The volume" below has the child, the seed read, and
+  what happens when it ends.
+- The event carries the speaker's name, `"BT##JBL Go 3"`. The property never
+  does: it read `BT##` for as long as the speaker was connected. So the name
+  is not taken from either; a name read only from an event is unknown after a
+  restart.
+- Only the part before `##` is kept, cut from the event's opening quote. The
+  name is never parsed, so a quote or a backslash in it, which
+  `lipc-wait-event` may not escape, cannot lose the event.
+- On donut the jack's switch and `OutputDevice` changed in the same second,
+  both ways.
+- Plugging the jack in with a speaker connected disconnects the speaker. The
+  route went `bluetooth`, `jack`, `speaker`, and the speaker did not reconnect.
+- audiod keeps a level per output: 20 on the speaker, 63 on the JBL Go 3, 57
+  on the jack.
+- Fire OS 5 read `mBluetoothName` under `Audio routes:` in `dumpsys audio`.
+  Fire OS 6 has no audio service.
+
 ### Which speaker is connected
 
 - `bluetooth_device` names the speaker A2DP is connected to, or gives its
@@ -334,33 +362,45 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - It is one entity, not a flag and a name. A connected speaker always takes the
   route, so `output_device` already says whether one is connected. A flag on
   the minute tick would disagree with the live route for up to a minute.
-- The address is `mCurrentDevice` under `Profile: A2dpService` in `dumpsys
-  bluetooth_manager`, `null` when nothing is connected. The profile line must
-  match whole: `A2dpSinkService` has the same field for a phone playing into
-  the Dot, and `HeadsetService` for a route that is not A2DP.
-- The name is the `Name` tag in that address's section of
-  `/data/misc/bluedroid/bt_config.xml`. The search stops at the next address,
-  so a neighbour's name cannot answer. The Dot's own name, under `Local`, comes
-  before every address, so it cannot answer either.
-- The lookup reads the file in-process: 0.8 to 1.2 ms against a 59,589-byte
-  file. It runs only while a speaker is connected.
+- It is read only while the route is `bluetooth`. Any other route is empty
+  with no fork, and an unknown route is no reading.
+- The addresses come from `btclient`, Amazon's console for `btmanagerd`. It
+  reads commands from stdin: `connectedlist`, then `quit`. It answers `Got N
+  devices for getConnectedDevices` and then N addresses, each line behind
+  `INFO[<pid>]: `.
+- It runs with `Pdeathsig`, as the logcat followers do, so a daemon killed
+  mid-read leaves no `btclient` behind.
+- It buffers stdout into a pipe, so nothing arrives until it exits. A read
+  that waited for the answer before sending `quit` waited out its deadline, and
+  the sensor read unknown on donut with a speaker connected.
+- `quit` sent too soon hangs it: at 20 and 50 ms after the command, 0 of 10
+  answered, and each ran until killed. At 100 and 200 ms, 10 of 10 did. So
+  `quit` goes 300 ms after the command, and the output is read after that.
+- Output that ends before N addresses is no reading, and so is a list that is
+  empty while the route says `bluetooth`. An empty reading is how the sensor
+  says nothing is connected, and it must not say so for a connected speaker.
+- The list is every connected device, not only A2DP. So the address whose
+  section in `/data/misc/bluedroid/bt_config.conf` lists the A2DP sink
+  service, `0000110b-...`, in either case, is chosen. A phone playing into the
+  Dot lists the source service, `0000110a-...`.
+- With no sink among them, 1 device is taken as the speaker, and more than 1
+  is no reading: the first could be a phone.
+- The name is `Name =` in that address's `[aa:bb:...]` section. The file is
+  INI. Fire OS 5's was `bt_config.xml`. Only sections named by an address are
+  read, so the Dot's own `[Adapter]` name cannot answer.
+- The file also holds every link key and the Dot's own LE keys. Read it on the
+  Dot; never copy it off whole.
 - The name is made valid UTF-8. A text sensor state is a proto3 string, and
   Home Assistant's client drops the connection on one it cannot decode. The
   snapshot would then drop every reconnect for as long as the state stood.
-- `HidService` and the GATT clients carry no audio and are not read, so the
-  Alexa app over BLE is not a speaker. `mPlayingA2dpDevice` is not a playing
-  signal: it follows the AVDTP stream and was set with nothing playing.
 - **A route change to or from `bluetooth` wakes the minute poll**, so the name
   follows the route within about a second. A change between the speaker and
   the jack cannot move the name and wakes nothing. `wakeGap` bounds a route
-  that flaps. The route became `jack` and the name cleared in the same second.
-- **A swap from 1 speaker to another waits for the minute tick.** The Dot holds
-  1 A2DP sink, and `mBluetoothName` is a literal, not a name, so the route stays
-  `bluetooth` and nothing wakes. The link drops between speakers in practice:
-  across 6 transitions, the name and the route arrived together, 1 to 3
-  seconds behind the device.
-- `bt_config.xml`'s mtime does not track connections: a disconnect left it
-  unchanged for 2.5 minutes, and it was rewritten with nothing connected.
+  that flaps.
+- **A swap from 1 speaker to another waits for the minute tick**, if the route
+  never leaves `bluetooth`. On Fire OS 5 the link dropped between speakers in
+  practice: across 6 transitions, the name and the route arrived together, 1
+  to 3 seconds behind the device.
 
 ## The volume
 
@@ -372,15 +412,17 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - Only the live output's level can be read, so there is one volume sensor. A
   sensor for the jack or Bluetooth could only repeat a remembered value.
 - `internal/device` follows `lipc-wait-event -m com.doppler.audiod
-  MainVolumeChanged,MuteChanged` in a child process, as `internal/alexa`
-  follows logcat. `MainVolumeChanged <level> 3` carries the level;
-  `MuteChanged <0|1> <level>` carries the mute and the level.
+  MainVolumeChanged,MuteChanged,OutputDeviceChanged` in a child process, as
+  `internal/alexa` follows logcat. `MainVolumeChanged <level> 3` carries the
+  level; `MuteChanged <0|1> <level>` carries the mute and the level;
+  `OutputDeviceChanged "<route>"` carries the route.
 - The daemon keeps the last level and mute, so a reading costs no fork. One
   `lipc-get-prop` takes about 86 ms, 54 ms of it CPU: 2 every 2.5 seconds would
   cost about 4% of a core.
-- When the child starts, `lipc-get-prop` reads `MainVolume` and `Mute`, and
-  again every minute. The read does not wait for the subscription, so a change
-  between the two is caught by the next minute's read. Each field of a read is
+- When the child starts, `lipc-get-prop` reads `MainVolume`, `Mute` and
+  `OutputDevice`, and again every minute. The read does not wait for the
+  subscription, so a change between the two is caught by the next minute's
+  read. Each field of a read is
   dropped if an event wrote that field meanwhile: the event is newer. A key
   press during the first read changes only the level, and the mute still comes
   from the read.

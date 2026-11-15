@@ -1,170 +1,196 @@
 package device
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-const a2dpDump = `Profile: HeadsetService
-  mCurrentDevice: null
-  mTargetDevice: null
-Profile: A2dpService
-  mCurrentDevice: F8:5C:7D:39:15:31
-  mTargetDevice: null
-  mPlayingA2dpDevice: F8:5C:7D:39:15:31
-  StateMachine: A2dpStateMachine:
-curState=Connected
-
-Profile: A2dpSinkService
-  mCurrentDevice: null
-`
-
-func TestParseA2DPAddress(t *testing.T) {
+func TestOutputBluetooth(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		dump    string
-		address string
-		ok      bool
+		output    string
+		connected bool
+		known     bool
 	}{
-		{"a speaker is connected", a2dpDump, "F8:5C:7D:39:15:31", true},
-		{"nothing is connected",
-			"Profile: A2dpService\n  mCurrentDevice: null\n", "", true},
-		{"the sink profile does not answer for the source",
-			"Profile: A2dpSinkService\n  mCurrentDevice: F8:5C:7D:39:15:31\n", "", false},
-		{"a headset does not answer for it either",
-			"Profile: HeadsetService\n  mCurrentDevice: F8:5C:7D:39:15:31\n", "", false},
-		{"no a2dp profile in the dump", "enabled: true\nstate: 12\n", "", false},
-		{"a device that is not an address",
-			"Profile: A2dpService\n  mCurrentDevice: nonsense\n", "", false},
-		{"an address with more after it",
-			"Profile: A2dpService\n  mCurrentDevice: F8:5C:7D:39:15:31:00\n", "", false},
+		{"BT##", true, true},
+		{"BT##JBL Go 3", true, true},
+		{"SPEAKER##", false, true},
+		{"AUX##", false, true},
+		{"LINEOUT##", false, false},
+		{"BT", false, false},
+		{"", false, false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			address, ok := parseA2DPAddress(tt.dump)
-			if address != tt.address || ok != tt.ok {
-				t.Errorf("address = %q, %v; want %q, %v", address, ok, tt.address, tt.ok)
+		t.Run(tt.output, func(t *testing.T) {
+			connected, known := outputBluetooth(tt.output)
+			if connected != tt.connected || known != tt.known {
+				t.Errorf("outputBluetooth(%q) = %v, %v; want %v, %v",
+					tt.output, connected, known, tt.connected, tt.known)
 			}
 		})
 	}
 }
 
-const btConfig = `<Bluedroid>
-    <N1 Tag="Local">
-        <N1 Tag="Adapter">
-            <N2 Tag="Address" Type="string">88:71:e5:b6:44:09</N2>
-            <N9 Tag="Name" Type="string">Echo Dot-U8T</N9>
-        </N1>
-    </N1>
-    <N2 Tag="Remote">
-        <N1 Tag="46:06:27:c5:bd:45">
-            <N1 Tag="DevType" Type="int">2</N1>
-        </N1>
-        <N505 Tag="f8:5c:7d:39:15:31">
-            <N1 Tag="Timestamp" Type="int">1789975764</N1>
-            <N2 Tag="Name" Type="string">JBL Go 3</N2>
-            <N3 Tag="DevClass" Type="int">2360340</N3>
-        </N505>
-        <N506 Tag="00:02:5b:00:15:10">
-            <N2 Tag="Name" Type="string">Office Shield</N2>
-        </N506>
-    </N2>
-</Bluedroid>
-`
-
-func TestBluetoothName(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bt_config.xml")
-	if err := os.WriteFile(path, []byte(btConfig), 0o600); err != nil {
-		t.Fatal(err)
+func TestTheRouteFollowsAudiodsEvents(t *testing.T) {
+	resetVolume(t)
+	if _, known := BluetoothRouted(); known {
+		t.Fatal("a route nobody has read is known")
 	}
 	for _, tt := range []struct {
-		name    string
-		address string
-		want    string
-		ok      bool
+		line      string
+		connected bool
 	}{
-		{"the paired speaker", "F8:5C:7D:39:15:31", "JBL Go 3", true},
-		{"an address the config does not carry", "00:00:5E:00:53:2A", "", false},
-		{"a section with no name of its own", "46:06:27:c5:bd:45", "", false},
+		{`OutputDeviceChanged "BT##JBL Go 3" `, true},
+		{`OutputDeviceChanged "SPEAKER##" `, false},
+		{`OutputDeviceChanged "BT##Bob "Boom" C:\Speaker"`, true},
+		{"\tOutputDeviceChanged \"SPEAKER##\"", false},
+		{`OutputDeviceChanged "BT##"`, true},
+		{`OutputDeviceChanged "AUX##" `, false},
+		{`OutputDeviceChanged "SPEAKER##" `, false},
+	} {
+		volumeEvent(tt.line)
+		if connected, known := BluetoothRouted(); connected != tt.connected || !known {
+			t.Errorf("after %q the route is %v, %v; want %v, true", tt.line, connected, known, tt.connected)
+		}
+	}
+	volumeEvent("OutputDeviceChanged BT##")
+	if connected, _ := BluetoothRouted(); connected {
+		t.Error("an event that is not quoted moved the route")
+	}
+	forgetVolume()
+	if _, known := BluetoothRouted(); known {
+		t.Error("a route nobody is watching is still known")
+	}
+}
+
+const connectedList = `INFO[28706]: BT Client :: start
+p_data (size:27) = 1B 00 00 00 00 00 00 00 00 00 00 62 74 63 6C 69
+                   65 6E 74 00 00 00 00 00 00 00 00
+INFO[28706]: BT Client :: opened session with 0xf2d3a000
+INFO[28706]: queue_thread dispatched
+>INFO[28706]: Got command connectedlist
+INFO[28706]: Got 2 devices for getConnectedDevices
+INFO[28706]: 00:00:5E:00:53:2A
+INFO[28706]: F8:5C:7D:39:15:31
+INFO[28706]: aceBT_freeDeviceList with status 0
+`
+
+func TestReadConnected(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		out   string
+		want  []string
+		fails bool
+	}{
+		{"two devices", connectedList, []string{"00:00:5e:00:53:2a", "f8:5c:7d:39:15:31"}, false},
+		{"none", ">INFO[1]: Got command connectedlist\nINFO[1]: Got 0 devices for getConnectedDevices\n", nil, false},
+		{"an address before the count is not one of them",
+			"INFO[1]: F8:5C:7D:39:15:31\nINFO[1]: Got 0 devices for getConnectedDevices\n", nil, false},
+		{"output that ends before the list does",
+			"INFO[1]: Got 2 devices for getConnectedDevices\nINFO[1]: F8:5C:7D:39:15:31\n", nil, true},
+		{"no count at all", "INFO[1]: BT Client :: start\n", nil, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := bluetoothName(path, tt.address)
-			if got != tt.want || ok != tt.ok {
-				t.Errorf("name = %q, %v; want %q, %v", got, ok, tt.want, tt.ok)
+			got, err := readConnected(strings.NewReader(tt.out))
+			if (err != nil) != tt.fails || !slices.Equal(got, tt.want) {
+				t.Errorf("readConnected = %q, %v; want %q, failing %v", got, err, tt.want, tt.fails)
 			}
 		})
 	}
 }
 
-func TestBluetoothNameUnescapesWhatTheConfigEscaped(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bt_config.xml")
-	config := `<N2 Tag="Remote">
-        <N1 Tag="f8:5c:7d:39:15:31">
-            <N2 Tag="Name" Type="string">Bob &amp; Ann&apos;s</N2>
-        </N1>
-    </N2>
+const btConfig = `[Info]
+FileSource = Empty
+
+[Adapter]
+Address = 68:37:e9:5f:aa:76
+Name = Echo Dot-3UX
+
+[00:00:5e:00:53:2a]
+Name = A Phone
+Service = 0000110a-0000-1000-8000-00805f9b34fb 0000110c-0000-1000-8000-00805f9b34fb
+
+[f8:5c:7d:39:15:31]
+Timestamp = 1794756458
+Name = JBL Go 3
+Service = 0000110b-0000-1000-8000-00805f9b34fb 0000110e-0000-1000-8000-00805f9b34fb
+
+[00:02:5b:00:15:10]
+DevType = 1
 `
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
+
+func TestParseBTConfig(t *testing.T) {
+	sections := parseBTConfig(btConfig)
+	if got := sections["f8:5c:7d:39:15:31"]["Name"]; got != "JBL Go 3" {
+		t.Errorf("the speaker's name is %q, want JBL Go 3", got)
 	}
-	got, ok := bluetoothName(path, "F8:5C:7D:39:15:31")
-	if !ok || got != "Bob & Ann's" {
-		t.Errorf("name = %q, %v; want %q", got, ok, "Bob & Ann's")
+	if got := sections["00:02:5b:00:15:10"]["Name"]; got != "" {
+		t.Errorf("a section with no name reads %q, a neighbour's", got)
+	}
+	if _, ok := sections["Adapter"]; ok {
+		t.Error("the Dot's own section was read as a device")
 	}
 }
 
-func TestBluetoothNameIsValidUTF8WhateverTheConfigHolds(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bt_config.xml")
-	config := "<N1 Tag=\"f8:5c:7d:39:15:31\">\n" +
-		"<N2 Tag=\"Name\" Type=\"string\">Caf\xe9</N2>\n</N1>\n"
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
+func fakeBTClient(t *testing.T, script string) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no shell to fork with: %v", err)
 	}
-	got, ok := bluetoothName(path, "F8:5C:7D:39:15:31")
-	if !ok || got != "Caf\uFFFD" {
-		t.Errorf("name = %q, %v; want %q: a proto3 string that is not UTF-8 makes Home "+
-			"Assistant drop the connection", got, ok, "Caf\uFFFD")
-	}
-}
-
-func TestBluetoothNameWithNoConfigFile(t *testing.T) {
-	if _, ok := bluetoothName(filepath.Join(t.TempDir(), "gone.xml"), "F8:5C:7D:39:15:31"); ok {
-		t.Error("a config file that is not there answered with a name")
-	}
+	was := btClientArgv
+	t.Cleanup(func() { btClientArgv = was })
+	btClientArgv = []string{"sh", "-c", script}
 }
 
 func TestBluetoothDevice(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bt_config.xml")
+	path := filepath.Join(t.TempDir(), "bt_config.conf")
 	if err := os.WriteFile(path, []byte(btConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defer func(was dumpsys, wasPath string) {
-		*btDump, btConfigPath = was, wasPath
-	}(*btDump, btConfigPath)
+	wasPath := btConfigPath
+	t.Cleanup(func() { btConfigPath = wasPath })
 	btConfigPath = path
 
+	list := func(addresses ...string) string {
+		var b strings.Builder
+		b.WriteString("read cmd; read quit; [ \"$quit\" = quit ] || exit 1; ")
+		b.WriteString("echo 'INFO[1]: Got " + strconv.Itoa(len(addresses)) +
+			" devices for getConnectedDevices'; ")
+		for _, a := range addresses {
+			b.WriteString("echo 'INFO[1]: " + a + "'; ")
+		}
+		return b.String()
+	}
 	for _, tt := range []struct {
-		name string
-		dump string
-		err  error
-		want string
-		ok   bool
+		name   string
+		output string
+		client string
+		want   string
+		ok     bool
 	}{
-		{"a speaker with a name in the config", a2dpDump, nil, "JBL Go 3", true},
-		{"a speaker the config does not carry",
-			"Profile: A2dpService\n  mCurrentDevice: 00:00:5E:00:53:2A\n", nil, "00:00:5E:00:53:2A", true},
-		{"nothing is connected", "Profile: A2dpService\n  mCurrentDevice: null\n", nil, "", true},
-		{"a dump that named no a2dp profile", "enabled: true\n", nil, "", false},
-		{"a read that failed", a2dpDump, os.ErrPermission, "", false},
+		{"a speaker with a name in the config", "BT##", list("F8:5C:7D:39:15:31"), "JBL Go 3", true},
+		{"the sink, not a phone connected beside it", "BT##",
+			list("00:00:5E:00:53:2A", "F8:5C:7D:39:15:31"), "JBL Go 3", true},
+		{"a speaker the config does not carry", "BT##", list("00:00:5E:00:53:2B"), "00:00:5e:00:53:2b", true},
+		{"a speaker the config has no name for", "BT##", list("00:02:5B:00:15:10"), "00:02:5b:00:15:10", true},
+		{"two devices, neither a sink the config knows", "BT##",
+			list("00:00:5E:00:53:2A", "00:02:5B:00:15:10"), "", false},
+		{"nothing is routed there", "SPEAKER##", "exit 1", "", true},
+		{"the jack took the route", "AUX##", "exit 1", "", true},
+		{"a route audiod has not said", "", "exit 1", "", false},
+		{"a client that fails", "BT##", "exit 1", "", false},
+		{"a client that lists nothing while the route says bluetooth", "BT##", list(), "", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			btDump.command = func(context.Context) ([]byte, error) {
-				return []byte(tt.dump), tt.err
+			resetVolume(t)
+			if tt.output != "" {
+				volumeEvent(`OutputDeviceChanged "` + tt.output + `"`)
 			}
+			fakeBTClient(t, tt.client)
 			got, ok := BluetoothDevice()
 			if got != tt.want || ok != tt.ok {
 				t.Errorf("device = %q, %v; want %q, %v", got, ok, tt.want, tt.ok)
@@ -173,60 +199,59 @@ func TestBluetoothDevice(t *testing.T) {
 	}
 }
 
-func TestAConnectedSpeakerNeverReadsAsNothingConnected(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bt_config.xml")
-	defer func(was dumpsys, wasPath string) {
-		*btDump, btConfigPath = was, wasPath
-	}(*btDump, btConfigPath)
-	btConfigPath = path
-	btDump.command = func(context.Context) ([]byte, error) { return []byte(a2dpDump), nil }
-
-	for _, tt := range []struct {
-		name   string
-		config string
-	}{
-		{"a name that is empty",
-			"<N1 Tag=\"f8:5c:7d:39:15:31\">\n<N2 Tag=\"Name\" Type=\"string\"></N2>\n</N1>\n"},
-		{"a name that is only spaces",
-			"<N1 Tag=\"f8:5c:7d:39:15:31\">\n<N2 Tag=\"Name\" Type=\"string\">   </N2>\n</N1>\n"},
-		{"no name tag at all",
-			"<N1 Tag=\"f8:5c:7d:39:15:31\">\n<N1 Tag=\"DevType\" Type=\"int\">1</N1>\n</N1>\n"},
-		{"no entry for it at all", "<Bluedroid>\n</Bluedroid>\n"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(tt.config), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			got, ok := BluetoothDevice()
-			if !ok || strings.TrimSpace(got) == "" {
-				t.Errorf("a connected speaker read as %q, %v; an empty reading is how this"+
-					" sensor says nothing is connected", got, ok)
-			}
-		})
+func TestTheClientIsAskedAndThenToldToQuit(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "stdin")
+	fakeBTClient(t, "read a; echo \"$a\" > "+log+"; read b; echo \"$b\" >> "+log+
+		"; echo 'INFO[1]: Got 0 devices for getConnectedDevices'")
+	if _, err := connectedDevices(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "connectedlist\nquit\n" {
+		t.Errorf("the client was sent %q, want connectedlist then quit: btclient buffers a pipe, so nothing is answered until it quits", got)
 	}
 }
 
 func TestOneBluetoothReadCannotOutlastItsBudget(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skipf("no shell to fork with: %v", err)
-	}
-	defer func(was dumpsys) { *btDump = was }(*btDump)
-
-	btDump.timeout, btDump.wait = 100*time.Millisecond, 400*time.Millisecond
-	btDump.argv = []string{"sh", "-c", "sleep 30 & sleep 30"}
+	fakeBTClient(t, "sleep 30 & sleep 30")
+	defer func(timeout, wait time.Duration) { btTimeout, btWait = timeout, wait }(btTimeout, btWait)
+	btTimeout, btWait = 100*time.Millisecond, 400*time.Millisecond
 
 	start := time.Now()
-	name, ok := BluetoothDevice()
+	_, err := connectedDevices()
 	elapsed := time.Since(start)
 
-	if ok || name != "" {
-		t.Errorf("a read that never answered reported %q, %v", name, ok)
+	if err == nil {
+		t.Error("a client that never answered gave a list")
 	}
-	if elapsed < btDump.timeout {
+	if elapsed < btTimeout {
 		t.Fatalf("the read failed in %v, before the deadline it was supposed to hit; the command never ran", elapsed)
 	}
 	if limit := BluetoothReadBudget() + 100*time.Millisecond; elapsed > limit {
 		t.Errorf("one read took %v against a budget of %v; the budget has to bound the whole call",
 			elapsed, BluetoothReadBudget())
+	}
+}
+
+func TestTheSinkAndTheNameAreReadWhateverTheirCase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bt_config.conf")
+	config := "[00:00:5e:00:53:2a]\nName = A Phone\n" +
+		"[f8:5c:7d:39:15:31]\nName = Caf\xe9\nService = 0000110B-0000-1000-8000-00805F9B34FB\n"
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wasPath := btConfigPath
+	t.Cleanup(func() { btConfigPath = wasPath })
+	btConfigPath = path
+	resetVolume(t)
+	volumeEvent(`OutputDeviceChanged "BT##"`)
+	fakeBTClient(t, "read cmd; read quit; echo 'INFO[1]: Got 2 devices for getConnectedDevices'; "+
+		"echo 'INFO[1]: 00:00:5E:00:53:2A'; echo 'INFO[1]: F8:5C:7D:39:15:31'")
+	got, ok := BluetoothDevice()
+	if !ok || got != "Caf\uFFFD" {
+		t.Errorf("device = %q, %v; want the sink, by an upper-case service, named as valid UTF-8", got, ok)
 	}
 }
