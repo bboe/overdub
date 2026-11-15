@@ -559,11 +559,12 @@ def remote_md5(path: str) -> str:
 
 
 def remove_old_adb_key() -> None:
-    if shell("getprop ro.adb.secure")[1].strip() != "1":
+    if probe('"$(getprop ro.adb.secure)" = 1') == "no":
         warn(
             "adb",
-            "ro.adb.secure is not 1, so tcp/5555 may be a root shell with no key."
-            " Reboot the Dot to restore it.",
+            "ro.adb.secure is not 1, so tcp/5555 is a root shell with no key."
+            " The Dot was rooted before firebreak v1.2.0 locked adb;"
+            " docs/usage.md says how to lock it.",
         )
     if probe(f"-f {ADB_KEYS}") == "no":
         return
