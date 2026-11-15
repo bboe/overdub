@@ -423,8 +423,8 @@ firewall. There is nothing to switch.
 - The call replaces the whole list. Send every key you want kept; send `none`
   to remove them all. An empty `keys` is refused. No restart is needed.
 - The `adb keys` diagnostic sensor shows who can connect: the rooting
-  computer's key, then the keys set here, by the names at the end of each
-  line. After a refused call it starts with the reason and the line it
+  computer's key, marked 🔒, then the keys set here, by the names at
+  the end of each line, separated by commas. After a refused call it starts with the reason and the line it
   stopped at.
 
 #### A Dot rooted before firebreak v1.2.0

@@ -921,11 +921,11 @@ func (s *Server) keyList() (string, bool) {
 	if !ok {
 		return "", false
 	}
-	have := "set: none"
-	if len(set) > 0 {
-		have = fmt.Sprintf("set %d: %s", len(set), strings.Join(set, ", "))
+	var names []string
+	for _, name := range rooting {
+		names = append(names, name+" 🔒")
 	}
-	list := "rooting: " + namesOrNone(rooting) + "; " + have
+	list := namesOrNone(append(names, set...))
 	if refused != "" {
 		list = "refused: " + refused + "; " + list
 	}

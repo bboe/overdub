@@ -102,7 +102,7 @@ func TestTheActionHandsTheWholeTextToTheDevice(t *testing.T) {
 		t.Errorf("the device was handed %q, want the keys whole", text)
 	}
 	waitForLog(t, &out, "set 2 adb key(s)")
-	if list, _ := s.keyList(); list != "rooting: rooter@mac; set 2: one@host, two@host" {
+	if list, _ := s.keyList(); list != "rooter@mac 🔒, one@host, two@host" {
 		t.Errorf("the adb_keys sensor reads %q", list)
 	}
 
@@ -113,7 +113,7 @@ func TestTheActionHandsTheWholeTextToTheDevice(t *testing.T) {
 	<-got
 	waitForLog(t, &out, "were refused")
 	if list, _ := s.keyList(); list != "refused: line 1 is not an adb public key;"+
-		" rooting: rooter@mac; set 2: one@host, two@host" {
+		" rooter@mac 🔒, one@host, two@host" {
 		t.Errorf("after a refusal the sensor reads %q, want the reason: the action reports"+
 			" no result to Home Assistant, and the log needs the adb being set up", list)
 	}
@@ -132,9 +132,13 @@ func TestTheActionHandsTheWholeTextToTheDevice(t *testing.T) {
 func TestTheKeyListSaysNoneAndStaysUnderAState(t *testing.T) {
 	s := testServer(t, testPSK(t))
 	s.adbNames = func() ([]string, []string, bool) { return []string{"rooter@mac"}, nil, true }
-	if list, ok := s.keyList(); !ok || list != "rooting: rooter@mac; set: none" {
-		t.Errorf("with no keys set the sensor reads %q, %v; a bare none reads as nobody"+
-			" can get in, and the rooting computer always can", list, ok)
+	if list, ok := s.keyList(); !ok || list != "rooter@mac 🔒" {
+		t.Errorf("with no keys set the sensor reads %q, %v; want the rooting computer's key,"+
+			" marked as the one that unlocked the Dot", list, ok)
+	}
+	s.adbNames = func() ([]string, []string, bool) { return nil, nil, true }
+	if list, ok := s.keyList(); !ok || list != "none" {
+		t.Errorf("with no keys at all the sensor reads %q, %v; want none", list, ok)
 	}
 	var many []string
 	for range 16 {
