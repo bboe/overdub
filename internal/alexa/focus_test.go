@@ -9,9 +9,10 @@ import (
 )
 
 type levels struct {
-	mu    sync.Mutex
-	seen  []int
-	music []bool
+	mu     sync.Mutex
+	seen   []int
+	music  []bool
+	sounds []string
 }
 
 func focusWatcher() (*FocusWatcher, *levels) {
@@ -28,8 +29,19 @@ func focusWatcher() (*FocusWatcher, *levels) {
 			defer l.mu.Unlock()
 			l.music = append(l.music, playing)
 		},
+		OnSound: func(channel string) {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.sounds = append(l.sounds, channel)
+		},
 	}
 	return w, l
+}
+
+func (l *levels) sounding() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.sounds...)
 }
 
 func (l *levels) playing() []bool {
@@ -345,5 +357,39 @@ func TestAPuffinAppThatDiesSilentlyIsReleasedByTheSweep(t *testing.T) {
 	w.read(lines("11-14 19:05:00.000  2044  2044 I PuffinApp: [e:63] FocusManager:acquireChannel:channelName=Content,interface=AudioPlayer"))
 	if got := l.playing(); !slices.Equal(got, []bool{true, false, true}) {
 		t.Errorf("heard music %v once the new PuffinApp took the channel, want [true false true]", got)
+	}
+}
+
+func TestListeningIsNotSoundButHerReplyIs(t *testing.T) {
+	w, l := focusWatcher()
+
+	w.read(lines(listenTake))
+	if got := l.sounding(); len(got) != 0 {
+		t.Fatalf("listening reported %q; the recognizer makes no sound", got)
+	}
+	w.read(lines(replyTake, listenGive, replyGive))
+	if got := l.sounding(); !slices.Equal(got, []string{"dialog", ""}) {
+		t.Errorf("a turn reported %q, want [dialog \"\"]", got)
+	}
+}
+
+func TestTheForegroundChannelIsTheOneNamed(t *testing.T) {
+	w, l := focusWatcher()
+
+	w.read(lines(musicTake, replyTake, alertTake, alertGive, replyGive, musicGive, callTake))
+	want := []string{"content", "dialog", "alert", "dialog", "content", "", "communications"}
+	if got := l.sounding(); !slices.Equal(got, want) {
+		t.Errorf("reported %q, want %q", got, want)
+	}
+}
+
+func TestAnEarconIsNotSound(t *testing.T) {
+	w, l := focusWatcher()
+
+	w.read(lines(
+		"11-15 16:56:34.136  1028  1561 I PuffinApp: [160] FocusManager:acquireChannel:channelName=Earcon,interface=UXEventArbitrator",
+		"11-15 16:56:35.774  1028 11283 I PuffinApp: [e:b] FocusManager:releaseChannel:channelName=Earcon"))
+	if got := l.sounding(); len(got) != 0 {
+		t.Errorf("an earcon reported %q", got)
 	}
 }

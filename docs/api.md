@@ -99,10 +99,10 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 | route | held from `lipc-wait-event` | -- | heavy |
 | jack | `/sys/class/switch/h2w/state` | -- | heavy |
 | microphone mute | the privacy driver's `state` | -- | heavy |
-| speaker playing | ALSA, then a `dumpsys` | 2.0 / 18.7 ms | live |
+| playing | held from the focus watcher, clips and Sendspin | -- | live |
 
 - The minute tick is `sensorTick`, 60 seconds. `PollLive` wakes every
-  `liveTick`, 500 ms, and reads the sound every `SoundEvery` tick and the rest
+  `liveTick`, 500 ms, and reads what plays every `SoundEvery` tick and the rest
   of `readLive` every `HeavyEvery` tick, 2.5 seconds. Two numbers let a cheap
   reading run oftener without dragging a fork along.
 - The uptime changes on every read. The signal costs 16 times `/proc/meminfo`
@@ -130,20 +130,20 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   subscribing between, reproduces it on the Dot.
 - `PollLive` raises a tick that is not positive to 1 second: `time.NewTicker`
   panics on it.
-- `dumpsys` talks to binder, which can wedge, so the read carries a deadline.
-  `exec.CommandContext` kills the child, but `Output` then waits for EOF, which
-  a grandchild can hold open. `cmd.WaitDelay` bounds that wait.
-- `btclient` gets the same, 1 second plus 500 ms, exported as
+- Every fork the polls make carries a deadline, because the service behind it
+  can wedge. `exec.CommandContext` kills the child, but `Output` then waits for
+  EOF, which a grandchild can hold open. `cmd.WaitDelay` bounds that wait.
+- `btclient` gets 1 second plus 500 ms, exported as
   `BluetoothReadBudget`. Its output is scanned before `Wait`, where
   `WaitDelay` does not reach, so the pipe is also closed at the deadline. A
   client whose grandchild held the pipe took 30 seconds without that.
 - The poll is serial, so a tick spends its forks in sequence. On Fire OS 5 the
-  heavy tick's 2 came to 2.4 seconds against 2.5. `main_test.go` holds the
-  speaker's budget against the sound tick, and the registration's and
-  Bluetooth's sum against the minute.
+  heavy tick's 2 came to 2.4 seconds against 2.5. On Fire OS 6 neither live
+  tick forks. `main_test.go` holds the registration's and Bluetooth's sum
+  against the minute.
 - The budget and the command are variables so a test can shrink the wait and
   substitute a command that never answers.
-- `PollLive` reads nothing while nobody is subscribed, because it forks.
+- `PollLive` reads nothing while nobody is subscribed: nobody would see it.
 - Subscribing wakes the polls, and only on a connection's first request when
   nobody else is subscribed. A peer that keeps becoming the idle case is bounded
   by `wakeGap`, 1 second between wake-caused reads.
@@ -244,73 +244,43 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
   goes out under 27. 15 is `ListEntitiesLightResponse`, and a text sensor
   listed there is drawn as a light with nothing reported.
 
-### Whether the speaker is playing
+### What is playing
 
-- 2 signals, both needed. ALSA says whether a PCM substream is open: `state:
-  RUNNING` in `/proc/asound/card*/pcm*p/sub*/status`, always `pcm23p` on
-  biscuit and `pcm6p` on donut.
-  `dumpsys media.audio_flinger` says whether an output thread has an active
-  track, true only while sound comes out.
-- ALSA alone reports a Dot quiet for 10 seconds as playing. The fork alone costs
-  18.7 ms per sample. So the cheap signal is tested first.
-
-| | jack empty | jack occupied |
-|---|---|---|
-| PCM device | `pcm23p` | `pcm23p` |
-| active track | 0.595 seconds | 0.582 seconds |
-| substream closes, after opening | 10.555 seconds | 10.565 seconds |
-
-- The route does not move the substream: the codec routes downstream of it.
-- The daemon's own player holds a track for the whole run, so idle reads `1
-  Tracks of which 0 are active`. The active count is read whenever the dump
-  offers it. The total would report every idle moment as playing.
-- **Bluetooth is not covered, and it fails quietly.** A2DP does not use the MTK
-  PCM device, so no substream runs and the cheap gate answers "not playing".
-  With a speaker paired and playing, no substream was `RUNNING` and `pcm23p`
-  held an `XRUN`.
-- Nothing unreadable is reported as silence. An empty glob, a failed `dumpsys`,
-  track lines that no longer parse, and a status file that will not open are
-  all `missing_state` -- unless another substream is already running.
-- The paths are globbed once and kept: the glob costs 5.6 ms against 2.0 ms for
-  reading all 19 files. An empty result, a vanished path, or `pcmRefresh` (a
-  minute) re-globs. The minute is needed because a set taken while ALSA is
-  still registering is non-empty and readable, and one missing `pcm23p` would
-  report silence for the rest of the boot.
-- Sound has to last `SoundOnDelay`, 1 second, before it is reported. This keeps
-  the 0.4-second press chime out.
-- It has to be gone `SoundOffDelay`, 1 second, before that is withdrawn. Two
-  of Alexa's playbacks in one answer arrive 56 ms apart.
-- A delay takes effect only at a sample, so it is a count of readings. At
-  500 ms the withdrawal takes 2 and the report takes 3. Neither may be 1, so
-  `SoundEvery` is 1 against `HeavyEvery`'s 5. `main_test.go` holds both delays
-  against the interval.
-- A failed read leaves the withdrawal clock alone: it records when sound was
-  last *seen*. Zeroing it withdraws on the next sample; moving it forward holds
-  the entity on across the failure.
-- `PollLive` is serial, so on a heavy tick the forks can push the next sample
-  out: up to 2.3 seconds between the volume, the microphone and the sound read.
-  `soundGap`, twice the interval, catches that.
-- 3 tests run `PollLive` on real time and wait for sound to be reported, on a
-  5 or 20 ms tick. In an ARM container on a loaded CPU, a 5 ms tick stalled
-  past its 10 ms `soundGap` about 20 times in 2 seconds, for up to 97 ms. At
-  half a CPU shared with 3 busy loops, the 3 tests failed 48, 41 and 47 times
-  in 50, and CI failed that way once. So each gives the sound read a clock that
-  moves exactly 1 tick per read. All 3 then passed 50 of 50.
-- With nothing subscribed the poll does not sample, for an unbounded time. So
-  the reading and its clocks are forgotten as soon as nobody is subscribed.
-  A carried reading reported the speaker playing after Home Assistant came back.
-- It forgets when the last subscriber leaves, not when the next arrives, because
-  a new subscriber is answered from the published state before any read.
-  Nothing wakes the poll on leave, so a reconnect within 1 tick still gets a
-  reading 500 ms old.
-- Each sound costs about 21 forks across its 10.5-second tail, about 400 ms of a
-  core. A chime too short to report costs the same.
-- It carries no `device_class`. That is the only way Home Assistant says "On"
-  and "Off": all 28 classes rename the states and none fits. `sound` says
-  "Detected", which on a Dot with 3 microphones reads as the mic hearing
-  something. It takes a static `mdi:speaker`.
-- Sound shorter than about 1.5 seconds can be missed, and about 3 seconds just
-  after a stalled tick.
+- `playing` is a text sensor naming the sound in the foreground: `alert`,
+  `communications`, `dialog`, `clip`, `content` or `sendspin`, in that order,
+  or empty. Alexa's channels keep her own names, lowercased.
+- Alexa's come from the focus watcher, docs/audio.md "Ducking while Alexa
+  holds focus". `dialog` counts only while `SpeechSynthesizer` holds it: the
+  recognizer takes the same channel to listen, and listening makes no sound.
+  Her reply takes it over, so the recognizer's late release does not end it.
+- `clip` is the daemon's own clip from Home Assistant, announcements included,
+  from its start to its end. `sendspin` is a Sendspin stream the chime holds
+  and has not finished playing. The chime finishes and closes it itself, not
+  through the client, so it is asked, not counted: a count kept in the client
+  stayed at 1 after the music ended.
+- Earcons are not counted. The ones seen took PuffinApp's `Earcon` channel,
+  which the watcher does not hold.
+- Alexa's channels, a clip and a stream's open wake the live poll, so the
+  state follows them at once. A stream's end, and a stream the client resumes
+  rather than opens, wake nothing, so the poll also reads it every
+  `SoundEvery` tick, and they show within 500 ms.
+- An open stream counts from its open, before its first chunk and through any
+  silence in it.
+- With no subscriber the reading is forgotten, so a returning Home Assistant
+  is not answered with a sound that has ended.
+- It is missing when nothing is wired to say what plays: a Dot whose mixer
+  did not open has no focus watcher, clips or Sendspin.
+- Sound from anything else is not seen: a phone playing to the Dot over
+  Bluetooth, multi-room music, an announcement from Alexa. Which channel
+  each takes is not measured; the Alexa SDK puts a phone's Bluetooth and
+  Spotify Connect on `Content`.
+- A lost focus line holds a channel until its 15-minute expiry, as the duck
+  does. docs/audio.md has the hold.
+- Fire OS 5 read the PCM's state, and AudioFlinger's active tracks to cut the
+  substream's 10.5-second tail. Fire OS 6 has no AudioFlinger. The PCM alone
+  could not tell an earcon from speech: the mixer writes about 2 seconds past
+  every sound, so 2 earcons from a mute toggle ran past a 2-second delay, and
+  a delay that long reported real sound late. The PCM cannot see Bluetooth.
 
 ### Whether the Dot is registered
 

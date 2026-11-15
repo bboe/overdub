@@ -67,46 +67,27 @@ func (s *Server) readTicked() []reading {
 	return out
 }
 
-const (
-	SoundOnDelay  = time.Second
-	SoundOffDelay = time.Second
-)
-
-func (s *Server) forgetSound() {
-	s.soundOn = false
-	s.soundSince, s.soundLastOn, s.soundSeen = time.Time{}, time.Time{}, time.Time{}
+func (s *Server) UsePlaying(now func() string) {
 	s.mu.Lock()
-	delete(s.published, s.keySound)
+	s.nowPlaying = now
 	s.mu.Unlock()
 }
 
-func (s *Server) readSound() reading {
-	playing, ok := s.sound()
-	now := s.clock()
-	gapped := s.soundGap > 0 && !s.soundSeen.IsZero() && now.Sub(s.soundSeen) > s.soundGap
-	s.soundSeen = now
-	if !ok {
-		s.soundSince = time.Time{}
-		return reading{key: s.keySound, kind: kindBinary}
+func (s *Server) NotePlaying() {
+	select {
+	case s.liveWake <- struct{}{}:
+	default:
 	}
-	if gapped {
-		s.soundSince, s.soundLastOn = time.Time{}, now
+}
+
+func (s *Server) readPlaying() reading {
+	s.mu.Lock()
+	now := s.nowPlaying
+	s.mu.Unlock()
+	if now == nil {
+		return reading{key: s.keyPlaying, kind: kindTextSensor}
 	}
-	if playing {
-		s.soundLastOn = now
-		if s.soundSince.IsZero() {
-			s.soundSince = now
-		}
-		if now.Sub(s.soundSince) >= s.onDelay {
-			s.soundOn = true
-		}
-	} else {
-		s.soundSince = time.Time{}
-		if s.soundOn && now.Sub(s.soundLastOn) >= s.offDelay {
-			s.soundOn = false
-		}
-	}
-	return reading{key: s.keySound, value: boolValue(s.soundOn), ok: true, kind: kindBinary}
+	return reading{key: s.keyPlaying, text: now(), ok: true, kind: kindTextSensor}
 }
 
 func (s *Server) readLive() []reading {
@@ -375,9 +356,6 @@ func (s *Server) PollLive(every time.Duration) {
 		log.Printf("esphome api: live tick of %v raised to %v", every, minLiveReadGap)
 		every = minLiveReadGap
 	}
-	s.mu.Lock()
-	s.soundGap = 2 * every * SoundEvery
-	s.mu.Unlock()
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	var lastWake time.Time
@@ -388,7 +366,9 @@ func (s *Server) PollLive(every time.Duration) {
 		listening := s.anyStateSubscriber()
 		if listening != watched {
 			if !listening {
-				s.forgetSound()
+				s.mu.Lock()
+				delete(s.published, s.keyPlaying)
+				s.mu.Unlock()
 				s.lastRoute = ""
 			}
 			watched = listening
@@ -400,7 +380,7 @@ func (s *Server) PollLive(every time.Duration) {
 		if listening && (!woke || serve) {
 			var readings []reading
 			if serve || ticks%SoundEvery == 0 {
-				readings = append(readings, s.readSound())
+				readings = append(readings, s.readPlaying())
 			}
 			if serve || ticks%HeavyEvery == 0 {
 				readings = append(readings, s.readLive()...)

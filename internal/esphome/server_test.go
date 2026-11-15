@@ -344,10 +344,7 @@ func TestOnlyThePollersReadTheDeviceAndNeverUnderTheLock(t *testing.T) {
 		occupied, _ := watch(1)()
 		return occupied != 0, true
 	}
-	s.sound = func() (bool, bool) {
-		playing, _ := watch(0)()
-		return playing != 0, true
-	}
+	s.nowPlaying = func() string { return "" }
 	s.micMute = func() (bool, bool) {
 		muted, _ := watch(0)()
 		return muted != 0, true
@@ -563,7 +560,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	}
 	s.btRoute = func() (bool, bool) { return false, true }
 	s.jack = func() (bool, bool) { return true, true }
-	s.sound = func() (bool, bool) { return false, true }
+	s.nowPlaying = func() string { return "" }
 	s.micMute = func() (bool, bool) { return false, true }
 	s.alexa = func() (bool, bool) { return true, true }
 	s.btDevice = func() (string, bool) { return "JBL Go 3", true }
@@ -571,7 +568,7 @@ func stubSensors(s *Server) map[uint32]float32 {
 	return map[uint32]float32{
 		s.keyUptime: 1234, s.keyWifi: -48, s.keyVolume: 40,
 		s.keyCPU: 41.3, s.keyMemory: 126.5, s.keyJackOn: 1,
-		s.keySound: 0, s.keyMicMute: 0, s.keySpeaker: 0.4,
+		s.keyPlaying: 0, s.keyMicMute: 0, s.keySpeaker: 0.4,
 		s.button("action_button").keyMode: 0, s.button("mute_button").keyMode: 0,
 		s.keyAlexa: 1, s.keyOutput: 0, s.keyBTDevice: 0, s.keyKeyList: 0,
 	}
@@ -601,7 +598,7 @@ func pollAll(s *Server) []reading {
 	defer quiet(s, c)
 	changed := s.publish("sensors", s.readTicked())
 	changed = append(changed, s.publish("live", s.readLive())...)
-	return append(changed, s.publish("live", []reading{s.readSound()})...)
+	return append(changed, s.publish("live", []reading{s.readPlaying()})...)
 }
 
 func TestSubscribingGetsEverySensor(t *testing.T) {
@@ -654,7 +651,7 @@ func TestSubscribingGetsEverySensor(t *testing.T) {
 
 func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 	for _, failing := range []string{"uptime", "wifi_signal", "volume", "bluetooth_device", "cpu_temperature", "memory_available",
-		"audio_jack", "speaker_playing"} {
+		"audio_jack", "playing"} {
 		t.Run(failing, func(t *testing.T) {
 			var out lockedBuffer
 			defer restoreLog(t, &out)()
@@ -683,9 +680,9 @@ func TestAReadingThatFailedIsSentAsMissing(t *testing.T) {
 				s.jack = func() (bool, bool) { return false, false }
 				failedKey = s.keyJackOn
 				alsoFailed = s.keyOutput
-			case "speaker_playing":
-				s.sound = func() (bool, bool) { return false, false }
-				failedKey = s.keySound
+			case "playing":
+				s.nowPlaying = nil
+				failedKey = s.keyPlaying
 			case "cpu_temperature":
 				fail(&s.cpu)
 				failedKey = s.keyCPU
@@ -1527,11 +1524,11 @@ func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 
 	var mu sync.Mutex
 	sound, heavy := 0, 0
-	s.sound = func() (bool, bool) {
+	s.nowPlaying = func() string {
 		mu.Lock()
 		sound++
 		mu.Unlock()
-		return false, true
+		return ""
 	}
 	s.volumes = speakerReads(func() (float32, bool) {
 		mu.Lock()
@@ -1588,11 +1585,11 @@ func TestSoundIsReadOftenerThanTheExpensiveReadings(t *testing.T) {
 
 func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 	for _, tt := range []struct {
-		name  string
-		sound func() (bool, bool)
+		name    string
+		playing func() string
 	}{
-		{"every reading taken", func() (bool, bool) { return true, true }},
-		{"the speaker unreadable", func() (bool, bool) { return false, false }},
+		{"every reading taken", func() string { return "dialog" }},
+		{"nothing says what is playing", nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var out lockedBuffer
@@ -1606,7 +1603,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				msgType int
 			}{
 				s.keyJackOn:                       {"audio_jack", msgBinarySensorState},
-				s.keySound:                        {"speaker_playing", msgBinarySensorState},
+				s.keyPlaying:                      {"playing", msgTextSensorState},
 				s.keyMicMute:                      {"microphone_muted", msgSwitchState},
 				s.keySpeaker:                      {"speaker", msgMediaPlayerState},
 				s.button("action_button").keyMode: {"action_button_mode", msgSelectState},
@@ -1617,7 +1614,7 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				s.keyKeyList:                      {"adb_keys", msgTextSensorState},
 			}
 
-			s.sound = tt.sound
+			s.nowPlaying = tt.playing
 			pollAll(s)
 			c, err := dial(t, s, psk)
 			if err != nil {
@@ -1654,42 +1651,6 @@ func TestEachStateArrivesAsTheMessageItsEntityWasListedUnder(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestPollLiveArmsTheGapGuardAndStillReports(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	psk := testPSK(t)
-	s := testServer(t, psk)
-	stubSensors(s)
-	s.sound = func() (bool, bool) { return true, true }
-
-	const tick = 20 * time.Millisecond
-	s.onDelay, s.offDelay = 40*time.Millisecond, 40*time.Millisecond
-	steadySoundClock(s, tick)
-
-	c, err := dial(t, s, psk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.send(msgSubscribeStates, nil); err != nil {
-		t.Fatal(err)
-	}
-	go s.PollLive(tick)
-
-	waitFor(t, "continuous sound to be reported; a soundGap under the sample interval makes "+
-		"every reading look late, and the on clock never accumulates", func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.published[s.keySound].value == 1
-	})
-	s.mu.Lock()
-	gap := s.soundGap
-	s.mu.Unlock()
-	if want := tick * SoundEvery * 2; gap != want {
-		t.Errorf("PollLive left soundGap at %v, want %v (twice the sample interval)", gap, want)
 	}
 }
 
@@ -2086,87 +2047,6 @@ func TestAnUnreadableJackIsMissingRatherThanUnplugged(t *testing.T) {
 	t.Error("the live poll carries no jack reading at all")
 }
 
-func TestAReturningSubscriberIsNotToldTheSpeakerWasPlaying(t *testing.T) {
-	var out lockedBuffer
-	defer restoreLog(t, &out)()
-
-	psk := testPSK(t)
-	s := testServer(t, psk)
-	stubSensors(s)
-	shortSoundDelays(s)
-	steadySoundClock(s, 5*time.Millisecond)
-	s.sound = func() (bool, bool) { return true, true }
-
-	go s.PollLive(5 * time.Millisecond)
-
-	firstSound := func(c *client, want float32, what string) {
-		t.Helper()
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			c.conn.SetReadDeadline(time.Now().Add(time.Second))
-			msgType, payload, err := c.recv()
-			if err != nil {
-				t.Fatalf("%s: %v", what, err)
-			}
-			if msgType != msgBinarySensorState {
-				continue
-			}
-			key, v, _ := sensorReading(t, msgType, payload)
-			if key != s.keySound {
-				continue
-			}
-			if v != want {
-				t.Fatalf("%s: the first speaker reading was %v, want %v", what, v, want)
-			}
-			return
-		}
-		t.Fatalf("%s: no speaker reading arrived at all", what)
-	}
-
-	gone, err := dial(t, s, psk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := gone.send(msgSubscribeStates, nil); err != nil {
-		t.Fatal(err)
-	}
-	firstSound(gone, 0, "the first subscriber")
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("the speaker was never reported as playing, so nothing was left to carry over")
-		}
-		gone.conn.SetReadDeadline(time.Now().Add(time.Second))
-		msgType, payload, err := gone.recv()
-		if err != nil {
-			t.Fatalf("waiting for the speaker to turn on: %v", err)
-		}
-		if msgType != msgBinarySensorState {
-			continue
-		}
-		if key, v, _ := sensorReading(t, msgType, payload); key == s.keySound && v == 1 {
-			break
-		}
-	}
-
-	gone.conn.Close()
-	waitFor(t, "the poll to forget the speaker once nobody is subscribed", func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		_, held := s.published[s.keySound]
-		return !held
-	})
-
-	back, err := dial(t, s, psk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := back.send(msgSubscribeStates, nil); err != nil {
-		t.Fatal(err)
-	}
-	firstSound(back, 0, "the subscriber that came back")
-}
-
 func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
 	for _, tt := range []struct {
@@ -2178,7 +2058,6 @@ func TestTheServerReadsTheDeviceEachEntityNames(t *testing.T) {
 		{"volumes", s.volumes, device.MusicVolumes},
 		{"jack", s.jack, device.JackOccupied},
 		{"btRoute", s.btRoute, device.BluetoothRouted},
-		{"sound", s.sound, device.SpeakerPlaying},
 		{"micMute", s.micMute, device.MicMuted},
 		{"cpu", s.cpu, device.CPUTemperature},
 		{"memory", s.memory, device.AvailableMemory},

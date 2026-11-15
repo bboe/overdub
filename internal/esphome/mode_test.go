@@ -230,7 +230,7 @@ func TestASelectCommandForAnotherEntityIsIgnored(t *testing.T) {
 	button := wireFakeButton(s)
 	c := &conn{out: make(chan frame, 8), sock: fakeAddr{}}
 
-	if err := s.handle(c, msgSelectCommand, selectCommand(s.keySound, "pass through")); err != nil {
+	if err := s.handle(c, msgSelectCommand, selectCommand(s.keyPlaying, "pass through")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	select {

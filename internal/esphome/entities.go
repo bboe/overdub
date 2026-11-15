@@ -172,7 +172,6 @@ func (s *Server) listEntities(conn *conn) error {
 		icon        string
 	}{
 		{"audio_jack", s.keyJackOn, "Audio jack", "plug", ""},
-		{"speaker_playing", s.keySound, "Speaker playing", "", speakerIcon},
 		{"alexa_registered", s.keyAlexa, "Alexa registered", "", alexaIcon},
 	} {
 		var entity pb
@@ -256,6 +255,17 @@ func (s *Server) listEntities(conn *conn) error {
 	route.boolean(6, false) // disabled_by_default
 	route.u32(7, entityCategoryDiagnostic)
 	if err := s.send(conn, msgListTextSensor, route.b); err != nil {
+		return err
+	}
+
+	var playing pb
+	playing.str(1, "playing")
+	playing.fixed32(2, s.keyPlaying)
+	playing.str(3, "Playing")
+	playing.str(5, speakerIcon)
+	playing.boolean(6, false) // disabled_by_default
+	playing.u32(7, entityCategoryDiagnostic)
+	if err := s.send(conn, msgListTextSensor, playing.b); err != nil {
 		return err
 	}
 

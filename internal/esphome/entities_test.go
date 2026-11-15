@@ -135,41 +135,6 @@ func TestEverySensorIsListedTheWayHomeAssistantReadsIt(t *testing.T) {
 	}
 }
 
-func TestTheSpeakerIsListedAsABinarySensor(t *testing.T) {
-	s := NewServer("kitchen", "Echo Dot", "", "00:00:5E:00:53:2A", nil)
-
-	found := 0
-	for _, entity := range listed(t, s) {
-		if entity[0].num != uint64(msgListBinarySensor) || string(entity[1].data) != "speaker_playing" {
-			continue
-		}
-		found++
-		if uint32(entity[2].num) != s.keySound {
-			t.Errorf("speaker_playing has key %d, want %d", entity[2].num, s.keySound)
-		}
-		if entity[2].wire != wireFixed32 {
-			t.Errorf("speaker_playing sent its key as wire type %d, want fixed32 (%d)",
-				entity[2].wire, wireFixed32)
-		}
-		if got := string(entity[3].data); got != "Speaker playing" {
-			t.Errorf("speaker_playing is named %q", got)
-		}
-		if got := string(entity[5].data); got != "" {
-			t.Errorf("speaker_playing has device_class %q, which renames its states away "+
-				"from On and Off", got)
-		}
-		if entity[9].num != entityCategoryDiagnostic {
-			t.Error("speaker_playing is not diagnostic; it would sit among the device's controls")
-		}
-		if got := string(entity[8].data); got != "mdi:speaker" {
-			t.Errorf("speaker_playing has icon %q, want mdi:speaker", got)
-		}
-	}
-	if found != 1 {
-		t.Errorf("%d speaker_playing entities were listed, want 1", found)
-	}
-}
-
 func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 	for _, tt := range []struct {
 		what string
@@ -219,6 +184,7 @@ func TestTheTextSensorsAreListedTheWayHomeAssistantReadsThem(t *testing.T) {
 		icon string
 	}{
 		"output_device":    {s.keyOutput, "Output device", speakerIcon},
+		"playing":          {s.keyPlaying, "Playing", speakerIcon},
 		"bluetooth_device": {s.keyBTDevice, "Bluetooth device", bluetoothIcon},
 		"adb_keys":         {s.keyKeyList, "adb keys", adbKeysIcon},
 	}
