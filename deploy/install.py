@@ -3,7 +3,9 @@
 It builds with build.sh when it runs from a source tree, and installs
 build/overdub as it stands when it runs from a release. Set ANDROID_SERIAL to
 pick one of several attached or connected devices. It needs Python 3.9 or later
-and adb. Every step is read back; docs/deployment.md says why.
+and adb. Every step is read back; docs/deployment.md says why. A Dot on Fire OS
+5.5.5.4 is moved to Fire OS 6 first, over USB, by firebreak through uv, and
+keeps its setup.
 """
 
 from __future__ import annotations
@@ -23,7 +25,10 @@ import sys
 import tempfile
 import textwrap
 import time
-from typing import Callable, NoReturn, TextIO
+from typing import TYPE_CHECKING, Callable, NoReturn, TextIO
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 ADB_COPY = "/data/misc/adb/adb_keys"
 BIN_DIR = "/data/local/bin"
@@ -31,19 +36,33 @@ ADB_KEYS = BIN_DIR + "/adb_keys"
 APPLIED = BIN_DIR + "/.overdub-applied"
 BINARY = BIN_DIR + "/overdub"
 BOOT = "/data/local/bin/overdub.sh"
+BOOT_ID = re.compile(r"^[0-9a-f-]{36}$", re.MULTILINE)
 CLEANUP_WAIT = 30
 DNS_LABEL = 63
 FAILED = "/data/local/bin/.overdub-failed"
+FIREBREAK = "firebreak>=1.4.1,<2"
+FIRE_OS_5_LEFTOVERS = (
+    "/cache/magisk.log",
+    "/cache/magisk.log.bak",
+    "/data/adb/magisk",
+    "/data/adb/magisk.db",
+    "/data/adb/magisk.img",
+    "/data/app/com.topjohnwu.magisk-*",
+    "/data/data/com.topjohnwu.magisk",
+    "/data/local/map",
+)
 INIT = "/system/etc/init/overdub.rc"
 KEY = "/data/local/bin/.overdub-noise-key"
 KEY_SHAPE = re.compile(r"[A-Za-z0-9+/]{43}=")
 LABEL = 14
 INDENT = " " * (LABEL + 4)
 MD5_SHAPE = re.compile(r"^[0-9a-f]{32}", re.MULTILINE)
+MOVE_WAIT = 300
 OD_LINE = re.compile(r"(?:\s*[0-9a-f]{2})+\s*")
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SENDKEY = "/data/local/bin/.overdub-sendspin-key"
 SENDKEY_BYTES = 64
+SENDPAIRS = "/data/local/bin/.overdub-sendspin-pairs"
 STAGE = "/data/local/tmp/overdub-install"
 STATE = argparse.Namespace(
     binary_changed=False,
@@ -51,6 +70,7 @@ STATE = argparse.Namespace(
     changed=False,
     init_changed=False,
     key_landed=False,
+    moved=False,
     pending=False,
     staged=False,
     temp=[],
@@ -59,6 +79,7 @@ STATE = argparse.Namespace(
 )
 STOP_SIGNALS = ("SIGBREAK", "SIGHUP", "SIGINT", "SIGTERM")
 TRIAL = "/data/local/bin/.overdub-trial"
+WINDOWS_CTRL_C = 0xC000013A
 X25519_A24 = 121665
 X25519_BASE = 9
 X25519_PRIME = 2**255 - 19
@@ -81,6 +102,18 @@ def adb_ok(*args: str) -> str:
     if code != 0:
         fail("adb", f"adb {' '.join(args)} failed:", *out.strip().split("\n"))
     return out
+
+
+@contextlib.contextmanager
+def answering(label: str) -> Generator[None, None, None]:
+    previous = STATE.timeout
+    STATE.timeout = CLEANUP_WAIT
+    try:
+        yield
+    except subprocess.TimeoutExpired:
+        fail(label, f"The Dot did not answer adb within {CLEANUP_WAIT} seconds.")
+    finally:
+        STATE.timeout = previous
 
 
 def applied(pid: str) -> str:
@@ -108,12 +141,32 @@ def attempt(*, action: Callable[[], object], fix: str, label: str) -> None:
         )
 
 
+def boot_id() -> str:
+    found = BOOT_ID.search(shell("cat /proc/sys/kernel/random/boot_id")[1])
+    return found.group() if found else ""
+
+
 def boot_script_for(name: str) -> str:
     text = (ROOT / "deploy/overdub.sh").read_text().replace("\r\n", "\n")
     text, count = re.subn(r"^NAME=$", f"NAME={name}", text, flags=re.MULTILINE)
     if count != 1:
         fail("boot script", "Could not set NAME in deploy/overdub.sh.")
     return text
+
+
+def booted() -> bool:
+    return shell("getprop sys.boot_completed")[1].strip() == "1"
+
+
+def bounded(check: Callable[[], bool]) -> bool:
+    previous = STATE.timeout
+    STATE.timeout = CLEANUP_WAIT
+    try:
+        return check()
+    except subprocess.TimeoutExpired:
+        return False
+    finally:
+        STATE.timeout = previous
 
 
 def build() -> None:
@@ -168,6 +221,32 @@ def build() -> None:
     ok("build", f"build/overdub, md5 {md5(binary)}")
 
 
+def can_move(serial: str) -> str:
+    if ":" in serial:
+        fail(
+            "Fire OS",
+            f"{serial} runs Fire OS 5, and this build runs on Fire OS 6 only."
+            " firebreak moves a Dot over USB only: connect it by USB, and run this"
+            " again with ANDROID_SERIAL set to its USB serial.",
+        )
+    uvx = shutil.which("uvx")
+    if not uvx:
+        fail(
+            "Fire OS",
+            "This Dot runs Fire OS 5, and this build runs on Fire OS 6 only."
+            " firebreak moves it, and runs through uv. Install uv"
+            " (https://github.com/bboe/firebreak#run-it) and run this again.",
+        )
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        fail(
+            "Fire OS",
+            "This Dot runs Fire OS 5, and firebreak asks before it moves it to Fire"
+            " OS 6, which needs a terminal. Run this again from a terminal, with"
+            " nothing piped in or out.",
+        )
+    return uvx
+
+
 def check_key_mode() -> str | None:
     if first_field(start="-", text=shell(f"ls -l {KEY}")[1]) != "-rw-------":
         STATE.changed = True
@@ -220,6 +299,10 @@ def discard_new_key() -> None:
 def fail(label: str, *lines: str) -> NoReturn:
     show(*lines, label=label, sign=mark("fail"), stream=sys.stderr)
     sys.exit(1)
+
+
+def fire_os() -> str:
+    return shell("getprop ro.build.version.name")[1].strip()
 
 
 def first_field(*, start: str, text: str) -> str:
@@ -443,8 +526,12 @@ def main() -> None:
     serial = serial_number()
     print(f"Installing overdub as {name} on {serial}.")
     print()
+    version = fire_os()
+    uvx = can_move(serial) if version.startswith("Fire OS 5") else ""
     build()
     boot_script = temp_file(boot_script_for(name))
+    if uvx:
+        move_to_fire_os_6(serial=serial, uvx=uvx, version=version)
     if not re.search(r"uid=0\b", shell("id")[1]):
         fail(
             "root",
@@ -452,12 +539,16 @@ def main() -> None:
             " firebreak's Fire OS 6 unlock leaves.",
         )
     ok("root", "adb runs as root")
+    remove_fire_os_5_leftovers()
     install_api_key()
     remove_old_adb_key()
     install_binary(boot_script)
     install_boot_script(boot_script)
     install_init()
-    restart(name)
+    if STATE.moved:
+        reboot_to_start(name)
+    else:
+        restart(name)
     print_pairing_token()
     print()
     if STATE.changed:
@@ -484,6 +575,58 @@ def md5(path: str | pathlib.Path) -> str:
     return hashlib.md5(
         pathlib.Path(path).read_bytes(), usedforsecurity=False
     ).hexdigest()
+
+
+def move_to_fire_os_6(*, serial: str, uvx: str, version: str) -> None:
+    ok(
+        "Fire OS",
+        f"{version}: overdub needs Fire OS 6. Installing and running firebreak"
+        " (https://github.com/bboe/firebreak), a separate tool, to move the Dot"
+        " there.",
+    )
+    note(
+        "firebreak keeps the Dot's Wi-Fi, its Alexa setup and overdub's keys, asks"
+        " before it writes, and takes about 8 minutes. Everything between the two"
+        " firebreak lines below is firebreak's."
+    )
+    print()
+    print(f"---- firebreak ({FIREBREAK}) starts ----", flush=True)
+    status = run_foreground(
+        [
+            uvx,
+            "--refresh-package",
+            "firebreak",
+            "--from",
+            FIREBREAK,
+            "firebreak",
+            "unlock",
+            "fireos6",
+        ],
+        env={**os.environ, "ANDROID_SERIAL": serial},
+    )
+    print(f"---- firebreak ends, exit status {status}; back to overdub ----")
+    print()
+    if status in {128 + signal.SIGINT, WINDOWS_CTRL_C}:
+        sys.exit(128 + signal.SIGINT)
+    if status != 0:
+        fail(
+            "Fire OS",
+            f"firebreak exited {status}, so the Dot is wherever it stopped. overdub"
+            " changed nothing. Once firebreak's message is dealt with, run this"
+            " again.",
+        )
+    pending(detail="waiting for Fire OS 6 to start", label="Fire OS")
+    with answering("Fire OS"):
+        if not wait_for(lambda: bounded(started_fire_os_6), seconds=MOVE_WAIT):
+            fail(
+                "Fire OS",
+                f"firebreak finished, and {MOVE_WAIT} seconds later the Dot had not"
+                f" started Fire OS 6. It reports {fire_os()!r}.",
+            )
+        version = fire_os()
+    STATE.changed = True
+    STATE.moved = True
+    ok("Fire OS", f"moved to {version}")
 
 
 def note(text: str) -> None:
@@ -539,6 +682,13 @@ def print_pairing_token() -> None:
     if len(key) != SENDKEY_BYTES:
         warn("pairing", f"The Sendspin key is {len(key)} bytes, want {SENDKEY_BYTES}.")
         return
+    if STATE.moved and probe(f"-s {SENDPAIRS}") == "yes":
+        ok(
+            "pairing",
+            "kept the Sendspin key and its pairing, so Music Assistant needs"
+            " nothing. Run this again to see the pairing token.",
+        )
+        return
     ok("pairing", "read the Sendspin key")
     print()
     print("   To pair Music Assistant with this device, paste this token into")
@@ -553,9 +703,67 @@ def probe(expression: str) -> str | None:
     return yes_no(shell(f"[ {expression} ] && echo yes || echo no")[1])
 
 
+def reboot_and_wait(name: str) -> None:
+    before = boot_id()
+    if not before:
+        fail(
+            "daemon",
+            "Could not read the boot id, so a reboot could not be told from the boot"
+            f" before it. Nothing was rebooted. init reads {INIT} only at boot, so"
+            " reboot to start the daemon.",
+        )
+    pending(detail="rebooting, so init reads overdub.rc", label="daemon")
+    bounded(lambda: shell("reboot")[0] == 0)
+    if not wait_for(
+        lambda: bounded(lambda: boot_id() not in {"", before} and booted()),
+        seconds=MOVE_WAIT,
+    ):
+        fail(
+            "daemon",
+            f"The Dot did not start again within {MOVE_WAIT} seconds of the reboot"
+            " that starts the daemon.",
+        )
+    wait_for(lambda: bounded(lambda: bool(overdub_pid())), seconds=60)
+    pid = overdub_pid()
+    if not pid:
+        warn(
+            "daemon",
+            "Did NOT start after the reboot. The reason is in"
+            " /data/local/tmp/overdub.log.",
+        )
+        return
+    shell_ok(f"umask 077; echo '{applied(pid)}' > {APPLIED}")
+    report_name(
+        done=f"started as -name {name} after a reboot, pid {pid}", name=name, pid=pid
+    )
+
+
+def reboot_to_start(name: str) -> None:
+    with answering("daemon"):
+        reboot_and_wait(name)
+
+
 def remote_md5(path: str) -> str:
     found = MD5_SHAPE.search(shell(f"md5sum {path}")[1])
     return found.group() if found else ""
+
+
+def remove_fire_os_5_leftovers() -> None:
+    listing = f"ls -d {' '.join(FIRE_OS_5_LEFTOVERS)} 2>/dev/null"
+    found = [line for line in shell(listing)[1].split("\n") if line.startswith("/")]
+    if not found:
+        return
+    shell(f"rm -rf {' '.join(found)}")
+    left = [line for line in shell(listing)[1].split("\n") if line.startswith("/")]
+    if left:
+        warn(
+            "Fire OS 5",
+            "Could not remove what Fire OS 5 left:",
+            *(f"  {path}" for path in left),
+        )
+        return
+    STATE.changed = True
+    ok("Fire OS 5", "removed what Fire OS 5 left:", *(f"  {path}" for path in found))
 
 
 def remove_old_adb_key() -> None:
@@ -679,6 +887,20 @@ def restart(name: str) -> None:
     report_name(done=done, name=name, pid=new)
 
 
+def run_foreground(command: list[str], *, env: dict[str, str]) -> int:
+    handlers = {}
+    for name in STOP_SIGNALS:
+        if hasattr(signal, name):
+            number = getattr(signal, name)
+            handlers[number] = signal.signal(number, lambda *_: None)
+    try:
+        status = subprocess.run(command, check=False, env=env).returncode
+    finally:
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+    return 128 - status if status < 0 else status
+
+
 def running_name(pid: str) -> str | None:
     code, running = shell(f"cat /proc/{pid}/cmdline")
     words = running.split("\0") if code == 0 else []
@@ -759,6 +981,10 @@ def stage(*, directory: str, flag: str, label: str) -> None:
             f"The staging directory is {mode or 'missing'}, want drwx------. The key"
             " was not pushed. Nothing was changed.",
         )
+
+
+def started_fire_os_6() -> bool:
+    return fire_os().startswith("Fire OS 6") and booted()
 
 
 def stop_interrupts() -> None:
