@@ -221,6 +221,49 @@ that runs as root, and no `su`.
   rename awaiting a reboot, ends `Nothing changed; see the warning above.`
   instead, so the last line does not read as success.
 
+## Moving from Fire OS 5
+
+`install.py` on a Dot that reports Fire OS 5 moves it to Fire OS 6 before it
+installs anything. firebreak's `unlock fireos6` does the move, in the
+foreground with the installer's `ANDROID_SERIAL`, and asks its own question
+before it writes.
+
+- uv runs firebreak `>=1.4.1,<2`: what the move keeps was measured on 1.4.0,
+  and 1.4.1 changed only progress labels. A later major release is not run
+  unseen.
+- uv answers a version range from its cached index, so with 1.4.0 cached it
+  reported `No solution found` for `>=1.4.1` while PyPI had it. The installer
+  passes `--refresh-package firebreak`.
+
+- firebreak 1.4.0 and later move a Dot on 5.5.5.4 through Amazon's bridge
+  build 4315 and keep `/data`. In 2 moves on 2026-11-16, the API key,
+  the Sendspin key and pairings, and `persist.overdub.sendspin` all survived,
+  so Home Assistant and Music Assistant only reconnected.
+- firebreak reaches a Dot over USB only, so the installer refuses a network
+  serial on Fire OS 5 rather than run it there.
+- The move rewrites `/system`, and the Fire OS 5 daemon started from Magisk's
+  `service.d`, so nothing starts overdub after it. The installer then installs
+  as on any Fire OS 6 Dot, and reboots it itself, because init reads
+  `overdub.rc` only at boot. It waits for a new `boot_id` and
+  `sys.boot_completed`, then for the daemon.
+- The reboot is `adb shell reboot`. `adb reboot` to a 3rd-generation Dot over
+  network adb dropped the connection and left the Echo running, 23 hours up.
+- A move keeps the Sendspin key and its pairings, so after one the installer
+  does not print the pairing token when a pairing is already there. The next
+  install prints it. A Dot that was never paired gets the token as usual.
+- The refusals that a move can meet, a network serial, no uv and no terminal,
+  are checked before the build, so a refused run costs no build.
+- Fire OS 5 leaves Magisk behind in `/data`: `/data/adb/magisk`, `magisk.db`,
+  a 64 MB `magisk.img`, the Magisk app's `/data/app` and `/data/data`
+  directories, and `/cache/magisk.log`. `/data/local/map` held `mapdump.jar`,
+  which every Fire OS 5 install put there for the Alexa command path. Nothing on Fire OS 6 runs any of it: biscuit and donut, rooted
+  on Fire OS 6, have an empty `/data/adb`. Every install removes these paths
+  and lists them, so a Dot moved by hand with firebreak is cleaned at its next
+  install too.
+- Any other Fire OS 5, and an Echo (2nd Generation) on Fire OS 5, is refused
+  by firebreak with nothing written. `--factory-reset` erases one instead, and
+  the installer does not pass it.
+
 ## Uninstall
 
 `uninstall.py` works in this order:
@@ -316,9 +359,9 @@ that runs as root, and no `su`.
 - v0.3.0 and earlier were Fire OS 5 builds whose `unpack` demanded
   `deploy/mapdump/mapdump.jar` in the tarball, so the update entity on such a
   Dot refuses a Fire OS 6 release before writing anything. That is the
-  change-over, not a regression: no Fire OS 6 build runs on Fire OS 5, and a
-  Dot moves to Fire OS 6 through firebreak, which erases `/data`, and then
-  `install.py`. No placeholder jar is shipped.
+  change-over, not a regression: no Fire OS 6 build runs on Fire OS 5, and
+  `install.py` moves the Dot to Fire OS 6 through firebreak. No placeholder
+  jar is shipped.
 - `install.py` builds when `build.sh` is beside it, and installs `build/overdub`
   as it stands when it is not. The test is whether the file exists, not
   whether it can run; docs/pitfalls.md says why.

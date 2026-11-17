@@ -546,7 +546,8 @@ computer gets back in and any other gets `unauthorized`.
 - A Dot on v0.3.0 or earlier cannot install a Fire OS 6 release this way:
   those builds expect `mapdump.jar` in the tarball and refuse one without it.
   They are Fire OS 5 builds, and a Fire OS 6 release would not run on them
-  anyway. Move the Dot with firebreak and run `install.py`.
+  anyway. Run `install.py` with the Dot on USB: it moves the Dot to Fire OS 6
+  with firebreak, keeps its setup and keys, and then installs.
 - An update installs only a release signed with the overdub release key. A
   release that changes the boot script cannot install this way: the entity's
   release notes then say to run `install.py` from that release.
