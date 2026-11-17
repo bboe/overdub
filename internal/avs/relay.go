@@ -36,6 +36,10 @@ type Relay struct {
 	tr *http2.Transport
 
 	reqN atomic.Int64
+
+	watching atomic.Bool
+	onSpeech func(string)
+	said     chan string
 }
 
 func New(addr, target string, cert tls.Certificate, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *Relay {
@@ -44,6 +48,7 @@ func New(addr, target string, cert tls.Certificate, dial func(ctx context.Contex
 	}
 	return &Relay{
 		addr:   addr,
+		said:   make(chan string, saidQueue),
 		target: target,
 		cert:   cert,
 		log:    untrustedlog.Log{Subject: "avs"},
@@ -65,6 +70,22 @@ func New(addr, target string, cert tls.Certificate, dial func(ctx context.Contex
 		},
 	}
 }
+
+func (r *Relay) OnSpeech(heard func(text string)) {
+	r.onSpeech = heard
+	go r.tell()
+}
+
+func (r *Relay) tell() {
+	for text := range r.said {
+		if r.watching.Load() {
+			log.Printf("avs: alexa replied, %d bytes of text", len(text))
+			r.onSpeech(text)
+		}
+	}
+}
+
+func (r *Relay) Watch(on bool) { r.watching.Store(on) }
 
 func (r *Relay) Listen() (net.Listener, error) {
 	return tls.Listen("tcp", r.addr, &tls.Config{
@@ -140,8 +161,42 @@ func (r *Relay) forward(w http.ResponseWriter, req *http.Request) {
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	if err := copyFlush(w, resp.Body); err != nil {
+	var src io.Reader = resp.Body
+	if boundary := boundaryOf(resp.Header.Get("Content-Type")); boundary != "" && r.onSpeech != nil {
+		src = &watchedBody{body: resp.Body, relay: r, w: newWatcher(boundary, r.part)}
+	}
+	if err := copyFlush(w, src); err != nil {
 		r.log.Printf("req %d: relaying the response: %s", id, untrustedlog.Cut(err.Error()))
+	}
+}
+
+type watchedBody struct {
+	body  io.Reader
+	relay *Relay
+	w     *watcher
+}
+
+func (b *watchedBody) Read(p []byte) (int, error) {
+	n, err := b.body.Read(p)
+	if b.relay.watching.Load() {
+		b.w.Write(p[:n])
+	} else {
+		b.w.state, b.w.buf = seeking, nil
+	}
+	return n, err
+}
+
+func (r *Relay) part(body []byte) {
+	text, ok := spoken(body)
+	if !ok || !r.watching.Load() {
+		return
+	}
+	for _, piece := range pieces(text) {
+		select {
+		case r.said <- piece:
+		default:
+			log.Printf("avs: alexa replied faster than it could be published; %d bytes dropped", len(piece))
+		}
 	}
 }
 

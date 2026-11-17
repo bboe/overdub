@@ -94,3 +94,34 @@ func SetNumber(name string, value int) error {
 	}
 	return nil
 }
+
+func Text(name string) (value string, known bool, err error) {
+	full, err := PropertyName(name)
+	if err != nil {
+		return "", false, err
+	}
+	out, err := readProp(full)
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s: %w", full, err)
+	}
+	out = strings.TrimSpace(out)
+	return out, out != "", nil
+}
+
+func SetText(name, value string) error {
+	full, err := PropertyName(name)
+	if err != nil {
+		return err
+	}
+	if err := setProp(full, value); err != nil {
+		return err
+	}
+	got, _, err := Text(name)
+	if err != nil {
+		return err
+	}
+	if got != value {
+		return fmt.Errorf("%s did not read back as %q", full, value)
+	}
+	return nil
+}

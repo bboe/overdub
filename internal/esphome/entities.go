@@ -22,6 +22,9 @@ const (
 
 	buttonModeIcon = "mdi:gesture-tap-button"
 
+	voiceModeIcon = "mdi:account-voice"
+	replyIcon     = "mdi:message-reply-text"
+
 	sendspinIcon = "mdi:speaker-multiple"
 
 	delayIcon = "mdi:timer-outline"
@@ -243,6 +246,32 @@ func (s *Server) listEntities(conn *conn) error {
 		mode.boolean(7, false) // disabled_by_default
 		mode.u32(8, entityCategoryConfig)
 		if err := s.send(conn, msgListSelect, mode.b); err != nil {
+			return err
+		}
+	}
+
+	if s.voiceMode != nil {
+		var mode pb
+		mode.str(1, "voice_mode")
+		mode.fixed32(2, s.keyVoice)
+		mode.str(3, "Voice mode")
+		mode.str(5, voiceModeIcon)
+		for _, option := range s.voiceModes {
+			mode.str(6, option)
+		}
+		mode.boolean(7, false) // disabled_by_default
+		mode.u32(8, entityCategoryConfig)
+		if err := s.send(conn, msgListSelect, mode.b); err != nil {
+			return err
+		}
+
+		var reply pb
+		reply.str(1, "alexa_reply")
+		reply.fixed32(2, s.keyReply)
+		reply.str(3, "Alexa reply")
+		reply.str(5, replyIcon)
+		reply.boolean(6, false) // disabled_by_default
+		if err := s.send(conn, msgListTextSensor, reply.b); err != nil {
 			return err
 		}
 	}

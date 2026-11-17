@@ -168,6 +168,8 @@ type Server struct {
 	keyText     uint32
 	keyCommand  uint32
 	keyUpdate   uint32
+	keyVoice    uint32
+	keyReply    uint32
 
 	buttons []*physicalButton
 
@@ -227,6 +229,11 @@ type Server struct {
 	updateCheck   func()
 	updateInstall func()
 
+	voiceModes []string
+	voiceMode  func() string
+	voiceSet   func(string)
+	reply      func() string
+
 	play     func(url string, announcement bool) error
 	stopPlay func()
 	command  func(text string) error
@@ -238,6 +245,8 @@ type Server struct {
 	adbRefused string
 	adbGen     uint64
 	adbSetMu   sync.Mutex
+
+	replyMu sync.Mutex
 
 	handshakeWait time.Duration
 	pingWait      time.Duration
@@ -287,6 +296,8 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyText:      entityKey("alexa_command"),
 		keyCommand:   entityKey("send_command"),
 		keyUpdate:    entityKey("firmware"),
+		keyVoice:     entityKey("voice_mode"),
+		keyReply:     entityKey("alexa_reply"),
 		buttons:      newButtons(),
 		uptime:       device.UptimeSeconds,
 		wifi:         device.WifiSignal,
@@ -376,6 +387,19 @@ func (s *Server) UseSendspinPairing(clientID, token string) {
 
 func (s *Server) UseSendspinDelay(maxMS int, ms func() int, set func(int)) {
 	s.delayMaxMS, s.delayMS, s.delaySet = maxMS, ms, set
+}
+
+func (s *Server) UseVoice(modes []string, mode func() string, set func(string), reply func() string) {
+	s.voiceModes, s.voiceMode, s.voiceSet, s.reply = slices.Clone(modes), mode, set, reply
+	s.mu.Lock()
+	s.published[s.keyReply] = reading{key: s.keyReply, text: reply(), ok: true, kind: kindTextSensor}
+	s.mu.Unlock()
+}
+
+func (s *Server) NoteReply() {
+	s.replyMu.Lock()
+	defer s.replyMu.Unlock()
+	s.publish("reply", []reading{{key: s.keyReply, text: s.reply(), ok: true, kind: kindTextSensor}})
 }
 
 func (s *Server) UseUpdate(check, install func()) {
@@ -706,6 +730,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 				break
 			}
 		}
+		if key == s.keyVoice && s.voiceSet != nil {
+			s.setVoiceLocked(conn, choice)
+		}
 		return nil
 
 	case msgNumberCommand:
@@ -872,6 +899,24 @@ func (s *Server) setModeLocked(conn *conn, b *physicalButton, choice string) {
 	b.setMode(choice)
 	conn.noted = fmt.Sprintf("esphome api: %s set %s to %s",
 		conn.sock.RemoteAddr(), b.objectID, choice)
+	select {
+	case s.sensorWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) setVoiceLocked(conn *conn, choice string) {
+	if !slices.Contains(s.voiceModes, choice) {
+		conn.noted = fmt.Sprintf("esphome api: %s asked for voice mode %q, which was not offered",
+			conn.sock.RemoteAddr(), untrustedlog.Cut(choice))
+		return
+	}
+	if s.voiceMode() == choice {
+		return
+	}
+	s.voiceSet(choice)
+	go s.NoteReply()
+	conn.noted = fmt.Sprintf("esphome api: %s set voice_mode to %s", conn.sock.RemoteAddr(), choice)
 	select {
 	case s.sensorWake <- struct{}{}:
 	default:

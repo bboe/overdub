@@ -626,6 +626,10 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 		holdKeysIfMuted()
 	}()
 
+	voice := keptVoiceMode()
+	voice.note = server.NoteReply
+	server.UseVoice(voiceModes, voice.Mode, voice.Set, voice.Reply)
+
 	if clips != nil {
 		server.UsePlay(clips.Play, clips.Stop)
 		server.UsePlaying(sounding.current)
@@ -695,7 +699,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 		go sweepSendspinRule()
 	}
 
-	go relayVoice()
+	go relayVoice(voice)
 
 	if err := device.AllowTCP(apiPort); err != nil {
 		log.Printf("firewall: %v", err)

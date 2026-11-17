@@ -2,7 +2,7 @@
 
 Alexa's session runs through this daemon on its way to Amazon.
 
-There is nothing to configure. Every Dot that installs the daemon works this way,
+Every Dot that installs the daemon works this way, whatever the voice mode,
 which is what makes the install and the uninstall the part worth testing.
 
 ## What was measured
@@ -87,11 +87,66 @@ at it. A clean shutdown puts it back, but init stops the daemon with SIGKILL, so
 only `uninstall.py` reliably does. The boot script restarts a daemon that died 5
 seconds later.
 
+## The voice mode
+
+`voice_mode` is a select, kept in `persist.overdub.voice_mode`, and it starts
+in `pass through`. The property is written after the mode changes, not while the
+API holds its lock: `setprop` and its read-back can take seconds. The button modes are not kept; this one is, because a
+reboot that changed how the house hears you would be a silent change.
+
+| mode | what the relay does |
+|---|---|
+| `monitor` | reads Alexa's answers and publishes them |
+| `pass through` | passes the session on and looks at nothing |
+
+- `monitor` reads Amazon's replies, the answers to a wake word and the
+  downchannel both, and changes nothing in them. Each `SpeechSynthesizer.Speak`
+  gives its words to `alexa_reply`.
+- The words are the cues of the Speak's WEBVTT `caption`. A line right before
+  a timing line is a cue's identifier and is dropped; any other line is words,
+  a bare number included. A Speak with no caption gives its SSML with the tags
+  removed.
+- One question can draw more than one Speak. Asked for the weather on an Echo
+  Dot (3rd Generation), Amazon sent 2, 0.3 seconds apart, and another time 3,
+  1.0 and 1.6 seconds apart. So each Speak is published as it arrives, as a
+  state of its own, and the history reads as the whole answer.
+- Joined, the answer outgrew the sensor: Home Assistant refuses a state over
+  255 characters, and the weather ran past it. A Speak over 255 bytes is
+  split at the last space that fits, or on a character when a word is longer.
+- A joined answer also had to wait for its last Speak. Waiting 1 second for
+  quiet published the 3-Speak weather 3 times, and no wait is long enough for
+  every answer.
+- Speaks are published in order by one goroutine, so a slow Home Assistant
+  does not hold Alexa's reply on its way through. Its queue holds 16; a Speak
+  past that is dropped and logged. One that reaches the head of the queue
+  after `monitor` ends is dropped, and so is one that lands after the mode
+  has changed.
+- Leaving `monitor` empties `alexa_reply` and publishes it empty.
+- The reply is published on its own, not by waking the sensor poll, which
+  would run the firewall check and every other read to send one string.
+- The poll does not carry the reply. It reads every sensor before it
+  publishes, so a poll that read the old answer just before a new one was
+  published would put the old one back. Each publish of the reply reads it
+  under a lock of its own, so the last one sends the newest words.
+- Amazon never sends what it heard. A reply carries the caption and SSML of
+  the answer and no transcript, so the question cannot be published.
+- The log gets the length of each Speak, not its words.
+- A delimiter counts only at the start of a line, as the multipart format
+  has it. Audio bytes that spell the boundary are audio.
+- The relay looks only at JSON parts. An audio part is skipped as it passes,
+  keeping less than one boundary of it. A JSON part is held to 64 KB, and a
+  longer one is skipped.
+- `monitor` asks Home Assistant nothing. Sending the audio to Home Assistant
+  as well would run its whole pipeline, which acts on a command Alexa also
+  acts on, and answers too.
+- The relay is the same in both modes, so a mode change takes effect at once,
+  without dropping Alexa's session. A part already passing when `monitor` is
+  chosen is skipped.
+
 ## What this does not do
 
-- It does not read, decode or change anything in the session.
+- It does not change anything in the session.
 - It asks Home Assistant nothing, and holds no Home Assistant credential.
-- It adds no entity and no control.
 
 ## Open
 
