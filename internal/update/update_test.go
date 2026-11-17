@@ -257,7 +257,7 @@ func TestAnUpdateIsRefused(t *testing.T) {
 			installedBoot(), true, "the tarball's sha256"},
 		{"whose SHA256SUMS names another version",
 			func(f fakeRelease) fakeRelease { f.sumsFor = tarballName("v0.2.0"); return f },
-			installedBoot(), true, "does not name overdub-v0.3.0.tar.gz"},
+			installedBoot(), true, "does not name overdub-v0.3.0-fireos6.tar.gz"},
 		{"that changes the boot script", func(f fakeRelease) fakeRelease { return f },
 			bootScript + "# older\n", true, "changes the boot script"},
 		{"under a loop that cannot go back", func(f fakeRelease) fakeRelease { return f },

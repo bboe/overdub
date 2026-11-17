@@ -42,7 +42,7 @@ README.md says how.
 
 ```sh
 shasum -a 256 -c SHA256SUMS      # or sha256sum -c
-gh attestation verify overdub-v1.0.0.tar.gz --repo bboe/overdub
+gh attestation verify overdub-v1.0.0-fireos6.tar.gz --repo bboe/overdub
 ```
 
 A released binary reports its version. A local build prints
@@ -550,11 +550,12 @@ computer gets back in and any other gets `unauthorized`.
   then restarts into the new release, which takes about 7 seconds.
 - The Dot looks for a release a minute after it starts, then every 6 hours.
   Home Assistant's **Check for updates** looks again, at most once a minute.
-- A Dot on v0.3.0 or earlier cannot install a Fire OS 6 release this way:
-  those builds expect `mapdump.jar` in the tarball and refuse one without it.
-  They are Fire OS 5 builds, and a Fire OS 6 release would not run on them
-  anyway. Run `install.py` with the Dot on USB: it moves the Dot to Fire OS 6
-  with firebreak, keeps its setup and keys, and then installs.
+- A Dot on v0.3.0 is offered a Fire OS 6 release, and its notes start with
+  **Fire OS 5 Dots**. **Install** fails, normally with "this release changes
+  the boot script, which an update does not replace; run its install.py
+  instead". Run `install.py` with the Dot on USB: it moves the Dot to Fire OS
+  6 with firebreak, keeps its setup and keys, and then installs. Earlier
+  releases have no updater.
 - An update installs only a release signed with the overdub release key. A
   release that changes the boot script cannot install this way: the entity's
   release notes then say to run `install.py` from that release.

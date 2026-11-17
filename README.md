@@ -123,18 +123,20 @@ README.
 
 ## Install from a release
 
-Each [release](https://github.com/bboe/overdub/releases) carries one tarball
-with the scripts and the binary, already built:
+Each [release](https://github.com/bboe/overdub/releases) carries a
+`-fireos6` tarball with the scripts and the binary, already built. The other
+tarball, with no `-fireos6`, is a stand-in for Fire OS 5 Dots and holds no
+binary. To install:
 
 ```sh
-tar xf overdub-v1.0.0.tar.gz
+tar xf overdub-v1.0.0-fireos6.tar.gz
 overdub-v1.0.0/deploy/install.py kitchen
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-tar xf overdub-v1.0.0.tar.gz
+tar xf overdub-v1.0.0-fireos6.tar.gz
 py -3 overdub-v1.0.0\deploy\install.py kitchen
 ```
 

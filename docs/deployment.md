@@ -123,8 +123,25 @@
   trusts both roots GitHub uses (USERTrust ECC for the API, ISRG Root X1 for
   the downloads): a 3.2 MB release tarball downloaded on the Dot.
 - The signature must check, the tarball's sha256 must match the line that
-  names `overdub-<tag>.tar.gz`, and the tarball must hold the binary and the
-  boot script under `overdub-<tag>/`.
+  names `overdub-<tag>-fireos6.tar.gz`, and the tarball must hold the binary
+  and the boot script under `overdub-<tag>/`.
+- The `-fireos6` in the name keeps a Fire OS 5 Dot from installing a Fire OS
+  6 release. v0.3.0, the last Fire OS 5 release and the first with an
+  updater, installs only a tarball named `overdub-<tag>.tar.gz`. Moving that
+  Dot to Fire OS 6 takes USB and firebreak, which an update cannot do.
+- So each release also carries a decoy under that name, built from
+  `deploy/fireos5-decoy/`. v0.3.0 offers the release, and its notes open with
+  `deploy/fireos5-decoy/notes.md`, which says to connect the Dot by USB.
+- The decoy holds a placeholder binary and `mapdump.jar`, which v0.3.0 needs
+  to be there, and a boot script that is not the Dot's. So **Install** stops
+  at the boot script check, before anything is written, with v0.3.0's own
+  words: "this release changes the boot script, which an update does not
+  replace; run its install.py instead". With no placeholders it would stop
+  earlier, at "the tarball has no ...mapdump.jar", which says nothing useful.
+- With no decoy, v0.3.0 offers nothing. It logs that the release lacks its
+  tarball and checks again every 30 minutes, and the user is never told.
+- v1.0.0 removes the decoy, with its test and its lines in the release job.
+  Releases from v1.0.0 on carry none.
 - The release's boot script, with this Dot's name put in as `install.py` does
   it, must equal the installed one byte for byte. An update does not replace
   the boot script. A broken one would stop the daemon at the next boot, where
@@ -356,12 +373,11 @@ before it writes.
 
 - A release is a tarball. Building needs an NDK, so it carries the built
   binary beside the scripts.
-- v0.3.0 and earlier were Fire OS 5 builds whose `unpack` demanded
-  `deploy/mapdump/mapdump.jar` in the tarball, so the update entity on such a
-  Dot refuses a Fire OS 6 release before writing anything. That is the
-  change-over, not a regression: no Fire OS 6 build runs on Fire OS 5, and
-  `install.py` moves the Dot to Fire OS 6 through firebreak. No placeholder
-  jar is shipped.
+- v0.3.0 and earlier were Fire OS 5 builds. v0.3.0's update entity is
+  offered a Fire OS 6 release and cannot install it ("Updating over the API"
+  says how). That is the change-over, not a regression: no Fire OS 6 build
+  runs on Fire OS 5, and `install.py` moves the Dot to Fire OS 6 through
+  firebreak.
 - `install.py` builds when `build.sh` is beside it, and installs `build/overdub`
   as it stands when it is not. The test is whether the file exists, not
   whether it can run; docs/pitfalls.md says why.
