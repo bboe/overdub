@@ -205,7 +205,7 @@ jobs:
           # archive would be hashed, attested and published.
           set -o pipefail
           dir="overdub-$GITHUB_REF_NAME"
-          mkdir -p "$dir/build"
+          mkdir -p "$dir/build" "$dir/deploy"
           cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
           cp -r docs "$dir/docs"
           cp deploy/install.py deploy/uninstall.py deploy/overdub.sh deploy/overdub.rc "$dir/deploy/"
@@ -215,8 +215,21 @@ jobs:
           # the name and timestamp out of the header.
           tar --sort=name --owner=0 --group=0 --numeric-owner \
               --mtime="@$(git log -1 --pretty=%ct)" -cf - "$dir" |
+            gzip -n > "$dir-fireos6.tar.gz"
+
+          # The Fire OS 5 decoy, under the only name v0.3.0's updater installs.
+          # docs/deployment.md says what it holds and when it goes.
+          decoy=$(mktemp -d)
+          mkdir -p "$decoy/$dir/build" "$decoy/$dir/deploy/mapdump"
+          cp deploy/fireos5-decoy/README.md "$decoy/$dir/README.md"
+          cp deploy/fireos5-decoy/overdub.sh "$decoy/$dir/deploy/overdub.sh"
+          cp deploy/fireos5-decoy/placeholder "$decoy/$dir/build/overdub"
+          cp deploy/fireos5-decoy/placeholder "$decoy/$dir/deploy/mapdump/mapdump.jar"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --pretty=%ct)" -C "$decoy" -cf - "$dir" |
             gzip -n > "$dir.tar.gz"
-          sha256sum "$dir.tar.gz" > SHA256SUMS
+
+          sha256sum "$dir-fireos6.tar.gz" "$dir.tar.gz" > SHA256SUMS
           cat SHA256SUMS
 
       # The daemon installs an update only when SHA256SUMS.sig checks against
@@ -240,16 +253,16 @@ jobs:
       # unpacks, installs and runs without either file.
       - name: The notices travel with the binary
         run: |
-          tar tzf "overdub-$GITHUB_REF_NAME.tar.gz" |
+          tar tzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" |
             grep -qFx "overdub-$GITHUB_REF_NAME/LICENSE.txt"
-          tar tzf "overdub-$GITHUB_REF_NAME.tar.gz" |
+          tar tzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" |
             grep -qFx "overdub-$GITHUB_REF_NAME/THIRD-PARTY.txt"
 
       # So is a missing or non-executable script: nothing above runs the
       # tarball's copies.
       - name: The scripts travel with the binary, executable
         run: |
-          listing=$(tar tvzf "overdub-$GITHUB_REF_NAME.tar.gz")
+          listing=$(tar tvzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz")
           for f in install.py uninstall.py overdub.sh; do
             awk -v p="overdub-$GITHUB_REF_NAME/deploy/$f" \
               '$1 == "-rwxr-xr-x" && $NF == p { ok = 1 } END { exit !ok }' <<<"$listing" ||
@@ -260,7 +273,7 @@ jobs:
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          subject-path: overdub-${{ github.ref_name }}.tar.gz
+          subject-path: overdub-${{ github.ref_name }}-fireos6.tar.gz
 
       # Drafted first and published second, because gh uploads the assets after
       # creating the release: a failed upload would otherwise leave a release
@@ -278,5 +291,6 @@ jobs:
           esac
           # shellcheck disable=SC2086  # deliberately unquoted: empty means absent
           gh release create "$GITHUB_REF_NAME" --draft $prerelease --verify-tag \
-            --generate-notes "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS SHA256SUMS.sig
+            --generate-notes --notes-file deploy/fireos5-decoy/notes.md \
+            "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS SHA256SUMS.sig
           gh release edit "$GITHUB_REF_NAME" --draft=false

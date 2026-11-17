@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -16,10 +18,53 @@ func TestTheReleaseJobSignsWhatTheDaemonChecks(t *testing.T) {
 		"openssl pkeyutl -sign -rawin -inkey \"$key\" -in SHA256SUMS -out SHA256SUMS.sig",
 		"openssl pkeyutl -verify -rawin -pubin -inkey deploy/release-signing.pub",
 		"-in SHA256SUMS -sigfile SHA256SUMS.sig",
-		"\"overdub-$GITHUB_REF_NAME.tar.gz\" SHA256SUMS SHA256SUMS.sig",
+		"sha256sum \"$dir-fireos6.tar.gz\" \"$dir.tar.gz\" > SHA256SUMS",
+		"--generate-notes --notes-file deploy/fireos5-decoy/notes.md",
+		"\"overdub-$GITHUB_REF_NAME-fireos6.tar.gz\" \"overdub-$GITHUB_REF_NAME.tar.gz\" SHA256SUMS SHA256SUMS.sig",
 	} {
 		if !strings.Contains(string(workflow), want) {
 			t.Errorf(".github/workflows/ci.yml does not say %q", want)
 		}
+	}
+}
+
+func TestTheFireOS5DecoyIsRefusedForItsBootScript(t *testing.T) {
+	workflow, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`cp deploy/fireos5-decoy/README.md "$decoy/$dir/README.md"`,
+		`cp deploy/fireos5-decoy/overdub.sh "$decoy/$dir/deploy/overdub.sh"`,
+		`cp deploy/fireos5-decoy/placeholder "$decoy/$dir/build/overdub"`,
+		`cp deploy/fireos5-decoy/placeholder "$decoy/$dir/deploy/mapdump/mapdump.jar"`,
+		`gzip -n > "$dir.tar.gz"`,
+	} {
+		if !strings.Contains(string(workflow), want) {
+			t.Errorf(".github/workflows/ci.yml does not say %q", want)
+		}
+	}
+	read := func(path string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) == 0 {
+			t.Errorf("%s is empty, so v0.3.0 refuses the decoy as missing it, with words that do not help", path)
+		}
+		return b
+	}
+	read("deploy/fireos5-decoy/README.md")
+	read("deploy/fireos5-decoy/notes.md")
+	read("deploy/fireos5-decoy/placeholder")
+	decoy, real := read("deploy/fireos5-decoy/overdub.sh"), read("deploy/overdub.sh")
+	nameLine := regexp.MustCompile(`(?m)^NAME=$`)
+	if n := len(nameLine.FindAllIndex(decoy, -1)); n != 1 {
+		t.Fatalf("the decoy's boot script has %d NAME= lines; v0.3.0 needs 1 to reach the boot script check", n)
+	}
+	named := func(b []byte) []byte { return nameLine.ReplaceAll(b, []byte("NAME=kitchen")) }
+	if bytes.Equal(named(decoy), named(real)) {
+		t.Error("the decoy's boot script is the real one, so v0.3.0 would install the placeholder")
 	}
 }

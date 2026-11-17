@@ -222,7 +222,7 @@ func (u *Updater) latest() (release, error) {
 	return r, nil
 }
 
-func tarballName(version string) string { return "overdub-" + version + ".tar.gz" }
+func tarballName(version string) string { return "overdub-" + version + "-fireos6.tar.gz" }
 
 func (u *Updater) install() error {
 	u.mu.Lock()
