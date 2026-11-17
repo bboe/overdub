@@ -38,11 +38,12 @@
   over Sendspin at `sendspinLastPath`.
 - A flag whose only correct value is known, or that restates whether a file
   exists, is configuration that can be wrong for no gain.
-- Home Assistant sets two properties, and both outlive a reboot:
-  `persist.overdub.sendspin` (the Sendspin switch) and
-  `persist.overdub.sendspin_delay` (its output-delay number). They are not
-  flags: nothing sets them at install time. A Dot with neither written starts
-  with Sendspin on and no delay. docs/device.md has the mechanism.
+- Home Assistant sets three properties, and all outlive a reboot:
+  `persist.overdub.sendspin` (the Sendspin switch),
+  `persist.overdub.sendspin_delay` (its output-delay number) and
+  `persist.overdub.voice_mode` (the voice select). They are not flags: nothing
+  sets them at install time. A Dot with none written starts with Sendspin on,
+  no delay, and voice in `pass through`. docs/device.md has the mechanism.
 - `-version` asks the binary what it is, for a binary installed from a release.
   `build.sh` stamps `$OVERDUB_VERSION` through `-ldflags -X main.version`; the
   release job sets it from the tag. A local build leaves it empty and prints
@@ -108,9 +109,9 @@
 
 ## Alexa's session
 
-- It runs on every Dot that installs the daemon. There is no flag, no property
-  and no marker file: something that can be switched off is configuration, and
-  this slice has none.
+- It runs on every Dot that installs the daemon, whatever the voice mode. The
+  mode chooses only what the relay does with the session, so `pass through`
+  still exercises the install and the uninstall.
 - One LIPC property outside this daemon's namespace is written,
   `com.amazon.puffin AVSEndpoint`, and two files outside `/data`, under
   `/system`. All three are undone by `uninstall.py`, and docs/voice.md says

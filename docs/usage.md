@@ -184,7 +184,7 @@ deploy/uninstall.py
 - It removes the boot script, the binary, the API key, the Sendspin identity,
   its pairing records and the last server to play, the log, and every
   `persist.overdub.*` property. A new install starts with Sendspin on
-  and no output delay.
+  and no output delay, and voice in `pass through`.
 - `/data/local/bin` goes too if it is then empty.
 - The tcp/6053 and tcp/8928 rules, and the loopback rules for tcp/8443, go
   once the daemon is confirmed gone, so no reboot is needed. An uninstall that
@@ -225,12 +225,14 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | sensor | `output_device` | diagnostic | `speaker`, `jack`, `bluetooth` (5) |
 | sensor | `bluetooth_device` | diagnostic | the connected speaker (5) |
 | sensor | `playing` | diagnostic | what is playing, or empty (6) |
+| sensor | `alexa_reply` | -- | what Alexa last said, in `monitor` (13) |
 | binary_sensor | `alexa_registered` | diagnostic | on: has an account (7) |
 | select | `action_button_mode` | config | starts `intercept` (8) |
 | select | `mute_button_mode` | config | starts `monitor` (8) |
 | text | `alexa_command` | config | run as though spoken (9) |
 | switch | `sendspin` | config | on: Sendspin is up (10) |
 | number | `sendspin_output_delay` | config | 0 to 5,000 ms (11) |
+| select | `voice_mode` | config | starts `pass through` (13) |
 | update | `firmware` | config | the latest release (12) |
 
 1. See [The action button](#the-action-button).
@@ -257,6 +259,11 @@ Each entity id is `<domain>.<name>_<suffix>`.
     it too; the last write wins, and the number shows what is applied.
     Survives a reboot and works with the switch off.
 12. Listed only for a release build. See [Updating](#updating).
+13. `monitor` or `pass through`. In `monitor`, `alexa_reply` takes each part
+    of Alexa's answer as she says it, so its history reads as the whole
+    answer. A part over 255 bytes arrives in pieces. `pass through` empties it.
+    Amazon does not send what you asked, so only the answer is there. The mode
+    survives a reboot.
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.

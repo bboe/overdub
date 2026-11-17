@@ -93,3 +93,25 @@ func TestAPropertyNameThatFitsIsStillWritten(t *testing.T) {
 			len(Prefix+"sendspin_delay"), err)
 	}
 }
+
+func TestTextReadsBackWhatWasWrittenSpacesIncluded(t *testing.T) {
+	store := map[string]string{}
+	oldRead, oldSet := readProp, setProp
+	readProp = func(name string) (string, error) { return store[name], nil }
+	setProp = func(key, value string) error { store[key] = value; return nil }
+	defer func() { readProp, setProp = oldRead, oldSet }()
+
+	if _, known, _ := Text("voice_mode"); known {
+		t.Error("an unset setting reported a value")
+	}
+	if err := SetText("voice_mode", "pass through"); err != nil {
+		t.Fatal(err)
+	}
+	if got, known, _ := Text("voice_mode"); !known || got != "pass through" {
+		t.Errorf("Text = (%q, %v), want (\"pass through\", true)", got, known)
+	}
+	setProp = func(string, string) error { return nil }
+	if err := SetText("voice_mode", "monitor"); err == nil {
+		t.Error("a write that did not take was reported as success")
+	}
+}

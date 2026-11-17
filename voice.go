@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/bboe/overdub/internal/avs"
@@ -17,11 +19,98 @@ const (
 	voicePort = 8443
 	voiceAddr = "127.0.0.1:8443"
 	voiceURL  = "https://" + voiceAddr
+
+	voiceModeFlag = "voice_mode"
+	voiceMonitor  = "monitor"
+	voicePass     = "pass through"
 )
+
+var voiceModes = []string{voiceMonitor, voicePass}
+
+type voiceMode struct {
+	keep sync.Mutex
+
+	mu    sync.Mutex
+	mode  string
+	reply string
+	relay *avs.Relay
+	note  func()
+}
+
+func keptVoiceMode() *voiceMode {
+	v := &voiceMode{mode: voicePass}
+	kept, known, err := device.Text(voiceModeFlag)
+	switch {
+	case err != nil:
+		log.Printf("voice: %v; starting in %s", err, voicePass)
+	case known && slices.Contains(voiceModes, kept):
+		v.mode = kept
+	case known:
+		log.Printf("voice: the kept mode %q is not one this build offers; starting in %s", kept, voicePass)
+	}
+	return v
+}
+
+func (v *voiceMode) Mode() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.mode
+}
+
+func (v *voiceMode) Reply() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.reply
+}
+
+func (v *voiceMode) Set(choice string) {
+	v.mu.Lock()
+	v.mode = choice
+	if choice != voiceMonitor {
+		v.reply = ""
+	}
+	if v.relay != nil {
+		v.relay.Watch(choice == voiceMonitor)
+	}
+	v.mu.Unlock()
+	log.Printf("voice: mode %s", choice)
+	go v.keepMode()
+}
+
+func (v *voiceMode) keepMode() {
+	v.keep.Lock()
+	defer v.keep.Unlock()
+	mode := v.Mode()
+	if err := device.SetText(voiceModeFlag, mode); err != nil {
+		log.Printf("voice: %v; %s holds until the next restart", err, mode)
+	}
+}
+
+func (v *voiceMode) heard(text string) {
+	v.mu.Lock()
+	if v.mode != voiceMonitor {
+		v.mu.Unlock()
+		return
+	}
+	v.reply = text
+	note := v.note
+	v.mu.Unlock()
+	if note != nil {
+		note()
+	}
+}
+
+func (v *voiceMode) serve(relay *avs.Relay) {
+	relay.OnSpeech(v.heard)
+	v.mu.Lock()
+	v.relay = relay
+	relay.Watch(v.mode == voiceMonitor)
+	v.mu.Unlock()
+}
 
 var voiceUpstream string
 
-func startVoiceRelay() bool {
+func startVoiceRelay(mode *voiceMode) bool {
 	cert, caPEM, err := avs.Identity(voiceIdentityPath)
 	if err != nil {
 		log.Printf("voice: no identity to serve: %v", err)
@@ -65,6 +154,7 @@ func startVoiceRelay() bool {
 		target = net.JoinHostPort(u.Hostname(), "443")
 	}
 	relay := avs.New(voiceAddr, target, cert, device.Dialer(15*time.Second).DialContext)
+	mode.serve(relay)
 	ln, err := relay.Listen()
 	if err != nil {
 		log.Printf("voice: %v", err)
@@ -96,8 +186,8 @@ func startVoiceRelay() bool {
 	return true
 }
 
-func relayVoice() {
-	if startVoiceRelay() {
+func relayVoice(mode *voiceMode) {
+	if startVoiceRelay(mode) {
 		return
 	}
 	if err := device.LeaveSpeech(voiceURL); err != nil {

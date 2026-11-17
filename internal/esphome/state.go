@@ -64,6 +64,9 @@ func (s *Server) readTicked() []reading {
 	for _, b := range s.buttons {
 		out = append(out, reading{key: b.keyMode, text: b.mode(), ok: true, kind: kindSelect})
 	}
+	if s.voiceMode != nil {
+		out = append(out, reading{key: s.keyVoice, text: s.voiceMode(), ok: true, kind: kindSelect})
+	}
 	return out
 }
 
