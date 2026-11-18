@@ -1,0 +1,7 @@
+{
+  "manifest": 1,
+  "platforms": ["fireos6"],
+  "boards": [],
+  "from": "",
+  "refusal": "it runs on Fire OS 6 only; its release notes say how to move a Dot"
+}

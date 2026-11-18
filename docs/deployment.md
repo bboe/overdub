@@ -117,14 +117,68 @@
 
 - `internal/update` does what `install.py` does for the binary, from the Dot
   itself. docs/usage.md has what a user sees.
-- It reads `releases/latest` from GitHub's API, then downloads `SHA256SUMS`,
-  `SHA256SUMS.sig` and the tarball. Each read has a size limit, and the whole
-  request has a 5-minute deadline. Go's TLS reads Fire OS's CA store, which
+- It reads the first 10 releases GitHub's API lists, not `releases/latest`.
+  One Latest mark serves every kind of Dot, so it cannot tell a Fire OS 5 Dot
+  from a Fire OS 6 one, or let an older platform keep getting fixes once a
+  newer one ships.
+- GitHub orders that list by `created_at`, the date of the release's commit.
+  A fix cut from an old commit sorts below every newer commit's release, and
+  falls out of the 10 once 10 of those exist.
+- Each stable release newer than the running one, newest first, and at most 3
+  of them, has its `SHA256SUMS`, `SHA256SUMS.sig` and `release.json` read. The
+  signature must check and `release.json` must match its line, so a release's
+  rules are the release key's. A release with no `release.json`, as every one
+  before the manifest, is passed over.
+- A release whose signature does not check, whose `SHA256SUMS` does not name
+  `release.json` or gives it another sha256, whose manifest does not parse,
+  or whose `SHA256SUMS`, signature or manifest is over its size limit, does
+  not fit, and the reason is its refusal. It stays wrong at every check,
+  so it must not stop the check: a key change would otherwise keep every older
+  Dot from the releases it can still trust.
+- A read that fails by the network or an HTTP status fails the whole check,
+  and the check is tried again in 30 minutes. It may succeed next time, so the
+  release is not shown as refused.
+- The first release whose manifest fits this Dot is offered. One that does not
+  fit is offered only when none of the 3 fits, and then the newest's
+  `refusal` heads the notes, `**This Dot cannot install <tag>:**`, and
+  **Install** fails with the same words. The failure is not added as a second
+  line, as other install failures are: it would repeat the first. The first
+  line gains `Install failed.` instead, because the update entity has no other
+  place to show that the button did something.
+- The manifest says what runs it, so the words a Dot shows come from the
+  release and not from the updater it was built with. v0.3.0's words are fixed
+  in its code, so the decoy below has to steer it to the one that fits.
+
+| field | a Dot fits when |
+|---|---|
+| `manifest` | it equals the updater's own, now 1 |
+| `platforms` | it names the updater's, `fireos6` |
+| `boards` | it is empty or names the board, `ro.product.device` before `_` |
+| `from` | it is empty, or a stable tag not newer than the running version |
+| `refusal` | -- the words for a Dot it does not fit |
+
+- A `manifest` the updater does not know refuses with the one message the code
+  keeps, that the release needs a newer updater and its `install.py`. Raise it
+  only for a change an older updater would read wrongly; a new field an older
+  updater can ignore does not need it.
+- `manifest` is read before the rest, so a new format may change any other
+  field's type and an older updater still asks for its `install.py`.
+- A `from` that is not a stable tag, such as `0.4.0`, fits no Dot. Read as no
+  `from` at all, a typo would skip the step it names.
+- `deploy/release.json` is the manifest. The release job signs it with the
+  tarball in `SHA256SUMS` and publishes it, and a test fails a manifest that a
+  Dot on its own build would refuse, or one with no `refusal`.
+- The tarball is downloaded only on **Install**. Each read has a size limit,
+  and the whole request has a 5-minute deadline. Go's TLS reads Fire OS's CA store, which
   trusts both roots GitHub uses (USERTrust ECC for the API, ISRG Root X1 for
   the downloads): a 3.2 MB release tarball downloaded on the Dot.
-- The signature must check, the tarball's sha256 must match the line that
-  names `overdub-<tag>-fireos6.tar.gz`, and the tarball must hold the binary
-  and the boot script under `overdub-<tag>/`.
+- **Install** uses the `SHA256SUMS` the check verified, not a new download.
+  The manifest the Dot checked is then the one that release installs under,
+  even if the release's assets change in between. The tarball's sha256 must
+  match the line that names `overdub-<tag>-fireos6.tar.gz`, and the tarball
+  must hold the binary and the boot script under `overdub-<tag>/`.
+- A check that finds another release clears the last install's failure, so a
+  refused release's reason is not shown as a failure of the next one.
 - The `-fireos6` in the name keeps a Fire OS 5 Dot from installing a Fire OS
   6 release. v0.3.0, the last Fire OS 5 release and the first with an
   updater, installs only a tarball named `overdub-<tag>.tar.gz`. Moving that
@@ -160,7 +214,7 @@
 - `install.py`'s applied stamp then names a pid and a binary md5 that do not
   match, so the next `install.py` restarts the daemon once.
 - `releasesURL` is a variable so that a test build can point it somewhere
-  else: `OVERDUB_VERSION='v0.2.9 -X main.releasesURL=http://127.0.0.1:8099/latest'`
+  else: `OVERDUB_VERSION='v0.2.9 -X main.releasesURL=http://127.0.0.1:8099/releases'`
   stamps both, because `build.sh` passes the variable inside `-ldflags`.
 - Tested on the Dot that way, with a release served from its loopback and
   signed with the release key, and driven by aioesphomeapi: `v0.2.9` updated to

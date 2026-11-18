@@ -1,6 +1,7 @@
-// Package update offers Home Assistant the latest overdub release and installs
-// it: it reads GitHub's latest release, checks SHA256SUMS against the release
-// key, unpacks the binary, and leaves it for the boot script to try.
+// Package update offers Home Assistant the newest overdub release this Dot can
+// run and installs it: it reads GitHub's recent releases, checks each one's
+// manifest and SHA256SUMS against the release key, unpacks the binary, and
+// leaves it for the boot script to try.
 package update
 
 import (
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,16 +30,23 @@ import (
 )
 
 const (
-	maxAPI     = 1 << 20
-	maxSums    = 4 << 10
-	maxTarball = 64 << 20
-	maxFile    = 48 << 20
-	maxNotes   = 8 << 10
-	maxError   = 300
+	maxAPI      = 1 << 20
+	maxSums     = 4 << 10
+	maxManifest = 4 << 10
+	maxTarball  = 64 << 20
+	maxFile     = 48 << 20
+	maxNotes    = 8 << 10
+	maxError    = 300
 
 	checkGap = time.Minute
 
 	title = "overdub"
+
+	Platform        = "fireos6"
+	ManifestName    = "release.json"
+	ManifestVersion = 1
+
+	candidates = 3
 )
 
 type Paths struct {
@@ -51,6 +60,7 @@ type Paths struct {
 type Updater struct {
 	Current  string
 	Name     string
+	Board    string
 	Key      ed25519.PublicKey
 	Paths    Paths
 	API      string
@@ -70,12 +80,37 @@ type Updater struct {
 }
 
 type release struct {
-	version string
-	notes   string
-	url     string
-	tarball string
-	sums    string
-	sig     string
+	version  string
+	notes    string
+	url      string
+	tarball  string
+	sums     string
+	sig      string
+	manifest string
+	refusal  string
+	checked  string
+}
+
+type Manifest struct {
+	Manifest  int      `json:"manifest"`
+	Platforms []string `json:"platforms"`
+	Boards    []string `json:"boards"`
+	From      string   `json:"from"`
+	Refusal   string   `json:"refusal"`
+}
+
+func (m Manifest) Refuses(board, current string) string {
+	if m.Manifest != ManifestVersion {
+		return "it needs a newer updater than this Dot's; run its install.py"
+	}
+	if !slices.Contains(m.Platforms, Platform) || (len(m.Boards) > 0 && !slices.Contains(m.Boards, board)) ||
+		(m.From != "" && (!stable.MatchString(m.From) || Newer(m.From, current))) {
+		if m.Refusal == "" {
+			return "it does not run on this Dot; its release notes say what does"
+		}
+		return m.Refusal
+	}
+	return ""
 }
 
 func (u *Updater) Check() {
@@ -140,7 +175,7 @@ func (u *Updater) check() bool {
 	u.mu.Lock()
 	u.lastCheck = time.Now()
 	u.mu.Unlock()
-	r, err := u.latest()
+	r, err := u.newest()
 	if err != nil {
 		log.Printf("update: checking for a release: %s", plain(err))
 		return false
@@ -148,11 +183,17 @@ func (u *Updater) check() bool {
 	u.mu.Lock()
 	changed := !u.known || r != u.release
 	u.release, u.known = r, true
+	if changed {
+		u.failure = ""
+	}
 	u.mu.Unlock()
 	if changed {
-		if Newer(r.version, u.Current) {
+		switch {
+		case r.refusal != "":
+			log.Printf("update: %s is out; this Dot cannot install it: %s", r.version, r.refusal)
+		case Newer(r.version, u.Current):
 			log.Printf("update: %s is available; this is %s", r.version, u.Current)
-		} else {
+		default:
 			log.Printf("update: %s is the latest release; this is %s", r.version, u.Current)
 		}
 	}
@@ -175,7 +216,14 @@ func (u *Updater) publish(inProgress bool, progress float32) {
 				u.Current+".**\n\n"+state.Notes, maxNotes)
 		}
 	}
-	if failure != "" {
+	if r.refusal != "" && Newer(r.version, u.Current) {
+		head := "**This Dot cannot install " + r.version + ":** "
+		if failure == r.refusal {
+			head = "**Install failed. This Dot cannot install " + r.version + ":** "
+		}
+		state.Notes = cut(head+r.refusal+"\n\n"+state.Notes, maxNotes)
+	}
+	if failure != "" && failure != r.refusal {
 		state.Notes = cut("**The last install failed:** "+failure+"\n\n"+state.Notes, maxNotes)
 	}
 	u.Publish(state)
@@ -183,12 +231,12 @@ func (u *Updater) publish(inProgress bool, progress float32) {
 
 var stable = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
-func (u *Updater) latest() (release, error) {
+func (u *Updater) newest() (release, error) {
 	body, err := u.get(u.API, maxAPI, "application/vnd.github+json", nil)
 	if err != nil {
 		return release{}, err
 	}
-	var answer struct {
+	var answers []struct {
 		TagName    string `json:"tag_name"`
 		Body       string `json:"body"`
 		HTMLURL    string `json:"html_url"`
@@ -199,27 +247,106 @@ func (u *Updater) latest() (release, error) {
 			URL  string `json:"browser_download_url"`
 		} `json:"assets"`
 	}
-	if err := json.Unmarshal(body, &answer); err != nil {
-		return release{}, fmt.Errorf("the release does not parse: %w", err)
+	if err := json.Unmarshal(body, &answers); err != nil {
+		return release{}, fmt.Errorf("the releases do not parse: %w", err)
 	}
-	if answer.Draft || answer.Prerelease || !stable.MatchString(answer.TagName) {
-		return release{}, fmt.Errorf("the latest release is %.40q, not a stable vX.Y.Z", answer.TagName)
+	var found []release
+	for _, a := range answers {
+		if a.Draft || a.Prerelease || !stable.MatchString(a.TagName) || !Newer(a.TagName, u.Current) {
+			continue
+		}
+		r := release{version: a.TagName, notes: cut(a.Body, maxNotes), url: a.HTMLURL}
+		for _, asset := range a.Assets {
+			switch asset.Name {
+			case tarballName(r.version):
+				r.tarball = asset.URL
+			case "SHA256SUMS":
+				r.sums = asset.URL
+			case "SHA256SUMS.sig":
+				r.sig = asset.URL
+			case ManifestName:
+				r.manifest = asset.URL
+			}
+		}
+		if r.sums == "" || r.sig == "" || r.manifest == "" {
+			continue
+		}
+		found = append(found, r)
 	}
-	r := release{version: answer.TagName, notes: cut(answer.Body, maxNotes), url: answer.HTMLURL}
-	for _, a := range answer.Assets {
-		switch a.Name {
-		case tarballName(r.version):
-			r.tarball = a.URL
-		case "SHA256SUMS":
-			r.sums = a.URL
-		case "SHA256SUMS.sig":
-			r.sig = a.URL
+	slices.SortFunc(found, func(a, b release) int {
+		if Newer(a.version, b.version) {
+			return -1
+		}
+		return 1
+	})
+	var refused release
+	for _, r := range found[:min(len(found), candidates)] {
+		m, checked, err := u.readManifest(r)
+		r.checked = string(checked)
+		var untrusted unread
+		switch {
+		case errors.As(err, &untrusted):
+			r.refusal = cut(untrusted.Error(), maxError)
+		case err != nil:
+			return release{}, fmt.Errorf("%s: %w", r.version, err)
+		default:
+			r.refusal = cut(m.Refuses(u.Board, u.Current), maxError)
+		}
+		if r.refusal == "" && r.tarball == "" {
+			r.refusal = "it has no tarball for " + Platform
+		}
+		if r.refusal == "" {
+			return r, nil
+		}
+		if refused.version == "" {
+			refused = r
 		}
 	}
-	if r.tarball == "" || r.sums == "" || r.sig == "" {
-		return release{}, fmt.Errorf("%s lacks its tarball, SHA256SUMS or SHA256SUMS.sig", r.version)
+	if refused.version != "" {
+		return refused, nil
 	}
-	return r, nil
+	return release{version: u.Current}, nil
+}
+
+type unread struct{ error }
+
+func (u *Updater) readManifest(r release) (Manifest, []byte, error) {
+	sums, err := u.get(r.sums, maxSums, "", nil)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	sig, err := u.get(r.sig, ed25519.SignatureSize, "", nil)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	if !ed25519.Verify(u.Key, sums, sig) {
+		return Manifest{}, nil, unread{errors.New("SHA256SUMS.sig does not check against the release key")}
+	}
+	want, err := sumFor(sums, ManifestName)
+	if err != nil {
+		return Manifest{}, nil, unread{err}
+	}
+	body, err := u.get(r.manifest, maxManifest, "", nil)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	if got := sha256.Sum256(body); !bytes.Equal(got[:], want) {
+		return Manifest{}, nil, unread{fmt.Errorf("%s's sha256 is %x; SHA256SUMS says %x", ManifestName, got, want)}
+	}
+	var version struct {
+		Manifest int `json:"manifest"`
+	}
+	if err := json.Unmarshal(body, &version); err != nil {
+		return Manifest{}, nil, unread{fmt.Errorf("%s does not parse: %w", ManifestName, err)}
+	}
+	if version.Manifest != ManifestVersion {
+		return Manifest{Manifest: version.Manifest}, sums, nil
+	}
+	var m Manifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return Manifest{}, nil, unread{fmt.Errorf("%s does not parse: %w", ManifestName, err)}
+	}
+	return m, sums, nil
 }
 
 func tarballName(version string) string { return "overdub-" + version + "-fireos6.tar.gz" }
@@ -232,6 +359,9 @@ func (u *Updater) install() error {
 	if !known || !Newer(r.version, u.Current) {
 		return nil
 	}
+	if r.refusal != "" {
+		return errors.New(r.refusal)
+	}
 	if _, err := os.Stat(u.Paths.Trial); err == nil {
 		return errors.New("the running binary is still on trial; install again once Home Assistant" +
 			" has been connected to it for a minute")
@@ -243,18 +373,7 @@ func (u *Updater) install() error {
 	log.Printf("update: installing %s", r.version)
 	u.publish(true, 0)
 
-	sums, err := u.get(r.sums, maxSums, "", nil)
-	if err != nil {
-		return err
-	}
-	sig, err := u.get(r.sig, ed25519.SignatureSize, "", nil)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(u.Key, sums, sig) {
-		return errors.New("SHA256SUMS.sig does not check against the release key")
-	}
-	want, err := sumFor(sums, tarballName(r.version))
+	want, err := sumFor([]byte(r.checked), tarballName(r.version))
 	if err != nil {
 		return err
 	}
@@ -316,7 +435,7 @@ func (u *Updater) get(url string, limit int64, accept string, progress func(floa
 		return nil, fmt.Errorf("%s answered %s", req.URL.Host, resp.Status)
 	}
 	if resp.ContentLength > limit {
-		return nil, fmt.Errorf("%s is %d bytes, over %d", req.URL.Path, resp.ContentLength, limit)
+		return nil, unread{fmt.Errorf("%s is %d bytes, over %d", req.URL.Path, resp.ContentLength, limit)}
 	}
 	var out bytes.Buffer
 	buf := make([]byte, 64<<10)
@@ -325,7 +444,7 @@ func (u *Updater) get(url string, limit int64, accept string, progress func(floa
 		n, err := resp.Body.Read(buf)
 		out.Write(buf[:n])
 		if int64(out.Len()) > limit {
-			return nil, fmt.Errorf("%s sent more than %d bytes", req.URL.Path, limit)
+			return nil, unread{fmt.Errorf("%s sent more than %d bytes", req.URL.Path, limit)}
 		}
 		if progress != nil && resp.ContentLength > 0 && time.Since(last) >= time.Second {
 			last = time.Now()

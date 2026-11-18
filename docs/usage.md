@@ -545,9 +545,13 @@ computer gets back in and any other gets `unauthorized`.
 
 ### Updating
 
-- The `firmware` update entity shows the latest overdub release on GitHub.
-  **Install** downloads it, checks it, and replaces the binary. The daemon
-  then restarts into the new release, which takes about 7 seconds.
+- The `firmware` update entity shows the newest overdub release on GitHub that
+  this Dot can run. A newer release it cannot run is shown only when nothing
+  it can run is newer, with a line at the top of its release notes saying why
+  and what to do instead. **Install** refuses it, and that line then starts
+  with **Install failed**.
+- **Install** downloads the release, checks it, and replaces the binary. The
+  daemon then restarts into the new release, which takes about 7 seconds.
 - The Dot looks for a release a minute after it starts, then every 6 hours.
   Home Assistant's **Check for updates** looks again, at most once a minute.
 - A Dot on v0.3.0 is offered a Fire OS 6 release, and its notes start with

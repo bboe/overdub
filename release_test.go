@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
+	"encoding/json"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/bboe/overdub/internal/update"
 )
 
 func TestTheReleaseJobSignsWhatTheDaemonChecks(t *testing.T) {
@@ -18,9 +22,9 @@ func TestTheReleaseJobSignsWhatTheDaemonChecks(t *testing.T) {
 		"openssl pkeyutl -sign -rawin -inkey \"$key\" -in SHA256SUMS -out SHA256SUMS.sig",
 		"openssl pkeyutl -verify -rawin -pubin -inkey deploy/release-signing.pub",
 		"-in SHA256SUMS -sigfile SHA256SUMS.sig",
-		"sha256sum \"$dir-fireos6.tar.gz\" \"$dir.tar.gz\" > SHA256SUMS",
+		"sha256sum \"$dir-fireos6.tar.gz\" \"$dir.tar.gz\" release.json > SHA256SUMS",
 		"--generate-notes --notes-file deploy/fireos5-decoy/notes.md",
-		"\"overdub-$GITHUB_REF_NAME-fireos6.tar.gz\" \"overdub-$GITHUB_REF_NAME.tar.gz\" SHA256SUMS SHA256SUMS.sig",
+		"\"overdub-$GITHUB_REF_NAME-fireos6.tar.gz\" \"overdub-$GITHUB_REF_NAME.tar.gz\" release.json SHA256SUMS SHA256SUMS.sig",
 	} {
 		if !strings.Contains(string(workflow), want) {
 			t.Errorf(".github/workflows/ci.yml does not say %q", want)
@@ -66,5 +70,26 @@ func TestTheFireOS5DecoyIsRefusedForItsBootScript(t *testing.T) {
 	named := func(b []byte) []byte { return nameLine.ReplaceAll(b, []byte("NAME=kitchen")) }
 	if bytes.Equal(named(decoy), named(real)) {
 		t.Error("the decoy's boot script is the real one, so v0.3.0 would install the placeholder")
+	}
+}
+
+func TestTheManifestLetsThisBuildsDotsInstallIt(t *testing.T) {
+	body, err := os.ReadFile("deploy/release.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m update.Manifest
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("deploy/release.json: %v", err)
+	}
+	for _, board := range []string{"biscuit", "donut", "radar"} {
+		if why := m.Refuses(board, cmp.Or(m.From, "v0.0.0")); why != "" {
+			t.Errorf("a %s on this build would refuse its own release: %s", board, why)
+		}
+	}
+	if m.Refusal == "" {
+		t.Error("deploy/release.json has no refusal, so a Dot it does not fit is told nothing of its own")
 	}
 }

@@ -79,7 +79,7 @@ const (
 	multiGap = 350 * time.Millisecond
 )
 
-var releasesURL = "https://api.github.com/repos/bboe/overdub/releases/latest"
+var releasesURL = "https://api.github.com/repos/bboe/overdub/releases?per_page=10"
 
 var advertised atomic.Pointer[mdns.Responder]
 
@@ -725,6 +725,7 @@ func useUpdate(server *esphome.Server, name string, restart func()) {
 	u := &update.Updater{
 		Current: version,
 		Name:    name,
+		Board:   deviceBoard,
 		Key:     key,
 		Paths: update.Paths{
 			Binary: binPath, Prev: prevPath, Trial: trialPath, Failed: failedPath, Boot: bootPath,
