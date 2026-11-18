@@ -229,7 +229,8 @@ jobs:
               --mtime="@$(git log -1 --pretty=%ct)" -C "$decoy" -cf - "$dir" |
             gzip -n > "$dir.tar.gz"
 
-          sha256sum "$dir-fireos6.tar.gz" "$dir.tar.gz" > SHA256SUMS
+          cp deploy/release.json release.json
+          sha256sum "$dir-fireos6.tar.gz" "$dir.tar.gz" release.json > SHA256SUMS
           cat SHA256SUMS
 
       # The daemon installs an update only when SHA256SUMS.sig checks against
@@ -292,5 +293,5 @@ jobs:
           # shellcheck disable=SC2086  # deliberately unquoted: empty means absent
           gh release create "$GITHUB_REF_NAME" --draft $prerelease --verify-tag \
             --generate-notes --notes-file deploy/fireos5-decoy/notes.md \
-            "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" "overdub-$GITHUB_REF_NAME.tar.gz" SHA256SUMS SHA256SUMS.sig
+            "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" "overdub-$GITHUB_REF_NAME.tar.gz" release.json SHA256SUMS SHA256SUMS.sig
           gh release edit "$GITHUB_REF_NAME" --draft=false
