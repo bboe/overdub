@@ -407,6 +407,16 @@ func TestEveryWatchedKeyHasAnEntityAndEveryEntityAKey(t *testing.T) {
 	}
 }
 
+func TestTheMuteButtonOffersNoIntercept(t *testing.T) {
+	if slices.Contains(buttons[113].modes, button.ModeIntercept.String()) || buttons[113].modes == nil {
+		t.Errorf("the mute button offers %v; the privacy driver mutes before any grab, so intercept only hides the press from Alexa",
+			buttons[113].modes)
+	}
+	if buttons[138].modes != nil {
+		t.Errorf("the action button offers only %v, want every mode", buttons[138].modes)
+	}
+}
+
 func TestTheBlueprintFiltersToOneButton(t *testing.T) {
 	body, err := os.ReadFile("ha/dot-action-button.yaml")
 	if err != nil {

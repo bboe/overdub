@@ -62,8 +62,7 @@ keep Alexa and add a Home Assistant button and some entities.
 - An Echo (2nd Generation), codename radar, on the same build, runs it as
   biscuit does.
 - An Echo Dot (3rd Generation), codename donut, on the same build, runs it
-  too. Its mute button is the privacy switch: Home Assistant sees its presses,
-  but cannot hold it.
+  too.
 - overdub runs on Fire OS 6 only. A release before the move runs on Fire OS 5
   with Magisk 17.3. `install.py` moves a Dot on Fire OS 5.5.5.4 to Fire OS 6
   over USB with firebreak, and keeps its setup and keys. That needs
