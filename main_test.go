@@ -296,7 +296,7 @@ func TestTheMultiGapIsShorterThanTheHold(t *testing.T) {
 }
 
 func TestTheBlueprintSelectsOnTheGesturesTheDaemonSends(t *testing.T) {
-	body, err := os.ReadFile("ha/dot-action-button.yaml")
+	body, err := os.ReadFile("ha/echo-action-button.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,12 +398,12 @@ func TestEveryWatchedKeyHasAnEntityAndEveryEntityAKey(t *testing.T) {
 }
 
 func TestTheBlueprintFiltersToOneButton(t *testing.T) {
-	body, err := os.ReadFile("ha/dot-action-button.yaml")
+	body, err := os.ReadFile("ha/echo-action-button.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(body), "button: action_button") {
-		t.Error("the blueprint does not filter on a button, so every button on the Dot runs it")
+		t.Error("the blueprint does not filter on a button, so every button on the Echo runs it")
 	}
 	if !strings.Contains(string(body), "trigger.event.data.event_type") {
 		t.Error("the blueprint no longer reads event_type")
