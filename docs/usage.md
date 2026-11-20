@@ -251,7 +251,8 @@ Each entity id is `<domain>.<name>_<suffix>`.
    seen. It replaces the `speaker_playing` binary sensor: move an automation
    on that to this one, and delete the old entity.
 7. Off on a Dot never set up, or deregistered; everything else still works.
-8. `intercept`, `monitor` or `pass through`.
+8. `intercept`, `monitor` or `pass through`. The mute button has no
+   `intercept`.
 9. Listed only while the Dot is registered.
 10. Off withdraws the mDNS advert, closes tcp/8928, deletes its firewall rule
     and ends any session. Survives a reboot.
@@ -347,7 +348,7 @@ It does not resume when she stops; press play again.
 
 ### The button modes
 
-Each button has a mode select with 3 settings:
+Each button has a mode select:
 
 | mode | Alexa | Home Assistant |
 |---|---|---|
@@ -355,8 +356,9 @@ Each button has a mode select with 3 settings:
 | `monitor` | answers the press as usual | events |
 | `pass through` | answers the press as usual | nothing |
 
-- The action button starts in `intercept`. Mute starts in `monitor`, so the
-  mute button still mutes.
+- The action button starts in `intercept`. Mute starts in `monitor`.
+- The mute button has no `intercept`. The microphones go off at the press,
+  before the daemon sees it.
 - `pass through` gives Alexa the button back; the daemon keeps reporting
   everything else.
 - Only an intercepted action button press chimes. In `monitor`, Alexa answers
@@ -618,8 +620,8 @@ adb shell 'iptables -L INPUT -n -v | grep 6053'  # packet counter
   `adb shell 'rm -f /data/local/bin/.overdub-noise-key'`
 - **Nothing starts; the log says `NAME is unset`**: the boot script was
   installed by hand. Rerun `deploy/install.py <name>`.
-- **The mute button offers no intercept**: an Echo Dot (3rd Generation). Its
-  mute is the privacy switch, on a node the daemon reads without holding.
+- **The mute button offers no intercept**: on every model. The press mutes the
+  microphones in hardware, before the daemon sees it.
 - **Every keycode looks wrong**: the build. `GOARCH=arm` is required.
 - **The button does not chime**: the mode first; only `intercept` chimes. Then
   the daemon log: `presses will be silent` means the audio player did not

@@ -482,9 +482,10 @@ var buttons = map[uint16]struct {
 	objectID string
 	start    button.Mode
 	chime    bool
+	modes    []string
 }{
-	actionKey: {"action_button", button.ModeIntercept, true},
-	muteKey:   {"mute_button", button.ModeMonitor, false},
+	actionKey: {"action_button", button.ModeIntercept, true, nil},
+	muteKey:   {"mute_button", button.ModeMonitor, false, muteModes},
 }
 
 func buttonStart() map[uint16]button.Mode {
@@ -555,7 +556,7 @@ func micSetter(i *button.Interceptor) func(muted bool) error {
 	}
 }
 
-var watchedModes = []string{button.ModeMonitor.String(), button.ModePassThrough.String()}
+var muteModes = []string{button.ModeMonitor.String(), button.ModePassThrough.String()}
 
 func chimes(code uint16, mode button.Mode) bool {
 	return mode == button.ModeIntercept && buttons[code].chime
@@ -611,8 +612,8 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 					owner.SetMode(code, m)
 				}
 			})
-		if owner != i {
-			server.OfferModes(b.objectID, watchedModes)
+		if b.modes != nil {
+			server.OfferModes(b.objectID, b.modes)
 		}
 	}
 	server.UseMicMute(micSetter(i))

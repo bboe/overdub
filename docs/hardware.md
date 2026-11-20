@@ -42,9 +42,8 @@ donut, the Echo Dot (3rd Generation), `ro.product.model` `AEODN`:
   passes, because the clone saw its down. A grab of its own node gives the
   same result on biscuit.
 - donut's 113 is on a node of its own, `gpio-privacy`, the hardware privacy
-  switch. The daemon reads it without a grab, so the mute button there offers
-  `monitor` and `pass through` only: nothing can keep a key from a node no one
-  holds.
+  switch. The daemon reads it without a grab. No model offers `intercept` for
+  mute; docs/button.md says why.
 - A read that fails there stops that watch and is logged; the daemon runs on.
   Exiting would make a lasting error a restart loop, and each restart drops
   the action button's grab.

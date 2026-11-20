@@ -140,9 +140,15 @@ that reading almost always wants to change it.
 
 - Each keycode has its own mode and latch, because one key can be held while
   the other is pressed.
-- The action button ships in **intercept**, mute in **monitor**. Intercepting
-  mute by default would leave the mute button unable to mute. The zero value is
-  intercept, because a key nobody configured is one this daemon keeps.
+- The action button ships in **intercept**, mute in **monitor**. The zero value
+  is intercept, because a key nobody configured is one this daemon keeps.
+- The mute button offers `monitor` and `pass through` only, on every model.
+  The privacy driver latches the microphones off at the press, before the key
+  reaches userspace, so a grab cannot keep the mute. On biscuit in
+  `intercept`, a press still lit the button's red light, and `muteState`
+  stayed 8: Alexa drew no ring and played no tone. Intercept only hid the mute
+  from her. radar has biscuit's keypad driver, and donut's mute is the
+  driver's own switch.
 - The three modes are two independent choices: whether Alexa sees the key,
   and whether Home Assistant hears of it. Measured on Fire OS 5 with 138
   injected into `event1`, counted against `uber` in logcat:
