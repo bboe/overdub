@@ -22,7 +22,8 @@ func TestTheReleaseJobSignsWhatTheDaemonChecks(t *testing.T) {
 		"openssl pkeyutl -sign -rawin -inkey \"$key\" -in SHA256SUMS -out SHA256SUMS.sig",
 		"openssl pkeyutl -verify -rawin -pubin -inkey deploy/release-signing.pub",
 		"-in SHA256SUMS -sigfile SHA256SUMS.sig",
-		"sha256sum \"$dir-fireos6.tar.gz\" \"$dir.tar.gz\" release.json > SHA256SUMS",
+		"- run: deploy/package.sh \"$GITHUB_REF_NAME\"",
+		"- run: deploy/package.sh v0.0.0-ci",
 		"--generate-notes --notes-file deploy/fireos5-decoy/notes.md",
 		"\"overdub-$GITHUB_REF_NAME-fireos6.tar.gz\" \"overdub-$GITHUB_REF_NAME.tar.gz\" release.json SHA256SUMS SHA256SUMS.sig",
 	} {
@@ -30,10 +31,17 @@ func TestTheReleaseJobSignsWhatTheDaemonChecks(t *testing.T) {
 			t.Errorf(".github/workflows/ci.yml does not say %q", want)
 		}
 	}
+	script, err := os.ReadFile("deploy/package.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `sha256sum "$dir-fireos6.tar.gz" "$dir.tar.gz" release.json > SHA256SUMS`; !strings.Contains(string(script), want) {
+		t.Errorf("deploy/package.sh does not say %q", want)
+	}
 }
 
 func TestTheFireOS5DecoyIsRefusedForItsBootScript(t *testing.T) {
-	workflow, err := os.ReadFile(".github/workflows/ci.yml")
+	script, err := os.ReadFile("deploy/package.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +52,8 @@ func TestTheFireOS5DecoyIsRefusedForItsBootScript(t *testing.T) {
 		`cp deploy/fireos5-decoy/placeholder "$decoy/$dir/deploy/mapdump/mapdump.jar"`,
 		`gzip -n > "$dir.tar.gz"`,
 	} {
-		if !strings.Contains(string(workflow), want) {
-			t.Errorf(".github/workflows/ci.yml does not say %q", want)
+		if !strings.Contains(string(script), want) {
+			t.Errorf("deploy/package.sh does not say %q", want)
 		}
 	}
 	read := func(path string) []byte {

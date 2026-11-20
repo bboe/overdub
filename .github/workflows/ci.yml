@@ -50,6 +50,9 @@ jobs:
       # it. The runner image already carries one; this only says where.
       - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - run: ./build.sh
+      # The release job packages with the same script, so a packaging mistake
+      # fails here, before any tag is pushed.
+      - run: deploy/package.sh v0.0.0-ci
 
       # The shell is half of this repository, so it is linted like the Go.
       - run: sudo apt-get install -y shellcheck
@@ -191,47 +194,7 @@ jobs:
       - run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - run: OVERDUB_VERSION="$GITHUB_REF_NAME" ./build.sh
 
-      # The tarball is the whole install: the scripts, the binary and the
-      # documentation that explains them. Somebody unpacking it needs adb,
-      # Python 3.9 or later and a rooted Dot, and no Go or NDK at all. Rooting
-      # a Dot is firebreak's, so no rooting script is in it.
-      #
-      # THIRD-PARTY.txt travels with it because clause 2 of the BSD licences
-      # compiled into the binary asks that it does.
-      - name: Assemble the tarball
-        run: |
-          # A run: step is bash -e without pipefail, so tar's failure in the
-          # pipeline below would be reported as gzip's success, and a truncated
-          # archive would be hashed, attested and published.
-          set -o pipefail
-          dir="overdub-$GITHUB_REF_NAME"
-          mkdir -p "$dir/build" "$dir/deploy"
-          cp README.md LICENSE.txt THIRD-PARTY.txt "$dir/"
-          cp -r docs "$dir/docs"
-          cp deploy/install.py deploy/uninstall.py deploy/overdub.sh deploy/overdub.rc "$dir/deploy/"
-          cp build/overdub "$dir/build/overdub"
-          # Same inputs, same tarball: the mtimes, ordering and owner a tar
-          # otherwise picks up from the runner are pinned, and gzip -n keeps
-          # the name and timestamp out of the header.
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --mtime="@$(git log -1 --pretty=%ct)" -cf - "$dir" |
-            gzip -n > "$dir-fireos6.tar.gz"
-
-          # The Fire OS 5 decoy, under the only name v0.3.0's updater installs.
-          # docs/deployment.md says what it holds and when it goes.
-          decoy=$(mktemp -d)
-          mkdir -p "$decoy/$dir/build" "$decoy/$dir/deploy/mapdump"
-          cp deploy/fireos5-decoy/README.md "$decoy/$dir/README.md"
-          cp deploy/fireos5-decoy/overdub.sh "$decoy/$dir/deploy/overdub.sh"
-          cp deploy/fireos5-decoy/placeholder "$decoy/$dir/build/overdub"
-          cp deploy/fireos5-decoy/placeholder "$decoy/$dir/deploy/mapdump/mapdump.jar"
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --mtime="@$(git log -1 --pretty=%ct)" -C "$decoy" -cf - "$dir" |
-            gzip -n > "$dir.tar.gz"
-
-          cp deploy/release.json release.json
-          sha256sum "$dir-fireos6.tar.gz" "$dir.tar.gz" release.json > SHA256SUMS
-          cat SHA256SUMS
+      - run: deploy/package.sh "$GITHUB_REF_NAME"
 
       # The daemon installs an update only when SHA256SUMS.sig checks against
       # deploy/release-signing.pub, which the binary embeds. SHA256SUMS comes
@@ -249,28 +212,6 @@ jobs:
           openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS -out SHA256SUMS.sig
           openssl pkeyutl -verify -rawin -pubin -inkey deploy/release-signing.pub \
             -in SHA256SUMS -sigfile SHA256SUMS.sig
-
-      # A missing notice is invisible to everything else here: the tarball
-      # unpacks, installs and runs without either file.
-      - name: The notices travel with the binary
-        run: |
-          tar tzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" |
-            grep -qFx "overdub-$GITHUB_REF_NAME/LICENSE.txt"
-          tar tzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz" |
-            grep -qFx "overdub-$GITHUB_REF_NAME/THIRD-PARTY.txt"
-
-      # So is a missing or non-executable script: nothing above runs the
-      # tarball's copies.
-      - name: The scripts travel with the binary, executable
-        run: |
-          listing=$(tar tvzf "overdub-$GITHUB_REF_NAME-fireos6.tar.gz")
-          for f in install.py uninstall.py overdub.sh; do
-            awk -v p="overdub-$GITHUB_REF_NAME/deploy/$f" \
-              '$1 == "-rwxr-xr-x" && $NF == p { ok = 1 } END { exit !ok }' <<<"$listing" ||
-              { echo "not in the tarball, or not executable: deploy/$f"; exit 1; }
-          done
-          grep -qE " overdub-$GITHUB_REF_NAME/deploy/overdub\.rc$" <<<"$listing" ||
-            { echo "not in the tarball: deploy/overdub.rc"; exit 1; }
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:

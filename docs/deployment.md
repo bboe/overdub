@@ -194,7 +194,7 @@
   earlier, at "the tarball has no ...mapdump.jar", which says nothing useful.
 - With no decoy, v0.3.0 offers nothing. It logs that the release lacks its
   tarball and checks again every 30 minutes, and the user is never told.
-- v1.0.0 removes the decoy, with its test and its lines in the release job.
+- v1.0.0 removes the decoy, with its test and its lines in `deploy/package.sh`.
   Releases from v1.0.0 on carry none.
 - The release's boot script, with this Dot's name put in as `install.py` does
   it, must equal the installed one byte for byte. An update does not replace
@@ -460,8 +460,20 @@ before it writes.
 - `THIRD-PARTY.txt` is in the tarball because the licences compiled into the
   binary ask for it there. Source distribution does not need it.
 - The tarball carries no rooting script: rooting is firebreak's. Nothing
-  before the release runs the tarball's copies, so CI lists the tarball and
-  checks that each of its 3 scripts is there and executable.
+  runs the tarball's copies, so `deploy/package.sh` lists the tarball and
+  checks that each of its 3 scripts is there and executable, and that the
+  binary, the `.rc` file and both licence files are there.
+- `deploy/package.sh` builds the tarballs, `release.json`'s copy and
+  `SHA256SUMS`. The release job runs it with the tag, and the build job runs it
+  on every pull request with `v0.0.0-ci`. So a packaging mistake fails the pull
+  request, not the release. Only signing, the attestation and publishing are
+  left to the tag.
+- It runs with `pipefail`. Without it, tar's failure inside the pipe to gzip
+  reads as gzip's success, and a cut-off tarball is hashed, attested and
+  published.
+- The same binary and tree give the same tarball. tar pins the names' order,
+  the owner and every mtime to the commit's, and `gzip -n` leaves the name and
+  time out of the header.
 - The two triggers do not overlap. A push to a fork raises no event here, so
   `pull_request` tests a contributor's work. `pull_request` never fires for a
   tag, so `push` (main and `v*` tags) cuts a release and tests the merge onto
