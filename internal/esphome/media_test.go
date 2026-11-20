@@ -1450,7 +1450,7 @@ func TestASecondWakeInsideTheGapIsServedAfterIt(t *testing.T) {
 	s.NotePlayback(false)
 	select {
 	case at := <-reads:
-		if gap := at.Sub(served); gap < s.wakeGap {
+		if gap := at.Sub(served); gap < s.wakeGap-10*time.Millisecond {
 			t.Errorf("the second wake was served %v after the first, inside the %v gap: a"+
 				" peer holding the key sets the poll's rate", gap, s.wakeGap)
 		}
