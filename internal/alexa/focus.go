@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,11 @@ const (
 	deepDuckPercent = 10
 	fullPercent     = 100
 	holdFor         = 15 * time.Minute
+	dialogHoldFor   = time.Minute
 
 	acquireMark = "FocusManager:acquireChannel:channelName="
 	releaseMark = "FocusManager:releaseChannel:channelName="
+	speechMark  = "SpeechSynthesizerState="
 	tagMark     = " PuffinApp: "
 
 	musicChannel = "Content"
@@ -106,6 +109,11 @@ func (w *FocusWatcher) line(line string) {
 		if executor, ok := executorOf(line[:i]); ok {
 			w.release(strings.TrimSpace(channel), executor)
 		}
+		return
+	}
+	if i := strings.Index(line, speechMark); i >= 0 {
+		state, _, _ := strings.Cut(line[i+len(speechMark):], ",")
+		w.speaking(strings.TrimSpace(state) == "PLAYING")
 	}
 }
 
@@ -145,6 +153,10 @@ func executorOf(prefix string) (string, bool) {
 func (w *FocusWatcher) acquire(channel, executor, iface string) {
 	var until time.Time
 	switch {
+	case channel == "Dialog" && iface == speech:
+		until = w.clock().Add(holdFor)
+	case channel == "Dialog":
+		until = w.clock().Add(dialogHoldFor)
 	case percentFor(channel) < fullPercent:
 		until = w.clock().Add(holdFor)
 	case channel != musicChannel:
@@ -155,6 +167,19 @@ func (w *FocusWatcher) acquire(channel, executor, iface string) {
 			w.holders = map[string]focusHolder{}
 		}
 		w.holders[channel] = focusHolder{executor: executor, iface: iface, until: until}
+	})
+}
+
+func (w *FocusWatcher) speaking(playing bool) {
+	until := w.clock().Add(dialogHoldFor)
+	if playing {
+		until = w.clock().Add(holdFor)
+	}
+	w.change(func() {
+		if h, ok := w.holders["Dialog"]; ok {
+			h.until = until
+			w.holders["Dialog"] = h
+		}
 	})
 }
 
@@ -181,19 +206,20 @@ func (w *FocusWatcher) expire() {
 			" released", pid, held)
 		return
 	}
-	dropped := 0
+	var dropped []string
 	w.change(func() {
 		now := w.clock()
 		for channel, h := range w.holders {
 			if !h.until.IsZero() && now.After(h.until) {
 				delete(w.holders, channel)
-				dropped++
+				dropped = append(dropped, channel)
 			}
 		}
 	})
-	if dropped > 0 {
-		log.Printf("focus watcher: %d channels were never released, so their hold"+
-			" was dropped after %v", dropped, holdFor)
+	if len(dropped) > 0 {
+		slices.Sort(dropped)
+		log.Printf("focus watcher: hold ran out before a release: %s",
+			strings.Join(dropped, ", "))
 	}
 }
 

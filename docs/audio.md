@@ -496,8 +496,30 @@ I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
 - At full gain the samples are not touched, so an unducked stream is
   bit-identical to before.
 - A stream opened while a holder is held starts at the ducked level.
-- It fails toward full level: each holder expires 15 minutes after it took the
-  channel, and when logcat exits the set is cleared before the retry.
+- It fails toward full level: each holder expires after a while, and when
+  logcat exits the set is cleared before the retry.
+- `Alert` and `Communications` expire 15 minutes after they were taken.
+  `Dialog` expires by what PuffinApp last logged for it:
+
+  | last line | expires after |
+  |---|---|
+  | her reply takes the channel | 15 minutes |
+  | `SpeechSynthesizerState=PLAYING` | 15 minutes |
+  | any other `SpeechSynthesizerState` | 1 minute |
+  | her listening takes the channel | 1 minute |
+
+- So the minute starts only once a line says she has stopped speaking. A
+  missed release of her reply would otherwise hold the music at a fifth for 15
+  minutes. The minute is a choice, not a measurement.
+- A speech state line renews `Dialog` whoever holds it, and nothing else.
+- A segment that plays longer than 15 minutes with no line loses its duck at
+  the expiry. A reply that logs no state line keeps its duck for up to 15
+  minutes.
+- A story is many segments. On a radar, one ran at least 95 seconds as at
+  least 29 segments, each logging `GAINING_FOCUS`, `PLAYING` and `FINISHED`.
+  Each one started within 20 ms of the last one finishing. She took the
+  channel once, at the start.
+- A state line with no `Dialog` held takes nothing.
 - Each start of logcat begins at that moment, with `-T` and the epoch time.
   `-T 1` replays the newest buffered line, and a channel taken in it may have
   been released while logcat was down. It prints a `beginning of main` divider
@@ -508,8 +530,8 @@ I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
   available until she next takes the channel. That fails toward two streams
   playing, as Fire OS 5 always did.
 - A channel that neither ducks nor is her music is not held.
-- A call longer than 15 minutes loses its duck at the expiry. Nothing in
-  PuffinApp's log refreshes a held channel.
+- A call or an alarm longer than 15 minutes loses its duck at the expiry.
+  Nothing in PuffinApp's log refreshes a call or an alarm.
 - A follower that cannot start says so once. A tail that ran for a while and
   then failed is a new fault and is logged again.
 - PuffinApp logs about a line a second, and logd prunes its lines out of the

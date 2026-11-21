@@ -75,6 +75,7 @@ const (
 	musicTake    = "11-14 19:04:06.783  1003  2114 I PuffinApp: [e:62] FocusManager:acquireChannel:channelName=Content,interface=AudioPlayer"
 	musicGive    = "11-14 19:04:06.783  1003  2114 I PuffinApp: [e:62] FocusManager:releaseChannel:channelName=Content"
 	replyPlaying = "11-14 19:04:06.783  1003  2114 I PuffinApp: [e:60] TTSObserverAdapter:onStateChanged::onStateChanged:SpeechSynthesizerState=PLAYING,mediaSourceId=0"
+	replyDone    = "11-14 19:04:06.783  1003  2114 I PuffinApp: [e:60] TTSObserverAdapter:onStateChanged::onStateChanged:SpeechSynthesizerState=FINISHED,mediaSourceId=0"
 )
 
 func lines(ls ...string) *strings.Reader {
@@ -246,14 +247,20 @@ func TestAHoldNobodyReleasesExpires(t *testing.T) {
 	now := time.Now()
 	w.now = func() time.Time { return now }
 
-	w.read(lines(replyTake))
-	now = now.Add(holdFor - time.Minute)
+	w.read(lines(listenTake))
+	now = now.Add(dialogHoldFor / 2)
 	w.read(lines(alertTake))
 
-	now = now.Add(2 * time.Minute)
+	now = now.Add(dialogHoldFor)
 	w.expire()
+	w.mu.Lock()
+	_, listening := w.holders["Dialog"]
+	w.mu.Unlock()
+	if listening {
+		t.Fatalf("Dialog still held %v after she started listening, want it expired", dialogHoldFor*3/2)
+	}
 	if got := l.heard(); !slices.Equal(got, []int{duckPercent, deepDuckPercent}) {
-		t.Fatalf("heard levels %v after the reply's hold expired, want [%d %d]: the alert"+
+		t.Fatalf("heard levels %v after the listen's hold expired, want [%d %d]: the alert"+
 			" was taken later and has not", got, duckPercent, deepDuckPercent)
 	}
 
@@ -267,6 +274,127 @@ func TestAHoldNobodyReleasesExpires(t *testing.T) {
 	w.expire()
 	if got := l.heard(); len(got) != 3 {
 		t.Errorf("heard levels %v; a sweep with nothing to expire sent a level", got)
+	}
+}
+
+func TestAMissedReplyReleaseUnducksWithinAMinute(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(replyTake, replyPlaying, replyDone))
+	now = now.Add(time.Minute - time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Fatalf("heard levels %v %v after she finished, want [%d]: another segment may follow",
+			got, time.Minute-time.Second, duckPercent)
+	}
+	now = now.Add(2 * time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent, fullPercent}) {
+		t.Errorf("heard levels %v %v after a reply whose release was missed, want [%d %d]:"+
+			" the music stays at a fifth for the alerts' %v", got, time.Minute+time.Second,
+			duckPercent, fullPercent, holdFor)
+	}
+}
+
+func TestAConversationRenewsTheHold(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(replyTake))
+	now = now.Add(dialogHoldFor * 5 / 6)
+	w.read(lines(listenTake))
+	now = now.Add(dialogHoldFor * 5 / 6)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Errorf("heard levels %v %v after she listened again, want [%d]:"+
+			" taking the channel again must renew the hold", got, dialogHoldFor*5/6, duckPercent)
+	}
+}
+
+func TestAReplyStaysDuckedWhileSheSpeaks(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(replyTake, replyPlaying))
+	now = now.Add(5 * time.Minute)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Fatalf("heard levels %v 5 minutes into one segment of a story, want [%d]", got, duckPercent)
+	}
+	w.read(lines(replyDone))
+	now = now.Add(time.Minute - time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Fatalf("heard levels %v %v after a segment finished, want [%d]: the next may follow",
+			got, time.Minute-time.Second, duckPercent)
+	}
+	now = now.Add(2 * time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent, fullPercent}) {
+		t.Errorf("heard levels %v %v after she stopped speaking with no release, want [%d %d]",
+			got, time.Minute+time.Second, duckPercent, fullPercent)
+	}
+}
+
+func TestSpeechThatNeverFinishesExpiresWithTheAlerts(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(replyTake, replyPlaying))
+	now = now.Add(holdFor - time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Fatalf("heard levels %v %v into her speech, want [%d]", got, holdFor-time.Second, duckPercent)
+	}
+	now = now.Add(2 * time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent, fullPercent}) {
+		t.Errorf("heard levels %v %v after a PLAYING with no FINISHED, want [%d %d]",
+			got, holdFor+time.Second, duckPercent, fullPercent)
+	}
+}
+
+func TestAReplyWithNoSpeechStatesKeepsTheLongHold(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(replyTake))
+	now = now.Add(holdFor - time.Second)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{duckPercent}) {
+		t.Errorf("heard levels %v %v into a reply that logged no speech state, want [%d]:"+
+			" nothing says she has stopped", got, holdFor-time.Second, duckPercent)
+	}
+}
+
+func TestSpeechRenewsOnlyDialog(t *testing.T) {
+	w, l := focusWatcher()
+	now := time.Now()
+	w.now = func() time.Time { return now }
+
+	w.read(lines(alertTake, replyTake))
+	now = now.Add(holdFor - time.Minute)
+	w.read(lines(replyPlaying))
+	now = now.Add(2 * time.Minute)
+	w.expire()
+	if got := l.heard(); !slices.Equal(got, []int{deepDuckPercent, duckPercent}) {
+		t.Errorf("heard levels %v %v after the alarm was taken, want [%d %d]: her speech"+
+			" must not renew the alarm", got, holdFor+time.Minute, deepDuckPercent, duckPercent)
+	}
+}
+
+func TestSpeechWithNoChannelHeldTakesNothing(t *testing.T) {
+	w, l := focusWatcher()
+
+	w.read(lines(replyPlaying, replyDone))
+	if got := l.heard(); len(got) != 0 {
+		t.Errorf("heard levels %v from speech states with no channel held, want none", got)
 	}
 }
 
