@@ -234,6 +234,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | number | `sendspin_output_delay` | config | 0 to 5,000 ms (11) |
 | select | `voice_mode` | config | starts `pass through` (13) |
 | update | `firmware` | config | the latest release (12) |
+| button | `restart` | config | restarts the Dot (14) |
 
 1. See [The action button](#the-action-button).
 2. Volume and mute, and playback of any URL Home Assistant can transcode.
@@ -265,6 +266,12 @@ Each entity id is `<domain>.<name>_<suffix>`.
     answer. A part over 255 bytes arrives in pieces. `pass through` empties it.
     Amazon does not send what you asked, so only the answer is there. The mode
     survives a reboot.
+14. It restarts the whole Dot, Alexa and adb included, not only overdub.
+    overdub gives Alexa back her endpoint and lets go of the buttons, then
+    asks init to reboot. The Dot is back on the network in about a minute. If
+    the Dot is still up 30 seconds later, overdub logs it and restarts
+    overdub. It is the way back when adb stops answering; docs/device.md has
+    why.
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.

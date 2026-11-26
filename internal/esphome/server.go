@@ -80,6 +80,8 @@ const (
 	msgListSelect        = 52
 	msgSelectState       = 53
 	msgSelectCommand     = 54
+	msgListButton        = 61
+	msgButtonCommand     = 62
 	msgListMediaPlayer   = 63
 	msgMediaPlayerState  = 64
 	msgMediaPlayerCmd    = 65
@@ -168,6 +170,7 @@ type Server struct {
 	keyText     uint32
 	keyCommand  uint32
 	keyUpdate   uint32
+	keyRestart  uint32
 	keyVoice    uint32
 	keyReply    uint32
 
@@ -227,6 +230,7 @@ type Server struct {
 	sendspinToken    string
 
 	updateCheck   func()
+	restart       func()
 	updateInstall func()
 
 	voiceModes []string
@@ -296,6 +300,7 @@ func NewServer(name, model, version, mac string, psk []byte) *Server {
 		keyText:      entityKey("alexa_command"),
 		keyCommand:   entityKey("send_command"),
 		keyUpdate:    entityKey("firmware"),
+		keyRestart:   entityKey("restart"),
 		keyVoice:     entityKey("voice_mode"),
 		keyReply:     entityKey("alexa_reply"),
 		buttons:      newButtons(),
@@ -400,6 +405,10 @@ func (s *Server) NoteReply() {
 	s.replyMu.Lock()
 	defer s.replyMu.Unlock()
 	s.publish("reply", []reading{{key: s.keyReply, text: s.reply(), ok: true, kind: kindTextSensor}})
+}
+
+func (s *Server) UseRestart(restart func()) {
+	s.restart = restart
 }
 
 func (s *Server) UseUpdate(check, install func()) {
@@ -805,6 +814,21 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 			s.updateInstall()
 		case updateCommandCheck:
 			s.updateCheck()
+		}
+		return nil
+
+	case msgButtonCommand:
+		var key uint32
+		if err := walk("ButtonCommandRequest", payload, func(f pbField) {
+			if f.field == 1 {
+				key = uint32(f.num)
+			}
+		}); err != nil {
+			return err
+		}
+		if key == s.keyRestart && s.restart != nil {
+			conn.noted = fmt.Sprintf("esphome api: %s asked to restart the Dot", conn.sock.RemoteAddr())
+			go s.restart()
 		}
 		return nil
 

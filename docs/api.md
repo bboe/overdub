@@ -631,6 +631,16 @@ Chosen by what the reading costs and whether anybody would look for it sooner.
 - docs/sendspin.md, "Set from Home Assistant", has the rest: the two
   writers, the flash window and the worker the number shares with the switch.
 
+## The restart button
+
+- `ListEntitiesButtonResponse` (61) and `ButtonCommandRequest` (62). A button
+  has no state, so nothing else is sent.
+- Its name, `device_class` and category match ESPHome's own restart button:
+  `restart`, `restart` and config. A press restarts the whole Dot;
+  docs/device.md has what it does.
+- The press runs on a goroutine of its own, so the handler returns at once and
+  holds no lock while the daemon shuts down.
+
 ## The update entity
 
 - `ListEntitiesUpdateResponse` (116), `UpdateStateResponse` (117) and

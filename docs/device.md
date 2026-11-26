@@ -101,6 +101,34 @@ on without a cable.
   are read back first: the property, the key byte for byte, the mode and the
   label.
 
+## Restarting the Dot from Home Assistant
+
+- The `restart` button restarts the whole Dot. It is named as ESPHome names
+  its own. "Restart overdub" means the daemon alone.
+- It runs the daemon's clean shutdown, then sets `sys.powerctl` to `reboot`.
+  That is the request `adb reboot` makes, and init takes it from the daemon's
+  `adbd` label.
+- `setprop` cannot say whether init refused. On this Android, the property
+  call returns once the request is written, and a refusal shows only in dmesg.
+- So after asking, the daemon waits 30 seconds and does not exit. An exit would
+  let the boot script start a new daemon 5 seconds later, and that daemon would
+  take Alexa's endpoint again before the reboot. A Dot still up after 30
+  seconds was refused: the daemon logs it and exits, and the boot script
+  restarts it.
+- A second press while the first is under way does nothing.
+- On biscuit, the endpoint was back with Alexa 3.4 seconds after the press,
+  init rebooted the Dot 14 to 16 seconds after it, and adb answered about a
+  minute after it. No daemon started in between.
+- init sends the daemon SIGTERM while it reboots, so the shutdown runs a second
+  time and logs the endpoint handed back twice. Handing it back again changes
+  nothing.
+- The boot script truncates the log at boot, so the press and the shutdown are
+  not in the log afterwards. Read it from another host while pressing to see
+  them.
+- It is the way back when adb stops answering. Six Dots up about 6 days each
+  closed every adb connection before asking for a key, while the API served
+  Home Assistant. A reboot cleared each one. The cause is not known.
+
 ## A setting that survives a reboot
 
 - `Flag`/`SetFlag` and `Number`/`SetNumber` keep a value in

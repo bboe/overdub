@@ -159,6 +159,8 @@ func TestTheEntityNumbersAreESPHomeS(t *testing.T) {
 		{"SwitchStateResponse", msgSwitchState, 26},
 		{"SwitchCommandRequest", msgSwitchCommand, 33},
 		{"SubscribeStatesRequest", msgSubscribeStates, 20},
+		{"ListEntitiesButtonResponse", msgListButton, 61},
+		{"ButtonCommandRequest", msgButtonCommand, 62},
 		{"ListEntitiesUpdateResponse", msgListUpdate, 116},
 		{"UpdateStateResponse", msgUpdateState, 117},
 		{"UpdateCommandRequest", msgUpdateCommand, 118},

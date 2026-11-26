@@ -359,6 +359,19 @@ func (s *Server) listEntities(conn *conn) error {
 		return err
 	}
 
+	if s.restart != nil {
+		var restart pb
+		restart.str(1, "restart")
+		restart.fixed32(2, s.keyRestart)
+		restart.str(3, "Restart")
+		restart.boolean(6, false) // disabled_by_default
+		restart.u32(7, entityCategoryConfig)
+		restart.str(8, "restart") // device_class
+		if err := s.send(conn, msgListButton, restart.b); err != nil {
+			return err
+		}
+	}
+
 	if s.updateCheck != nil {
 		var update pb
 		update.str(1, "firmware")

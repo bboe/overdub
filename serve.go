@@ -53,6 +53,8 @@ const (
 	updateRetry = 30 * time.Minute
 	updateWait  = 5 * time.Minute
 
+	rebootWait = 30 * time.Second
+
 	sendspinBuffer          = 500
 	sendspinBluetoothBuffer = 900
 	sendspinLead            = 350
@@ -649,6 +651,22 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 		stopping()
 		i.Close()
 		os.Exit(0)
+	})
+
+	var rebooting sync.Once
+	server.UseRestart(func() {
+		rebooting.Do(func() {
+			stopping()
+			i.Close()
+			if err := device.Reboot(); err != nil {
+				log.Printf("reboot: %v; exiting so the boot script restarts the daemon", err)
+				os.Exit(1)
+			}
+			log.Printf("reboot: asked init to reboot")
+			time.Sleep(rebootWait)
+			log.Printf("reboot: still up %v after asking; exiting so the boot script restarts the daemon", rebootWait)
+			os.Exit(1)
+		})
 	})
 
 	api.Store(server)

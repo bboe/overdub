@@ -81,7 +81,8 @@ pages imported below apply to everything. Read the page for a subsystem
 - `docs/api.md`: the volume keys and the grab the mute holds them with; any
   entity; the polls, the deadlines, the key
 - `docs/mdns.md`: the mDNS responder, or what a service advertises
-- `docs/device.md`: network adb, the microphone mute, a persisted setting
+- `docs/device.md`: network adb, restarting the Dot, the microphone mute, a
+  persisted setting
 - `docs/audio.md`: making a sound, or playing one
 - `docs/deployment.md`: `install.py`, `uninstall.py`, the boot script
 - rooting: firebreak's
