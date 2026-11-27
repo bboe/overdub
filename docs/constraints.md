@@ -26,6 +26,9 @@
 - `chime_android.go` builds only for `android` with cgo. Elsewhere
   `chime_other.go` stands in, so `go vet` and the tests run for linux/arm.
   docs/audio.md says what that stub costs.
+- `internal/opus` decodes Alexa's uploads the same way, loading the device's
+  `libopus.so` with `dlopen`, so no Opus library enters the tree. Its stub is
+  `decode_other.go`. docs/voice.md has the format.
 
 ## Flags and settings
 
@@ -104,8 +107,8 @@
   its licence is not reproduced: the LLVM exception waives sections 4(a), 4(b)
   and 4(d) for code embedded by compiling it.
 - Bionic's libc is not in the binary. `libc.so`, `libdl.so` and `liblog.so`
-  are `NEEDED` entries the device resolves. `libmixerAPI.so` is loaded at run
-  time and is the device's own.
+  are `NEEDED` entries the device resolves. `libmixerAPI.so` and
+  `libopus.so` are loaded at run time and are the device's own.
 
 ## Alexa's session
 

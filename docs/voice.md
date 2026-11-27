@@ -148,6 +148,55 @@ reboot that changed how the house hears you would be a silent change.
 - It does not change anything in the session.
 - It asks Home Assistant nothing, and holds no Home Assistant credential.
 
+## The audio Alexa uploads
+
+Measured on biscuit, Fire OS 6 8349, from turns that Home Assistant's text to
+speech spoke to the Echo through another Echo's speaker.
+
+- A turn is a `SpeechRecognizer.Recognize` event: a `metadata` JSON part, a
+  `wakewordEngineMetadata` part on a wake-word or follow-up turn, then an
+  `audio` part, streamed as the user speaks.
+- The audio is Opus: fixed 80-byte packets, each one SILK wideband, 16 kHz
+  mono, 20 ms (TOC configuration 9), padded to a constant 32 kbit/s. A packet
+  decodes on its own, with no container around it.
+- `internal/opus` splits the stream into packets, carrying a part packet into
+  the next chunk. The 80 bytes never change, so no length prefix is read.
+- The device decodes them. `/system/lib/libopus.so` is libopus 1.5.2 and
+  exports `opus_decoder_create`, `opus_decode` and `opus_decoder_destroy`. It is
+  the same file on biscuit, radar and donut, with md5
+  `2f7b3859e3d6834cd02f646f756f862b`.
+- A wake-word turn starts 0.5 seconds before the wake word.
+  `initiator.payload.wakeWordIndices` gives the word's start and end in samples:
+  8000 and about 17,100 to 18,100. Samples before `endIndexInSamples` are the
+  pre-roll and the word. A tap (`TAP`) and a follow-up
+  (`NATURAL_ATTENTION_SPAN`) carry no indices, and start where the user does.
+- `wakewordEngineMetadata` is the wake-word engine's telemetry and an acoustic
+  fingerprint (`KWFP`), not audio.
+- Each wake also sends `Alexa.AudioFrontEndController.OneMicAudio`, about 1.4
+  seconds of single-microphone Opus around the wake word, as an event of its
+  own.
+
+The decoder runs only on the device, so its test does too. CI runs the rest of
+the package. From a tree that `build.sh` has built:
+
+```sh
+CC=$(ls "${ANDROID_NDK_HOME:-/opt/homebrew/share/android-ndk}"/toolchains/llvm/prebuilt/*/bin/armv7a-linux-androideabi22-clang) \
+  CGO_ENABLED=1 CGO_LDFLAGS="-L$PWD/build/stublibs" GOOS=android GOARCH=arm GOARM=7 \
+  go test -c -o build/opus.test ./internal/opus/
+adb shell mkdir -p /data/local/tmp/opus-test/testdata
+adb push build/opus.test /data/local/tmp/opus-test/
+adb push internal/opus/testdata/turn.opus /data/local/tmp/opus-test/testdata/
+adb shell 'cd /data/local/tmp/opus-test && ./opus.test -test.v'
+adb shell rm -r /data/local/tmp/opus-test
+```
+
+`adb shell` exits 0 even when a test fails. Read the result in the `-test.v`
+output: `PASS` on the last line.
+
+`testdata/turn.opus` is one captured turn, "Alexa, what time is it?" in Home
+Assistant's voice. The test checks its loudness every 100 ms against what
+macOS's libopus decodes from the same packets.
+
 ## Open
 
 - Amazon can move a device to another endpoint with a directive. PuffinApp would

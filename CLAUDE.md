@@ -60,8 +60,9 @@ SENDSPIN_INTEROP=1 go test -count=1 -run Interop ./internal/sendspin/
 - Four things stay, because the code cannot recover them:
   - one doc block per package: `// Package button ...`,
     `// Command overdub ...`
-  - Go and cgo directives: `//go:build`, and `chime_android.go`'s `#cgo` and
-    `#include` preamble. They are compiler input, and deleting one is silent.
+  - Go and cgo directives: `//go:build`, and the `#cgo` and `#include`
+    preambles in `chime_android.go` and `decode_android.go`. They are compiler
+    input, and deleting one is silent.
   - a label on a bare number: a protobuf field name
     (`msg.str(13, s.name) // friendly_name`), an ioctl derivation
     (`// _IOW('E', 0x90, int)`), the `uinput_user_dev` layout, a byte in a
@@ -93,8 +94,8 @@ pages imported below apply to everything. Read the page for a subsystem
 - `docs/sendspin.md`: the Sendspin client, its WebSocket, its handshake
 - `docs/usage.md`: what a user runs and sees -- the installer's output, the
   entities, uninstalling, troubleshooting
-- `docs/voice.md`: Alexa's session, what routing it through this daemon changes,
-  and what has to be undone
+- `docs/voice.md`: Alexa's session, the audio she uploads, what routing it
+  through this daemon changes, and what has to be undone
 
 @docs/constraints.md
 @docs/pitfalls.md
