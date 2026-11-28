@@ -20,21 +20,28 @@ const (
 	voiceAddr = "127.0.0.1:8443"
 	voiceURL  = "https://" + voiceAddr
 
-	voiceModeFlag = "voice_mode"
-	voiceMonitor  = "monitor"
-	voicePass     = "pass through"
+	voiceModeFlag  = "voice_mode"
+	voiceIntercept = "intercept"
+	voiceMonitor   = "monitor"
+	voicePass      = "pass through"
 )
 
-var voiceModes = []string{voiceMonitor, voicePass}
+var voiceModes = []string{voiceIntercept, voiceMonitor, voicePass}
 
 type voiceMode struct {
 	keep sync.Mutex
 
-	mu    sync.Mutex
-	mode  string
-	reply string
-	relay *avs.Relay
-	note  func()
+	cutMu   sync.Mutex
+	up      bool
+	cutting bool
+	stopCut chan struct{}
+
+	mu     sync.Mutex
+	mode   string
+	reply  string
+	relay  *avs.Relay
+	note   func()
+	answer avs.Answerer
 }
 
 func keptVoiceMode() *voiceMode {
@@ -71,10 +78,54 @@ func (v *voiceMode) Set(choice string) {
 	}
 	if v.relay != nil {
 		v.relay.Watch(choice == voiceMonitor)
+		v.relay.Intercept(choice == voiceIntercept)
 	}
 	v.mu.Unlock()
 	log.Printf("voice: mode %s", choice)
 	go v.keepMode()
+	go v.cutHybrid()
+}
+
+func (v *voiceMode) cutHybrid() {
+	v.cutMu.Lock()
+	defer v.cutMu.Unlock()
+	if v.up {
+		v.cutLocked()
+	}
+}
+
+func (v *voiceMode) relayUp() {
+	v.cutMu.Lock()
+	defer v.cutMu.Unlock()
+	v.up = true
+	if err := device.RestoreHybrid(); err != nil {
+		log.Printf("voice: %v", err)
+	}
+	v.cutLocked()
+}
+
+func (v *voiceMode) cutLocked() {
+	on := v.Mode() == voiceIntercept
+	if on == v.cutting {
+		return
+	}
+	v.cutting = on
+	if on {
+		if err := device.CutHybrid(); err != nil {
+			log.Printf("voice: %v; Amazon's hybrid engine can still send it what you say", err)
+		} else {
+			log.Printf("voice: cut Amazon's hybrid engine off from the network")
+		}
+		v.stopCut = make(chan struct{})
+		go device.HoldHybridCut(firewallRe, v.stopCut)
+		return
+	}
+	close(v.stopCut)
+	if err := device.RestoreHybrid(); err != nil {
+		log.Printf("voice: %v", err)
+		return
+	}
+	log.Printf("voice: gave Amazon's hybrid engine the network back")
 }
 
 func (v *voiceMode) keepMode() {
@@ -102,9 +153,11 @@ func (v *voiceMode) heard(text string) {
 
 func (v *voiceMode) serve(relay *avs.Relay) {
 	relay.OnSpeech(v.heard)
+	relay.UseAnswerer(v.answer)
 	v.mu.Lock()
 	v.relay = relay
 	relay.Watch(v.mode == voiceMonitor)
+	relay.Intercept(v.mode == voiceIntercept)
 	v.mu.Unlock()
 }
 
@@ -183,6 +236,7 @@ func startVoiceRelay(mode *voiceMode) bool {
 		return false
 	}
 	log.Printf("voice: Alexa's session goes through %s to %s", voiceAddr, upstream)
+	go mode.relayUp()
 	return true
 }
 
@@ -196,6 +250,9 @@ func relayVoice(mode *voiceMode) {
 }
 
 func stopVoiceRelay() {
+	if err := device.RestoreHybrid(); err != nil {
+		log.Printf("voice: %v", err)
+	}
 	if err := device.PointSpeech(voiceUpstream); err != nil {
 		log.Printf("voice: Alexa is still pointed at a relay that is gone: %v", err)
 		return

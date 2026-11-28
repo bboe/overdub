@@ -40,6 +40,10 @@ type Relay struct {
 	watching atomic.Bool
 	onSpeech func(string)
 	said     chan string
+
+	intercepting atomic.Bool
+	answer       Answerer
+	decoder      func() (decoder, error)
 }
 
 func New(addr, target string, cert tls.Certificate, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *Relay {
@@ -47,11 +51,12 @@ func New(addr, target string, cert tls.Certificate, dial func(ctx context.Contex
 		dial = (&net.Dialer{}).DialContext
 	}
 	return &Relay{
-		addr:   addr,
-		said:   make(chan string, saidQueue),
-		target: target,
-		cert:   cert,
-		log:    untrustedlog.Log{Subject: "avs"},
+		addr:    addr,
+		said:    make(chan string, saidQueue),
+		decoder: openOpus,
+		target:  target,
+		cert:    cert,
+		log:     untrustedlog.Log{Subject: "avs"},
 		tr: &http2.Transport{
 			ReadIdleTimeout: idleTimeout,
 			PingTimeout:     pingTimeout,
@@ -131,9 +136,16 @@ func (r *Relay) Serve(ln net.Listener) error {
 
 func (r *Relay) forward(w http.ResponseWriter, req *http.Request) {
 	id := r.reqN.Add(1)
+	var body io.Reader = req.Body
+	if r.intercepting.Load() && req.Method == http.MethodPost && req.URL.Path == eventsPath {
+		var answered bool
+		if body, answered = r.intercept(w, req, id); answered {
+			return
+		}
+	}
 	host, _, _ := net.SplitHostPort(r.target)
 	out, err := http.NewRequestWithContext(req.Context(), req.Method,
-		"https://"+r.target+req.URL.RequestURI(), req.Body)
+		"https://"+r.target+req.URL.RequestURI(), body)
 	if err != nil {
 		r.log.Printf("req %d: %s", id, untrustedlog.Cut(err.Error()))
 		panic(http.ErrAbortHandler)

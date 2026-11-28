@@ -104,6 +104,19 @@ func TestUninstallDeletesTheRuleTheDaemonOpens(t *testing.T) {
 	}
 }
 
+func TestUninstallRestoresTheHybridEngine(t *testing.T) {
+	script, err := os.ReadFile("deploy/uninstall.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("HYBRID_UID = %d\n", device.HybridUID); !strings.Contains(string(script), want) {
+		t.Errorf("deploy/uninstall.py does not carry %q, so it would leave the daemon's cut in place", want)
+	}
+	if want := `OUTPUT ! -o lo -m owner --uid-owner {HYBRID_UID} -j REJECT`; !strings.Contains(string(script), want) {
+		t.Errorf("deploy/uninstall.py deletes no rule matching %q, and the daemon adds exactly that", want)
+	}
+}
+
 func TestTheScriptsNameTheSendspinFilesTheDaemonKeeps(t *testing.T) {
 	for _, c := range []struct {
 		script string

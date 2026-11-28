@@ -292,6 +292,12 @@ transfer added any other way breaks on Windows and says nothing.
   the sweep sees it, reports STILL PRESENT, and the steps after it never happen.
   The same ordering costs `rmdir /data/local/bin`, which has to come after
   everything that lives in there.
+- Holding back the `Recognize` does not keep a turn from Amazon. PuffinApp
+  also sends it to the hybrid engine, which reaches Amazon on its own
+  connection, and Amazon answers on the session's downchannel. The relay's
+  log reads as a clean intercept. The tell is in logcat: a `Speak` added to
+  the `DirectiveGroup` for a turn the relay answered. `intercept` cuts the
+  engine off; docs/voice.md has the measurements.
 - A test that waits on this session needs a deadline of its own. The failure it is
   written to catch does not answer slowly, it does not answer at all, so a test
   without one hangs instead of failing.

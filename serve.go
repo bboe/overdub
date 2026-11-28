@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/bboe/overdub/internal/alexa"
 	"github.com/bboe/overdub/internal/audio"
+	"github.com/bboe/overdub/internal/avs"
 	"github.com/bboe/overdub/internal/button"
 	"github.com/bboe/overdub/internal/clip"
 	"github.com/bboe/overdub/internal/device"
@@ -636,6 +638,16 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 	if clips != nil {
 		server.UsePlay(clips.Play, clips.Stop)
 		server.UseSatellite()
+		voice.answer = avs.Answerer{
+			Start: func(ctx context.Context) (avs.Turn, error) {
+				t, err := server.StartTurn(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return t, nil
+			},
+			Announce: clips.Announce,
+		}
 		server.UsePlaying(sounding.current)
 	}
 

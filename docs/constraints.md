@@ -119,6 +119,8 @@
   `com.amazon.puffin AVSEndpoint`, and two files outside `/data`, under
   `/system`. All three are undone by `uninstall.py`, and docs/voice.md says
   what happens if they are not.
+- In `intercept`, one `OUTPUT` rule cuts Amazon's hybrid engine off the
+  network. It lives only in the chain, and `uninstall.py` deletes it.
 
 ## Sound
 

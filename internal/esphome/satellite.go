@@ -121,6 +121,8 @@ func (t *Turn) End() error {
 
 func (t *Turn) SpeechEnded() <-chan struct{} { return t.ended }
 
+func (t *Turn) Done() <-chan struct{} { return t.done }
+
 func (t *Turn) Await() Answer {
 	<-t.done
 	t.mu.Lock()

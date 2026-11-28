@@ -369,6 +369,8 @@ before it writes.
    earlier delete would be undone. Each rule is deleted in a loop,
    because the chain is not ours alone, then read back. A rule left behind is
    reported, not failed on: nothing listens behind it, and a reboot clears it.
+   The `OUTPUT` rule that cuts Amazon's hybrid engine off in `intercept` goes
+   the same way.
 7. Clear every `persist.overdub.*` property and remove its file, then read
    back the switch flag. Each property changes what the next install does: a
    Dot switched off through Home Assistant would come back off, and a tuned

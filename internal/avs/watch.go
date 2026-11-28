@@ -22,22 +22,37 @@ const (
 	seeking = iota
 	inHead
 	inJSON
+	inAudio
 	skipping
 )
 
 type watcher struct {
-	delim  []byte
-	buf    []byte
-	state  int
-	onPart func([]byte)
+	delim   []byte
+	buf     []byte
+	state   int
+	onPart  func([]byte)
+	onAudio func([]byte)
 }
 
 func boundaryOf(contentType string) string {
 	media, params, err := mime.ParseMediaType(contentType)
-	if err != nil || !strings.HasPrefix(media, "multipart/") {
+	if err == nil {
+		if !strings.HasPrefix(media, "multipart/") {
+			return ""
+		}
+		return params["boundary"]
+	}
+	fields := strings.Split(contentType, ";")
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(fields[0])), "multipart/") {
 		return ""
 	}
-	return params["boundary"]
+	for _, field := range fields[1:] {
+		k, v, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if ok && strings.EqualFold(k, "boundary") {
+			return strings.Trim(v, `"`)
+		}
+	}
+	return ""
 }
 
 func newWatcher(boundary string, onPart func([]byte)) *watcher {
@@ -53,14 +68,16 @@ func (w *watcher) Write(p []byte) (int, error) {
 
 func (w *watcher) step() bool {
 	switch w.state {
-	case seeking, skipping:
+	case seeking, skipping, inAudio:
 		i := bytes.Index(w.buf, w.delim)
 		if i < 0 {
 			if keep := len(w.delim) - 1; len(w.buf) > keep {
+				w.audio(w.buf[:len(w.buf)-keep])
 				w.buf = append(w.buf[:0], w.buf[len(w.buf)-keep:]...)
 			}
 			return false
 		}
+		w.audio(w.buf[:i])
 		w.buf = w.buf[i+len(w.delim):]
 		w.state = inHead
 		return true
@@ -81,9 +98,14 @@ func (w *watcher) step() bool {
 		w.state = skipping
 		for _, line := range strings.Split(string(head), "\r\n") {
 			k, v, ok := strings.Cut(line, ":")
-			if ok && strings.EqualFold(strings.TrimSpace(k), "Content-Type") &&
-				strings.Contains(strings.ToLower(v), "json") {
+			k = strings.TrimSpace(k)
+			switch {
+			case !ok:
+			case strings.EqualFold(k, "Content-Type") && strings.Contains(strings.ToLower(v), "json"):
 				w.state = inJSON
+			case strings.EqualFold(k, "Content-Disposition") && w.onAudio != nil &&
+				strings.Contains(v, `name="audio"`):
+				w.state = inAudio
 			}
 		}
 		w.buf = rest
@@ -102,6 +124,12 @@ func (w *watcher) step() bool {
 		w.buf = w.buf[i+len(w.delim):]
 		w.state = inHead
 		return true
+	}
+}
+
+func (w *watcher) audio(b []byte) {
+	if w.state == inAudio && len(b) > 0 {
+		w.onAudio(b)
 	}
 }
 

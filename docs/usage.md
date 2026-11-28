@@ -235,7 +235,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | select | `voice_mode` | config | starts `pass through` (13) |
 | update | `firmware` | config | the latest release (12) |
 | button | `restart` | config | restarts the Dot (14) |
-| assist_satellite | `assist_satellite` | -- | idle; nothing uses it yet (15) |
+| assist_satellite | `assist_satellite` | -- | answers in `intercept` (15) |
 
 1. See [The action button](#the-action-button).
 2. Volume and mute, and playback of any URL Home Assistant can transcode.
@@ -262,11 +262,18 @@ Each entity id is `<domain>.<name>_<suffix>`.
     it too; the last write wins, and the number shows what is applied.
     Survives a reboot and works with the switch off.
 12. Listed only for a release build. See [Updating](#updating).
-13. `monitor` or `pass through`. In `monitor`, `alexa_reply` takes each part
-    of Alexa's answer as she says it, so its history reads as the whole
-    answer. A part over 255 bytes arrives in pieces. `pass through` empties it.
-    Amazon does not send what you asked, so only the answer is there. The mode
-    survives a reboot.
+13. `intercept`, `monitor` or `pass through`. In `intercept`, Home
+    Assistant's Assist answers everything said to the Dot, and Amazon hears
+    none of it. So nothing Alexa does by voice works in it, online or
+    offline: her timers, alarms, reminders, music and smart-home control,
+    including what her on-device engine runs without the internet. Timers do
+    not work through Home Assistant yet either. If Home Assistant is not
+    connected, or its pipeline fails, the turn ends with nothing said: Alexa
+    never answers in `intercept`. In `monitor`,
+    `alexa_reply` takes each part of Alexa's answer as she says it, so its
+    history reads as the whole answer. A part over 255 bytes arrives in
+    pieces. The other modes empty it. Amazon does not send what you asked, so
+    only the answer is there. The mode survives a reboot.
 14. It restarts the whole Dot, Alexa and adb included, not only overdub.
     overdub gives Alexa back her endpoint and lets go of the buttons, then
     asks init to reboot. The Dot is back on the network in about a minute. If
@@ -276,7 +283,9 @@ Each entity id is `<domain>.<name>_<suffix>`.
 15. Home Assistant adds it, and its own selects with it: `assistant`,
     `assistant_2`, `finished_speaking_detection`, `wake_word` and
     `wake_word_2`. The wake word selects read unavailable: Alexa hears the
-    wake word, and the Dot offers Home Assistant none to choose.
+    wake word, and the Dot offers Home Assistant none to choose. `assistant`
+    picks the pipeline `intercept` uses; `assistant_2` is unused, and can be
+    disabled.
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.

@@ -24,6 +24,7 @@ APPLIED = "/data/local/bin/.overdub-applied"
 BIN = "/data/local/bin/overdub"
 BOOT = "/data/local/bin/overdub.sh"
 FAILED = "/data/local/bin/.overdub-failed"
+HYBRID_UID = 5001
 INIT = "/system/etc/init/overdub.rc"
 KEY = "/data/local/bin/.overdub-noise-key"
 LABEL = 14
@@ -313,6 +314,24 @@ def main() -> None:  # ruff: ignore[complex-structure, too-many-branches, too-ma
         )
     elif "deleted" in deleted:
         closed.append(f"tcp/{VOICE_PORT} on lo")
+    STATE.changed |= "deleted" in deleted
+    hybrid_rule = f"OUTPUT ! -o lo -m owner --uid-owner {HYBRID_UID} -j REJECT"
+    deleted = shell(
+        f"while iptables -w -C {hybrid_rule} 2>/dev/null; do\n"
+        f"  iptables -w -D {hybrid_rule} || break\n"
+        "  echo deleted\n"
+        "done\n"
+        f"iptables -w -C {hybrid_rule} 2>/dev/null && echo left\n"
+        "echo checked"
+    )[1].split("\n")
+    if "checked" not in deleted or "left" in deleted:
+        warn(
+            "firewall",
+            "Amazon's hybrid engine may still be cut off from the network.",
+            "It lives in the chain rather than on disk, so a reboot clears it.",
+        )
+    elif "deleted" in deleted:
+        closed.append("the hybrid engine's cut")
     STATE.changed |= "deleted" in deleted
     if closed:
         ok("firewall", "closed " + ", ".join(closed))

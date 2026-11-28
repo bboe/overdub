@@ -176,3 +176,72 @@ func TestHoldTCPOpenAddsNothingAfterItIsToldToStop(t *testing.T) {
 		}
 	}
 }
+
+func TestTheHybridCutGoesFirstOnceAndComesOutWhole(t *testing.T) {
+	saved := iptablesRun
+	defer func() { iptablesRun = saved }()
+
+	const rule = "OUTPUT ! -o lo -m owner --uid-owner 5001 -j REJECT"
+	var calls []string
+	count := 0
+	iptablesRun = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "-C":
+			if count == 0 {
+				return nil, exitWith(t, 1)
+			}
+		case "-I":
+			count++
+		case "-D":
+			if count == 0 {
+				return nil, exitWith(t, 1)
+			}
+			count--
+		}
+		return nil, nil
+	}
+	for i := 0; i < 3; i++ {
+		if err := CutHybrid(); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if count != 1 || calls[1] != "-I OUTPUT 1 ! -o lo -m owner --uid-owner 5001 -j REJECT" {
+		t.Errorf("inserted %d times, first as %q; want once, ahead of the chain's wlan0 accept", count, calls[1])
+	}
+	count = 2
+	if err := RestoreHybrid(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("%d copies of %q left after restoring", count, rule)
+	}
+}
+
+func TestTheHybridCutIsNotPutBackAfterARestore(t *testing.T) {
+	saved := iptablesRun
+	defer func() { iptablesRun = saved }()
+
+	inserts := 0
+	iptablesRun = func(args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-C", "-D":
+			return nil, exitWith(t, 1)
+		case "-I":
+			inserts++
+		}
+		return nil, nil
+	}
+	if err := CutHybrid(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreHybrid(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reassertHybrid(); err != nil {
+		t.Fatal(err)
+	}
+	if inserts != 1 {
+		t.Errorf("inserted %d times; a re-assert that lands after a restore must not cut the engine again", inserts)
+	}
+}

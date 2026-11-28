@@ -96,6 +96,7 @@ reboot that changed how the house hears you would be a silent change.
 
 | mode | what the relay does |
 |---|---|
+| `intercept` | answers each turn through Home Assistant |
 | `monitor` | reads Alexa's answers and publishes them |
 | `pass through` | passes the session on and looks at nothing |
 
@@ -143,11 +144,93 @@ reboot that changed how the house hears you would be a silent change.
   without dropping Alexa's session. A part already passing when `monitor` is
   chosen is skipped.
 
+## Intercept
+
+In `intercept`, the relay answers each `Recognize` itself, through the
+satellite, and Amazon never sees it.
+
+- So no voice command reaches Alexa in this mode: her timers, alarms,
+  reminders, music and smart-home control all stop, and so does what the
+  hybrid engine runs offline. The Dot does what Home Assistant's pipeline
+  does.
+- The engine does not act behind Home Assistant's back. PuffinApp's router
+  (`HR-RouterActor`) sends a turn's audio to the cloud and the engine
+  (`routingMode=HYBRID`) and lets one win. Asked for a timer in `intercept`,
+  the engine answered `ClearDecision` with `executionStrategy=CLOUD_ONLY` and
+  aborted, the relay's directives won (`CloudWon`), and no timer was set.
+- Home Assistant runs timers on a satellite only when it sets the timers
+  flag, and this one does not, so a timer fails in Home Assistant too.
+
+- The relay reads the first part of every event upload before it forwards
+  any of it. The upload's boundary, `WhooHooZeerOoonie=`, ends in `=`, which
+  a strict MIME parser refuses unquoted, so the boundary is read by hand when
+  the strict parse fails. Without that, every turn passed to Amazon.
+- `Alexa.AudioFrontEndController` events, `OneMicAudio` and
+  `DeviceAudioFeaturesReport`, get a 204 from the relay. `OneMicAudio` is
+  about 1.4 seconds of the wake word and what follows, and both arrive before
+  the `Recognize`, so they are kept from Amazon whatever happens to the turn.
+- PuffinApp sends every event twice: once on its AVS session, through the
+  relay, and once to Amazon's hybrid engine, `AlexaHybridExecutor`, over local
+  sockets. The hybrid engine's copy of a `Recognize` carries the audio as
+  16 kHz PCM, and the engine has its own TLS connection to Amazon. With only
+  the relay holding the turn back, the engine sent 140,856 bytes off the Dot
+  during one turn and none in 20 seconds of quiet, and Amazon answered on the
+  session's downchannel with the turn's own `dialogRequestId`: a `Speak`, a
+  `StopCapture` and a `TurnOn`. Alexa then spoke over Home Assistant.
+- So `intercept` also cuts the hybrid engine off the network:
+  `OUTPUT ! -o lo -m owner --uid-owner 5001 -j REJECT`, inserted first in
+  the chain, ahead of its `wlan0` accept. uid 5001 is `ahe` on biscuit, radar
+  and donut, and Amazon's own `ahe_out` chain names it by number. The engine still answers PuffinApp locally, so Alexa logs no error.
+  With it cut, the engine tried 4 connections, 240 bytes, and Amazon sent
+  nothing for 2 turns.
+- The rule goes in only once the relay is serving and Alexa points at it. A
+  relay that fails to start leaves the engine alone, since Alexa then talks
+  to Amazon directly.
+- The rule is re-asserted every 30 seconds while `intercept` holds, because
+  netd rebuilds the chain. The re-assert checks, under the chain lock, that
+  the cut is still wanted, so one that lands just after a restore does not
+  put the rule back. Leaving `intercept`, a clean shutdown, a daemon
+  start in another mode and `uninstall.py` all delete it. A reboot clears it
+  too.
+- No turn goes to Amazon in this mode. When Home Assistant has not
+  subscribed, the Dot has no clip player, a turn is already running, or the
+  decoder does not load, the relay answers the upload with a bare
+  `RequestProcessingCompleted`. That is what Amazon sends for the wake word
+  alone, and it ends the capture. A pipeline that fails ends the turn the
+  same way, after the usual `SetEndOfSpeechOffset` and
+  `RequestProcessingStarted`. Nothing is said.
+- The audio goes to Home Assistant as 16 kHz PCM, 100 ms at a time, from the
+  end of the wake word. A tap or a follow-up has no wake word, and goes whole.
+- The capture ends when Home Assistant hears the end of speech, when the
+  pipeline ends, when the Dot ends the upload, or after 10 seconds. The relay
+  then answers the upload with `SetEndOfSpeechOffset`, counted from the start
+  of the audio, and `RequestProcessingStarted`, and the Dot closes the
+  upload.
+- Each part is written with the next delimiter behind it. The Dot dispatches
+  a part only when the delimiter after it arrives, so a part written alone
+  would wait for the next one.
+- The satellite turn closes once Home Assistant has answered, before the
+  answer plays. Held open, it made a wake word said during the answer find a
+  turn already running, and that turn went to Amazon.
+- The answer is Home Assistant's FLAC, played by the clip player as an
+  announcement. `RequestProcessingCompleted` goes after it ends, so the Dot
+  shows Alexa thinking for the whole answer: on biscuit, PuffinApp went from
+  `THINKING` to `IDLE` 0.2 seconds after it, and 2.4 seconds after
+  `RequestProcessingStarted`.
+- No `Speak` is sent, so the Dot sends no `SpeechStarted` or
+  `SpeechFinished`, which Amazon answers with a 400 for a token it never
+  issued. No `TurnOn` is sent either, so there is no follow-up without the
+  wake word.
+- A turn has 30 seconds from its start to Home Assistant's answer, and the
+  answer has 2 minutes to play.
+- The log gives the length of what Home Assistant heard and said, not the
+  words.
+
 ## The satellite
 
 `internal/esphome` offers the Dot to Home Assistant as an ESPHome voice
 satellite, so a pipeline can run over the API session Home Assistant already
-holds. Nothing starts a turn yet.
+holds. `intercept` starts its turns.
 
 - `DeviceInfoResponse` sets 2 of `voice_assistant_feature_flags`: the voice
   assistant and API audio. Without API audio, Home Assistant takes no audio
@@ -186,8 +269,11 @@ holds. Nothing starts a turn yet.
 
 ## What this does not do
 
-- It does not change anything in the session.
-- It asks Home Assistant nothing, and holds no Home Assistant credential.
+- `monitor` and `pass through` change nothing in the session.
+- Outside `intercept`, nothing is cut: the hybrid engine reaches Amazon as
+  it always did.
+- No mode holds a Home Assistant credential. `intercept` uses the API session
+  Home Assistant opened.
 
 ## The audio Alexa uploads
 

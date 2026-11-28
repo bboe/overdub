@@ -73,6 +73,8 @@ type Player struct {
 type play struct {
 	announcement bool
 	cancel       context.CancelFunc
+	done         chan struct{}
+	ended        sync.Once
 
 	mu      sync.Mutex
 	feed    Feed
@@ -87,7 +89,10 @@ func (p *play) setFeed(f Feed) bool {
 	return !p.stopped
 }
 
+func (p *play) finish() { p.ended.Do(func() { close(p.done) }) }
+
 func (p *play) stop() {
+	p.finish()
 	p.cancel()
 	p.mu.Lock()
 	p.stopped = true
@@ -109,14 +114,23 @@ func CheckURL(target string) error {
 }
 
 func (p *Player) Play(target string, announcement bool) error {
+	_, err := p.start(target, announcement)
+	return err
+}
+
+func (p *Player) Announce(target string) (<-chan struct{}, error) {
+	return p.start(target, true)
+}
+
+func (p *Player) start(target string, announcement bool) (<-chan struct{}, error) {
 	if err := CheckURL(target); err != nil {
-		return err
+		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	next := &play{announcement: announcement, cancel: cancel}
+	next := &play{announcement: announcement, cancel: cancel, done: make(chan struct{})}
 	p.swap(next, func(*play) bool { return true })
 	go p.run(ctx, next, target)
-	return nil
+	return next.done, nil
 }
 
 func (p *Player) Stop() { p.swap(nil, func(*play) bool { return true }) }
@@ -144,6 +158,7 @@ func (p *Player) swap(next *play, ends func(*play) bool) {
 }
 
 func (p *Player) end(pl *play, err error) {
+	defer pl.finish()
 	p.tell.Lock()
 	defer p.tell.Unlock()
 	p.mu.Lock()
