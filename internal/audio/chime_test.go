@@ -8,7 +8,11 @@ import (
 
 func samples(t *testing.T, rate int) []int16 {
 	t.Helper()
-	raw := chimePCM(rate)
+	return pcmSamples(t, chimePCM(rate))
+}
+
+func pcmSamples(t *testing.T, raw []byte) []int16 {
+	t.Helper()
 	if len(raw)%2 != 0 {
 		t.Fatalf("got %d bytes, which is not whole 16-bit samples", len(raw))
 	}
@@ -102,4 +106,44 @@ func abs16(v int16) int {
 		return -int(v)
 	}
 	return int(v)
+}
+
+func TestTheErrorToneIsThreeA4BeepsWithSilentEnds(t *testing.T) {
+	for _, rate := range Rates() {
+		s := pcmSamples(t, errorPCM(rate))
+		if want := int(errorSeconds*float64(rate)) * ChimeChannels; len(s) != want {
+			t.Errorf("at %d Hz got %d samples, want %d", rate, len(s), want)
+		}
+		const quiet = 300
+		if abs16(s[0]) > quiet || abs16(s[len(s)-1]) > quiet {
+			t.Errorf("at %d Hz the tone starts at %d and ends at %d; either would click", rate, s[0], s[len(s)-1])
+		}
+		beeps, sounding, crossings := 0, false, 0
+		gap := int(0.02 * float64(rate))
+		lastLoud := -gap
+		for i := 0; i < len(s); i += ChimeChannels {
+			f := i / ChimeChannels
+			if abs16(s[i]) > quiet {
+				if !sounding && f-lastLoud >= gap {
+					beeps++
+				}
+				sounding, lastLoud = true, f
+			} else if f-lastLoud >= gap {
+				sounding = false
+			}
+			if i >= ChimeChannels && (s[i-ChimeChannels] < 0) != (s[i] < 0) {
+				crossings++
+			}
+		}
+		if beeps != 3 {
+			t.Errorf("at %d Hz heard %d beeps, want 3", rate, beeps)
+		}
+		var on float64
+		for _, n := range errorNotes {
+			on += n.dur
+		}
+		if got := float64(crossings) / 2 / on; math.Abs(got-440) > 30 {
+			t.Errorf("at %d Hz the beeps sound at about %.0f Hz, want 440", rate, got)
+		}
+	}
 }

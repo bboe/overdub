@@ -39,12 +39,16 @@ const (
 	voiceEventVADEnd    = 12
 )
 
-var errNoSatellite = errors.New("esphome: home assistant has not subscribed to voice")
+var (
+	errNoSatellite = errors.New("esphome: home assistant has not subscribed to voice")
+	ErrTurnRunning = errors.New("esphome: a turn is already running")
+)
 
 type Answer struct {
 	Transcript string
 	Speech     string
 	URL        string
+	Code       string
 	Err        error
 }
 
@@ -82,7 +86,7 @@ func (s *Server) StartTurn(ctx context.Context) (*Turn, error) {
 	}
 	if s.turn != nil {
 		s.mu.Unlock()
-		return nil, errors.New("esphome: a turn is already running")
+		return nil, ErrTurnRunning
 	}
 	t := &Turn{srv: s, conn: s.voiceConn, ended: make(chan struct{}), done: make(chan struct{})}
 	var req pb
@@ -205,6 +209,7 @@ func (t *Turn) event(kind int, data map[string]string) {
 		t.answer.URL = data["url"]
 	case voiceEventError:
 		if t.answer.Err == nil {
+			t.answer.Code = data["code"]
 			t.answer.Err = fmt.Errorf("esphome: home assistant's pipeline failed: %s: %s",
 				untrustedlog.Cut(data["code"]), untrustedlog.Cut(data["message"]))
 		}

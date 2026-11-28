@@ -24,6 +24,7 @@ type Chime struct {
 	mix    *mixer
 	rate   int
 	clips  map[int]*clip
+	errs   map[int]*clip
 	stream atomic.Pointer[Stream]
 	stop   chan struct{}
 	done   chan struct{}
@@ -45,14 +46,16 @@ func NewChime() (*Chime, error) {
 		return nil, errors.New("audio_open: the mixer would not open")
 	}
 	C.audio_close()
-	clips := map[int]*clip{}
+	clips, errs := map[int]*clip{}, map[int]*clip{}
 	for _, rate := range Rates() {
 		clips[rate] = &clip{pcm: decode(chimePCM(rate))}
+		errs[rate] = &clip{pcm: decode(errorPCM(rate))}
 	}
 	c := &Chime{
 		mix:    newMixer(),
 		rate:   ChimeRate,
 		clips:  clips,
+		errs:   errs,
 		output: newOutputFinder(),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
@@ -61,13 +64,17 @@ func NewChime() (*Chime, error) {
 	return c, nil
 }
 
-func (c *Chime) Play() error {
+func (c *Chime) Play() error { return c.sound(c.clips) }
+
+func (c *Chime) PlayError() error { return c.sound(c.errs) }
+
+func (c *Chime) sound(clips map[int]*clip) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return errors.New("audio: play after close")
 	}
-	c.mix.start(c.clips[c.rate])
+	c.mix.start(clips[c.rate])
 	return nil
 }
 
@@ -135,6 +142,7 @@ func (c *Chime) retune() bool {
 		return true
 	}
 	c.mix.remove(c.clips[c.rate])
+	c.mix.remove(c.errs[c.rate])
 	c.shut()
 	c.rate = s.rate
 	c.mix.add(s)

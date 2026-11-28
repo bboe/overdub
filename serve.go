@@ -336,7 +336,7 @@ func serve(flags config) error {
 		}}).Run()
 	}
 
-	go serveAPI(flags.Name, psk, i, keys, player, clips)
+	go serveAPI(flags.Name, psk, i, keys, player, clips, chime)
 
 	var held []string
 	for code, b := range buttons {
@@ -591,7 +591,7 @@ func pressEvent(g button.Gesture) (esphome.EventType, bool) {
 
 func serveAPI(name string, psk []byte, i *button.Interceptor,
 	owners map[uint16]*button.Interceptor, player sendspin.Player,
-	clips *clip.Player) {
+	clips *clip.Player, chime *audio.Chime) {
 	mac := device.WaitForMAC(wifiIface, macWait)
 	if mac == "" {
 		log.Printf("%s has no address yet; the button works, and the api starts if it appears", wifiIface)
@@ -647,6 +647,11 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 				return t, nil
 			},
 			Announce: clips.Announce,
+			Fail: func() {
+				if err := chime.PlayError(); err != nil {
+					log.Printf("voice: the error tone: %v", err)
+				}
+			},
 		}
 		server.UsePlaying(sounding.current)
 	}

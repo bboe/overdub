@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,10 +21,11 @@ const (
 	replyBoundary = "------abcde123"
 
 	maxListen   = 10 * time.Second
-	turnLimit   = 30 * time.Second
 	answerLimit = 2 * time.Minute
 
 	sendSamples = opus.Rate / 10
+
+	noSpeech = "stt-no-text-recognized"
 )
 
 type Turn interface {
@@ -38,6 +40,7 @@ type Turn interface {
 type Answerer struct {
 	Start    func(ctx context.Context) (Turn, error)
 	Announce func(url string) (<-chan struct{}, error)
+	Fail     func()
 }
 
 type decoder interface {
@@ -52,6 +55,8 @@ func openOpus() (decoder, error) {
 	}
 	return d, nil
 }
+
+var turnLimit = 30 * time.Second
 
 func (r *Relay) UseAnswerer(a Answerer) { r.answer = a }
 
@@ -204,20 +209,20 @@ func (r *Relay) intercept(w http.ResponseWriter, req *http.Request, id int64) (i
 
 func (r *Relay) answerTurn(w http.ResponseWriter, req *http.Request, id int64, u *upload) {
 	if r.answer.Start == nil {
-		r.decline(w, id, u, "home assistant has no satellite here")
+		r.decline(w, id, u, "home assistant has no satellite here", true)
 		return
 	}
 	ctx, cancel := context.WithTimeout(req.Context(), turnLimit)
 	defer cancel()
 	t, err := r.answer.Start(ctx)
 	if err != nil {
-		r.decline(w, id, u, err.Error())
+		r.decline(w, id, u, err.Error(), !errors.Is(err, esphome.ErrTurnRunning))
 		return
 	}
 	dec, err := r.decoder()
 	if err != nil {
 		t.Close()
-		r.decline(w, id, u, err.Error())
+		r.decline(w, id, u, err.Error(), true)
 		return
 	}
 	defer dec.Close()
@@ -295,35 +300,51 @@ listening:
 	if err := t.Close(); err != nil {
 		log.Printf("avs: req %d: %v", id, err)
 	}
-	if a.URL != "" {
-		r.say(id, a.URL)
+	switch {
+	case req.Context().Err() != nil:
+	case a.URL != "":
+		if !r.say(id, a.URL) {
+			r.fail()
+		}
+	case a.Err != nil && a.Code != noSpeech:
+		r.fail()
 	}
 	out.directive("InteractionModel", "RequestProcessingCompleted", map[string]any{})
 	out.close()
 }
 
-func (r *Relay) decline(w http.ResponseWriter, id int64, u *upload, why string) {
+func (r *Relay) fail() {
+	if r.answer.Fail != nil {
+		r.answer.Fail()
+	}
+}
+
+func (r *Relay) decline(w http.ResponseWriter, id int64, u *upload, why string, tone bool) {
 	go u.drain()
 	log.Printf("avs: req %d: %s; the turn ends unanswered", id, untrustedlog.Cut(why))
+	if tone {
+		r.fail()
+	}
 	out := openReply(w, u.ev.dialogID)
 	out.directive("InteractionModel", "RequestProcessingCompleted", map[string]any{})
 	out.close()
 }
 
-func (r *Relay) say(id int64, url string) {
+func (r *Relay) say(id int64, url string) bool {
 	if r.answer.Announce == nil {
-		return
+		return false
 	}
 	done, err := r.answer.Announce(url)
 	if err != nil {
 		log.Printf("avs: req %d: playing the answer: %s", id, untrustedlog.Cut(err.Error()))
-		return
+		return false
 	}
 	select {
 	case <-done:
 	case <-time.After(answerLimit):
 		log.Printf("avs: req %d: the answer was still playing after %v", id, answerLimit)
 	}
+	return true
 }
 
 type replyWriter struct {

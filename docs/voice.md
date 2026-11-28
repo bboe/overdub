@@ -198,7 +198,9 @@ satellite, and Amazon never sees it.
   `RequestProcessingCompleted`. That is what Amazon sends for the wake word
   alone, and it ends the capture. A pipeline that fails ends the turn the
   same way, after the usual `SetEndOfSpeechOffset` and
-  `RequestProcessingStarted`. Nothing is said.
+  `RequestProcessingStarted`. The daemon then plays its error tone in most of
+  these cases; docs/audio.md has which. A Dot with no clip player has no
+  mixer to play it on.
 - The audio goes to Home Assistant as 16 kHz PCM, 100 ms at a time, from the
   end of the wake word. A tap or a follow-up has no wake word, and goes whole.
 - The capture ends when Home Assistant hears the end of speech, when the
