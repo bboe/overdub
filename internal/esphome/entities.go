@@ -92,6 +92,9 @@ func (s *Server) deviceInfo() []byte {
 	msg.str(9, s.version)            // project_version
 	msg.str(12, manufacturer)
 	msg.str(13, s.name) // friendly_name
+	if s.satellite {
+		msg.u32(17, voiceFeatures) // voice_assistant_feature_flags
+	}
 	return msg.b
 }
 

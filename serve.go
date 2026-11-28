@@ -635,6 +635,7 @@ func serveAPI(name string, psk []byte, i *button.Interceptor,
 
 	if clips != nil {
 		server.UsePlay(clips.Play, clips.Stop)
+		server.UseSatellite()
 		server.UsePlaying(sounding.current)
 	}
 

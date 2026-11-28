@@ -94,8 +94,9 @@ pages imported below apply to everything. Read the page for a subsystem
 - `docs/sendspin.md`: the Sendspin client, its WebSocket, its handshake
 - `docs/usage.md`: what a user runs and sees -- the installer's output, the
   entities, uninstalling, troubleshooting
-- `docs/voice.md`: Alexa's session, the audio she uploads, what routing it
-  through this daemon changes, and what has to be undone
+- `docs/voice.md`: Alexa's session, the audio she uploads, the voice
+  satellite, what routing it through this daemon changes, and what has to be
+  undone
 
 @docs/constraints.md
 @docs/pitfalls.md

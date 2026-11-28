@@ -252,6 +252,10 @@ type Server struct {
 
 	replyMu sync.Mutex
 
+	satellite bool
+	voiceConn *conn
+	turn      *Turn
+
 	handshakeWait time.Duration
 	pingWait      time.Duration
 	wakeGap       time.Duration
@@ -468,6 +472,7 @@ func (s *Server) serveConn(netConn net.Conn) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, conn)
+		s.dropVoiceLocked(conn)
 		s.mu.Unlock()
 		if writing {
 			close(conn.out)
@@ -890,6 +895,9 @@ func (s *Server) handle(conn *conn, msgType int, payload []byte) error {
 	case msgSubscribeHAServ:
 		conn.services = true
 		return nil
+
+	case msgSubscribeVoice, msgVoiceResponse, msgVoiceEvent:
+		return s.handleVoice(conn, msgType, payload)
 
 	case msgSubscribeLogs, msgSubscribeHAStates:
 		return nil

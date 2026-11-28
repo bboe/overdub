@@ -143,6 +143,47 @@ reboot that changed how the house hears you would be a silent change.
   without dropping Alexa's session. A part already passing when `monitor` is
   chosen is skipped.
 
+## The satellite
+
+`internal/esphome` offers the Dot to Home Assistant as an ESPHome voice
+satellite, so a pipeline can run over the API session Home Assistant already
+holds. Nothing starts a turn yet.
+
+- `DeviceInfoResponse` sets 2 of `voice_assistant_feature_flags`: the voice
+  assistant and API audio. Without API audio, Home Assistant takes no audio
+  over the API, and drops what is sent.
+- A Dot with no clip player is not a satellite. Its media player lists no
+  announcement format, and Home Assistant then makes the answer in the TTS
+  engine's own format, often MP3.
+- The speaker flag is not set. With it, Home Assistant streams the answer as
+  16 kHz WAV over the API. Without it, Home Assistant makes the answer in the
+  media player's announcement format, FLAC, which the clip player already
+  plays. `TTS_END` carries its URL.
+- The announce flag is not set. With it, Home Assistant waits up to 5 seconds
+  for a wake word configuration on every connect, and nothing here has one.
+- A turn starts with `VoiceAssistantRequest` and no flags, so Home Assistant
+  starts at speech to text. The audio goes as `VoiceAssistantAudio`, 16-bit
+  little-endian PCM. `end` stops the run when the audio is done.
+  `VoiceAssistantRequest` with `start` false aborts it, and a cancelled turn
+  sends that.
+- The speech ends at `STT_VAD_END` or `STT_END`. The run ends at `RUN_END` or
+  an `ERROR`.
+- Events carry no run id, and Home Assistant sends `RUN_END` after an
+  `ERROR`. So a turn ignores every event before its `RUN_START`, or a late
+  `ERROR` or `RUN_END` from the last run would end the next turn. Home
+  Assistant sends `RUN_START` before it validates the pipeline, so a run that
+  fails validation still sends one.
+- A turn has no deadline of its own. Home Assistant sends no event at all for
+  a pipeline it cannot find, so the context a turn starts with must carry one.
+- Closing a turn sends `VoiceAssistantAnnounceFinished`. Without it, Home
+  Assistant shows the satellite as responding until the next turn starts.
+- The last connection to subscribe is the satellite. A new one ends the old
+  one's turn, and so does a disconnect. Events from any other connection are
+  ignored.
+- Every send checks, under the server lock, that the turn is still the
+  current one. A disconnect closes the connection's send queue, and a send on
+  a closed queue panics, which restarts the daemon.
+
 ## What this does not do
 
 - It does not change anything in the session.

@@ -235,6 +235,7 @@ Each entity id is `<domain>.<name>_<suffix>`.
 | select | `voice_mode` | config | starts `pass through` (13) |
 | update | `firmware` | config | the latest release (12) |
 | button | `restart` | config | restarts the Dot (14) |
+| assist_satellite | `assist_satellite` | -- | idle; nothing uses it yet (15) |
 
 1. See [The action button](#the-action-button).
 2. Volume and mute, and playback of any URL Home Assistant can transcode.
@@ -272,6 +273,10 @@ Each entity id is `<domain>.<name>_<suffix>`.
     the Dot is still up 30 seconds later, overdub logs it and restarts
     overdub. It is the way back when adb stops answering; docs/device.md has
     why.
+15. Home Assistant adds it, and its own selects with it: `assistant`,
+    `assistant_2`, `finished_speaking_detection`, `wake_word` and
+    `wake_word_2`. The wake word selects read unavailable: Alexa hears the
+    wake word, and the Dot offers Home Assistant none to choose.
 
 The Sendspin entities are listed only when the Dot could read or create its
 Sendspin identity.
