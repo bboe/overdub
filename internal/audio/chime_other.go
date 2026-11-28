@@ -14,6 +14,10 @@ func (c *Chime) Play() error {
 	return errors.New("audio: built without the mixer")
 }
 
+func (c *Chime) PlayError() error {
+	return errors.New("audio: built without the mixer")
+}
+
 func (c *Chime) OpenStream(int, func(string, ...any)) (*Stream, error) {
 	return nil, errors.New("audio: built without the mixer")
 }

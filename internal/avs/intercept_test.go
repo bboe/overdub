@@ -60,6 +60,7 @@ type fakeTurn struct {
 	got      []int16
 	ended    bool
 	closed   bool
+	hold     bool
 	endAfter int
 
 	heard    sync.Once
@@ -88,8 +89,11 @@ func (f *fakeTurn) Send(pcm []int16) error {
 func (f *fakeTurn) End() error {
 	f.mu.Lock()
 	f.ended = true
+	hold := f.hold
 	f.mu.Unlock()
-	f.finish()
+	if !hold {
+		f.finish()
+	}
 	return nil
 }
 
@@ -97,7 +101,18 @@ func (f *fakeTurn) hear()                        { f.heard.Do(func() { close(f.s
 func (f *fakeTurn) finish()                      { f.hear(); f.finished.Do(func() { close(f.done) }) }
 func (f *fakeTurn) SpeechEnded() <-chan struct{} { return f.speech }
 func (f *fakeTurn) Done() <-chan struct{}        { return f.done }
-func (f *fakeTurn) Await() esphome.Answer        { <-f.done; return f.answer }
+func (f *fakeTurn) Await() esphome.Answer {
+	<-f.done
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.answer
+}
+
+func (f *fakeTurn) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
 
 func (f *fakeTurn) Close() error {
 	f.mu.Lock()
@@ -146,6 +161,7 @@ func intercepting(t *testing.T, turn *fakeTurn, startErr error) (*http.Client, *
 			close(done)
 			return done, nil
 		},
+		Fail: func() { played = append(played, "error tone") },
 	})
 	r.Intercept(true)
 	return client, r, amazon, &played
@@ -298,8 +314,9 @@ func TestAFailedTurnNeverReachesAmazon(t *testing.T) {
 	if got := amazon.got(); len(got) != 0 {
 		t.Errorf("Amazon got %d requests for a turn home assistant failed", len(got))
 	}
-	if len(names) == 0 || names[len(names)-1] != "RequestProcessingCompleted" || len(*played) != 0 {
-		t.Errorf("got %q and played %q; want the turn closed with nothing said", names, *played)
+	if len(names) == 0 || names[len(names)-1] != "RequestProcessingCompleted" ||
+		strings.Join(*played, "|") != "error tone" {
+		t.Errorf("got %q and played %q; want the turn closed with the error tone", names, *played)
 	}
 	if !turn.closed {
 		t.Error("the failed turn was not closed")
@@ -307,7 +324,7 @@ func TestAFailedTurnNeverReachesAmazon(t *testing.T) {
 }
 
 func TestWithNoSatelliteTheTurnEndsUnanswered(t *testing.T) {
-	client, _, amazon, _ := intercepting(t, nil, errors.New("not subscribed"))
+	client, _, amazon, played := intercepting(t, nil, errors.New("not subscribed"))
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	go pw.Write([]byte(uploadPart("metadata", "application/json", recognize("640")) +
@@ -318,6 +335,9 @@ func TestWithNoSatelliteTheTurnEndsUnanswered(t *testing.T) {
 	}
 	if got := amazon.got(); len(got) != 0 {
 		t.Errorf("Amazon got %d requests with no satellite", len(got))
+	}
+	if strings.Join(*played, "|") != "error tone" {
+		t.Errorf("played %q with no satellite, want the error tone", *played)
 	}
 }
 
@@ -384,5 +404,169 @@ func TestTheAudioPartIsPassedOnWhateverTheChunking(t *testing.T) {
 		if string(got) != audio {
 			t.Errorf("in %d-byte chunks the audio came out as %d bytes, want %d", size, len(got), len(audio))
 		}
+	}
+}
+
+type tones struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *tones) play() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *tones) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func answering(t *testing.T, turn *fakeTurn, announce func(string) (<-chan struct{}, error)) (*http.Client, *tones) {
+	t.Helper()
+	return answeringWith(t, func(context.Context) (Turn, error) { return turn, nil }, announce)
+}
+
+func answeringWith(t *testing.T, start func(context.Context) (Turn, error),
+	announce func(string) (<-chan struct{}, error)) (*http.Client, *tones) {
+	t.Helper()
+	client, r := proxied(t, (&amazonLog{}).handler())
+	r.decoder = func() (decoder, error) { return fakeDecoder{}, nil }
+	heard := &tones{}
+	r.UseAnswerer(Answerer{Start: start, Announce: announce, Fail: heard.play})
+	r.Intercept(true)
+	return client, heard
+}
+
+func runTurn(t *testing.T, client *http.Client) []string {
+	t.Helper()
+	body := uploadPart("metadata", "application/json", recognize("0")) +
+		uploadPart("audio", "application/octet-stream", packets(8)) + "\r\n--" + uploadBoundary + "--\r\n"
+	var names []string
+	for d := range directives(t, post(t, client, strings.NewReader(body))) {
+		names = append(names, d.name)
+	}
+	return names
+}
+
+func TestAnAnswerThatCameWithAnErrorIsSpokenWithoutTheTone(t *testing.T) {
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{URL: "http://ha/a.flac", Err: errors.New("left after the answer")})
+	var played []string
+	client, heard := answering(t, turn, func(url string) (<-chan struct{}, error) {
+		played = append(played, url)
+		done := make(chan struct{})
+		close(done)
+		return done, nil
+	})
+	runTurn(t, client)
+	if len(played) != 1 || heard.count() != 0 {
+		t.Errorf("played %q and %d tones; an answer that arrived is spoken, with no error tone", played, heard.count())
+	}
+}
+
+func TestAnAnswerThatCannotPlayGetsTheTone(t *testing.T) {
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{URL: "ftp://ha/a.flac"})
+	client, heard := answering(t, turn, func(string) (<-chan struct{}, error) {
+		return nil, errors.New("clip: the url is not http or https")
+	})
+	runTurn(t, client)
+	if heard.count() != 1 {
+		t.Errorf("played %d tones for an answer the clip player refused; want the error tone", heard.count())
+	}
+}
+
+func TestATurnAlexaAbandonsGetsNoTone(t *testing.T) {
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{})
+	turn.hold = true
+	client, heard := answeringWith(t, func(ctx context.Context) (Turn, error) {
+		go func() {
+			<-ctx.Done()
+			turn.mu.Lock()
+			turn.answer.Err = ctx.Err()
+			turn.mu.Unlock()
+			turn.finish()
+		}()
+		return turn, nil
+	}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+Endpoint+eventsPath,
+		strings.NewReader(uploadPart("metadata", "application/json", recognize("0"))+
+			uploadPart("audio", "application/octet-stream", packets(8))+"\r\n--"+uploadBoundary+"--\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+uploadBoundary)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := directives(t, resp)
+	next(t, ds)
+	next(t, ds)
+	cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for !turn.isClosed() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !turn.isClosed() {
+		t.Fatal("the handler never closed the turn")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if heard.count() != 0 {
+		t.Errorf("played %d tones for a turn Alexa cancelled; want none", heard.count())
+	}
+}
+
+func TestACommandWithNothingToSayIsSilent(t *testing.T) {
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{Transcript: "turn on the light"})
+	client, heard := answering(t, turn, nil)
+	runTurn(t, client)
+	if heard.count() != 0 {
+		t.Errorf("played %d tones after a command that worked but said nothing; want none", heard.count())
+	}
+}
+
+func TestAWakeWordDuringABusyTurnIsSilent(t *testing.T) {
+	client, heard := answeringWith(t, func(context.Context) (Turn, error) {
+		return nil, esphome.ErrTurnRunning
+	}, nil)
+	runTurn(t, client)
+	if heard.count() != 0 {
+		t.Errorf("played %d tones for a wake word while a turn was closing; want none", heard.count())
+	}
+}
+
+func TestAWakeWordWithNothingAfterItIsSilent(t *testing.T) {
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{Code: "stt-no-text-recognized", Err: errors.New("No text recognized")})
+	client, heard := answering(t, turn, nil)
+	if names := runTurn(t, client); len(names) == 0 || names[len(names)-1] != "RequestProcessingCompleted" {
+		t.Errorf("got %q, want the turn closed", names)
+	}
+	if heard.count() != 0 {
+		t.Errorf("played %d tones when nobody spoke after the wake word; Amazon ends that turn silently", heard.count())
+	}
+}
+
+func TestATurnHomeAssistantNeverFinishesGetsTheTone(t *testing.T) {
+	saved := turnLimit
+	turnLimit = 300 * time.Millisecond
+	defer func() { turnLimit = saved }()
+	turn := newFakeTurn(opus.FrameSamples, esphome.Answer{})
+	turn.hold = true
+	client, heard := answeringWith(t, func(ctx context.Context) (Turn, error) {
+		go func() {
+			<-ctx.Done()
+			turn.mu.Lock()
+			turn.answer.Err = ctx.Err()
+			turn.mu.Unlock()
+			turn.finish()
+		}()
+		return turn, nil
+	}, nil)
+	runTurn(t, client)
+	if heard.count() != 1 {
+		t.Errorf("played %d tones when home assistant never answered; want the error tone", heard.count())
 	}
 }

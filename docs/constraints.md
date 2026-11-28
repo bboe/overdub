@@ -124,9 +124,9 @@
 
 ## Sound
 
-- The chime is generated, not stored or encoded. `internal/audio` renders two
-  sine tones, at the frequencies Amazon's own chime uses, measured by DFT.
-  docs/audio.md has the numbers.
+- The chime and the error tone are generated, not stored or encoded.
+  `internal/audio` renders sine tones: the chime's at the frequencies Amazon's
+  own chime uses, measured by DFT. docs/audio.md has the numbers.
 - A clip is played by the daemon. Fire OS 5 handed Alexa the URL, and her
   synthesizer decoded it; Fire OS 6 has no way in. Home Assistant transcodes
   the URL to FLAC, and the decoder Sendspin already links decodes it, so no

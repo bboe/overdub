@@ -29,13 +29,25 @@ var chimeNotes = []note{
 	{freq: 1320.0, start: 0.18, dur: 0.22}, // E6
 }
 
-func chimePCM(rate int) []byte {
-	frames := int(chimeSeconds * float64(rate))
+const errorSeconds = 0.60
+
+var errorNotes = []note{
+	{freq: 440.0, start: 0.00, dur: 0.11}, // A4
+	{freq: 440.0, start: 0.19, dur: 0.11}, // A4
+	{freq: 440.0, start: 0.38, dur: 0.11}, // A4
+}
+
+func chimePCM(rate int) []byte { return tonePCM(chimeNotes, chimeSeconds, rate) }
+
+func errorPCM(rate int) []byte { return tonePCM(errorNotes, errorSeconds, rate) }
+
+func tonePCM(notes []note, seconds float64, rate int) []byte {
+	frames := int(seconds * float64(rate))
 	buf := make([]byte, frames*ChimeChannels*2)
 	for i := range frames {
 		t := float64(i) / float64(rate)
 		var v float64
-		for _, n := range chimeNotes {
+		for _, n := range notes {
 			if t < n.start || t >= n.start+n.dur {
 				continue
 			}
@@ -49,7 +61,7 @@ func chimePCM(rate int) []byte {
 			}
 			v += env * math.Sin(2*math.Pi*n.freq*age)
 		}
-		if left := chimeSeconds - t; left < chimeFade {
+		if left := seconds - t; left < chimeFade {
 			v *= left / chimeFade
 		}
 		v = min(max(v*chimeGain, -1), 1)

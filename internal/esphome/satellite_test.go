@@ -198,8 +198,9 @@ func TestAPipelineErrorEndsTheTurn(t *testing.T) {
 	handleWithin(t, s, c, msgVoiceEvent, voiceEvent(voiceEventRunStart))
 	handleWithin(t, s, c, msgVoiceEvent, voiceEvent(voiceEventError, "code", "stt-no-text-recognized", "message", "No text"))
 	got := awaitWithin(t, turn)
-	if got.Err == nil || !strings.Contains(got.Err.Error(), "stt-no-text-recognized") {
-		t.Errorf("got %v, want the pipeline's error code", got.Err)
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "stt-no-text-recognized") ||
+		got.Code != "stt-no-text-recognized" {
+		t.Errorf("got %v and code %q, want the pipeline's error code in both", got.Err, got.Code)
 	}
 	select {
 	case <-turn.SpeechEnded():

@@ -268,8 +268,9 @@ Each entity id is `<domain>.<name>_<suffix>`.
     offline: her timers, alarms, reminders, music and smart-home control,
     including what her on-device engine runs without the internet. Timers do
     not work through Home Assistant yet either. If Home Assistant is not
-    connected, or its pipeline fails, the turn ends with nothing said: Alexa
-    never answers in `intercept`. In `monitor`,
+    connected, or cannot answer, the Dot plays three low beeps and the turn
+    ends: Alexa never answers in `intercept`. Saying only the wake word ends
+    the turn silently. In `monitor`,
     `alexa_reply` takes each part of Alexa's answer as she says it, so its
     history reads as the whole answer. A part over 255 bytes arrives in
     pieces. The other modes empty it. Amazon does not send what you asked, so

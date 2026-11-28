@@ -606,3 +606,28 @@ I/PuffinApp( 1003): [e:5f] FocusManager:releaseChannel:channelName=Dialog
 - The chime is generated at both rates, once at startup. A mono 48 kHz clip
   took 12.7 ms on the Dot; the stereo clips are not timed. The resident cost is
   about 163 KB: clips of 76,800 and 70,560 bytes, and the 15,360-byte pool.
+
+## The error tone
+
+- `intercept` plays it when Home Assistant cannot answer a turn: it is not
+  connected, the decoder does not load, the pipeline fails or takes more
+  than 30 seconds, or the clip player refuses the answer's URL.
+  docs/voice.md has the turn.
+- It does not play when an answer plays, even one that came with an error,
+  such as Home Assistant leaving after it sent the URL; when a command
+  worked and the pipeline had nothing to say; for a turn Alexa cancelled, by
+  a barge-in, a tap or a new wake word; or for a wake word heard while the
+  last turn is still closing, which finds a turn already running.
+- It does not play when nobody spoke after the wake word. Home Assistant
+  reports that as an error, `stt-no-text-recognized`, but Amazon ends such a
+  turn silently, and a television saying the wake word would otherwise beep.
+- A clip that the player accepts and then fails to fetch or decode ends in
+  silence: the player reports that to Home Assistant, not to the relay.
+- It is 3 beeps at A4, 440 Hz, 0.11 seconds each with 0.08-second gaps:
+  low, so it does not read as the chime, and three short sounds, the S of
+  SOS.
+- It is generated like the chime, by the same renderer, with the same ramps,
+  fade and gain, at both rates at startup. Its last beep ends at 0.49
+  seconds and the clip at 0.60, so the fade falls on silence and the beeps
+  are whole. The clips are 115,200 and 105,840 bytes, which takes the chime's
+  resident cost from about 163 KB to about 384 KB.
